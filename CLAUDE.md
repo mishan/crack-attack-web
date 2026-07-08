@@ -157,9 +157,16 @@ just use `pnpm` directly.
       landing `notifyImpact`), `startFalling` (hang alarm, grid restamp, upward
       combo-fall cascade into blocks/garbage), and `initializeAwaking`. Wired into
       `GameSim.stepResidents` (garbage advances the walk cursor over its footprint)
-      and the `startGarbageFalling` hook. Still `TODO(shatter)`: the shatter
-      _trigger_ — `Garbage.startShattering`, the Grid `shatterGarbage` detection,
-      and the `newAwakingGarbage`/`newAwakingBlock` factories → next branch.
+      and the `startGarbageFalling` hook.
+- [x] Phase 1.6 — **Garbage shattering landed**: an elimination touching a slab
+      now shatters it. `Grid.shatterGarbage` marks connected garbage (gray/black
+      consent rules), and a synchronization pass drives `Garbage.startShattering`,
+      converting each row into staggered-pop awaking blocks
+      (`BlockManager.newAwakingBlock`, with its own `*_a` flavor history) or, for
+      shatter-to-garbage flavors/odd full-width rows, a fresh awaking garbage
+      (`GarbageManager.newAwakingGarbage`). The garbage-to-garbage `chanceIn`
+      draw is short-circuited exactly as in the C++ to preserve RNG order.
+      Sound/Spring/X extreme effects are render-only and omitted.
 - [~] Phase 1.7 (partial) — Controller/ActionState input snapshot (`controller.ts`);
   ActionRecorder replay still to come.
 - [ ] `tools/replay-check` digest harness + C++ instrumentation
