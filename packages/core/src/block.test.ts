@@ -9,10 +9,11 @@ import {
   BlockManager,
 } from './block.js';
 import { GR_BLOCK, Grid } from './grid.js';
+import { Rng } from './rng.js';
 
 describe('BlockManager store', () => {
   it('starts empty with a fully allocated pool', () => {
-    const bm = new BlockManager(new Grid());
+    const bm = new BlockManager(new Grid(), new Rng(1));
     expect(bm.block_count).toBe(0);
     expect(bm.blockStore).toHaveLength(GC_BLOCK_STORE_SIZE);
     expect(bm.blockStore.every((b, i) => b.id === i)).toBe(true);
@@ -21,7 +22,7 @@ describe('BlockManager store', () => {
 
   it('newBlock allocates the lowest free id and registers it in the grid', () => {
     const grid = new Grid();
-    const bm = new BlockManager(grid);
+    const bm = new BlockManager(grid, new Rng(1));
 
     bm.newBlock(2, 3, BF_NORMAL_1);
     expect(bm.block_count).toBe(1);
@@ -40,7 +41,7 @@ describe('BlockManager store', () => {
   });
 
   it('deleteBlock frees the slot and lowers the count', () => {
-    const bm = new BlockManager(new Grid());
+    const bm = new BlockManager(new Grid(), new Rng(1));
     bm.newBlock(0, 0, BF_NORMAL_1);
     const block = bm.block(0);
     bm.deleteBlock(block);
@@ -49,7 +50,7 @@ describe('BlockManager store', () => {
   });
 
   it('throws on a double-free', () => {
-    const bm = new BlockManager(new Grid());
+    const bm = new BlockManager(new Grid(), new Rng(1));
     bm.newBlock(0, 0, BF_NORMAL_1);
     const block = bm.block(0);
     bm.deleteBlock(block);
@@ -67,14 +68,14 @@ describe('BlockManager store', () => {
   });
 
   it('block(id) rejects an out-of-range id', () => {
-    const bm = new BlockManager(new Grid());
+    const bm = new BlockManager(new Grid(), new Rng(1));
     expect(() => bm.block(-1)).toThrow(RangeError);
     expect(() => bm.block(GC_BLOCK_STORE_SIZE)).toThrow(RangeError);
   });
 
   it('reuses freed ids (lowest-first)', () => {
     const grid = new Grid();
-    const bm = new BlockManager(grid);
+    const bm = new BlockManager(grid, new Rng(1));
     bm.newBlock(0, 0, BF_NORMAL_1); // id 0
     bm.newBlock(1, 0, BF_NORMAL_1); // id 1
     bm.deleteBlock(bm.block(0)); // frees slot 0
@@ -87,7 +88,7 @@ describe('BlockManager store', () => {
     // Use a tall single column fill within grid bounds is unnecessary; just
     // exercise the guard by faking a full count via many placements.
     const grid = new Grid();
-    const bm = new BlockManager(grid);
+    const bm = new BlockManager(grid, new Rng(1));
     // Fill the grid legally: 6 wide * 45 tall = 270 === store size.
     let placed = 0;
     for (let x = 0; x < 6; x++) {
@@ -106,7 +107,7 @@ describe('BlockManager store', () => {
 
   it('shiftUp increments y for every live block only', () => {
     const grid = new Grid();
-    const bm = new BlockManager(grid);
+    const bm = new BlockManager(grid, new Rng(1));
     bm.newBlock(0, 0, BF_NORMAL_1);
     bm.newBlock(1, 5, BF_NORMAL_1);
     bm.shiftUp();
@@ -117,7 +118,7 @@ describe('BlockManager store', () => {
 
 describe('BlockManager pop-direction sequencing', () => {
   it('cycles through the four directions', () => {
-    const bm = new BlockManager(new Grid());
+    const bm = new BlockManager(new Grid(), new Rng(1));
     // starts at BR_DIRECTION_1; each call advances then returns
     expect(bm.generatePopDirection()).toBe(BR_DIRECTION_2);
     expect(bm.generatePopDirection()).toBe(BR_DIRECTION_3);
@@ -127,7 +128,7 @@ describe('BlockManager pop-direction sequencing', () => {
   });
 
   it('generatePopDirectionN returns current and advances n steps', () => {
-    const bm = new BlockManager(new Grid());
+    const bm = new BlockManager(new Grid(), new Rng(1));
     // first advance to a known point
     bm.generatePopDirection(); // -> DIRECTION_2 is "current" next
     const got = bm.generatePopDirectionN(2);
@@ -137,7 +138,7 @@ describe('BlockManager pop-direction sequencing', () => {
   });
 
   it('generatePopDirectionN(0) is a single no-op advance, not an infinite loop', () => {
-    const bm = new BlockManager(new Grid());
+    const bm = new BlockManager(new Grid(), new Rng(1));
     // starts at DIRECTION_1; one advance to DIRECTION_2 is returned, no extra steps
     expect(bm.generatePopDirectionN(0)).toBe(BR_DIRECTION_2);
     expect(bm.generatePopDirection()).toBe(BR_DIRECTION_3);
@@ -146,7 +147,7 @@ describe('BlockManager pop-direction sequencing', () => {
 
 describe('BlockManager.shiftUp integrity', () => {
   it('throws instead of hanging when block_count is out of sync', () => {
-    const bm = new BlockManager(new Grid());
+    const bm = new BlockManager(new Grid(), new Rng(1));
     // corrupt the count to be larger than the number of mapped slots
     (bm as unknown as { block_count: number }).block_count = 3;
     expect(() => bm.shiftUp()).toThrow(/out of sync/);

@@ -7,10 +7,11 @@
  *
  * Scope for this phase (1.3): the element store, its state flags, the inline
  * accessors, the top-row trackers, and the check-registry → combo linkage.
- * Deferred:
+ * Phase 1.4 adds `shiftGridUp` (grid rise); the RNG initial board fill that the
+ * C++ `Grid::gameStart` performs lives in `board.ts` (`generateInitialBoard`),
+ * which coordinates the grid with the block store. Deferred:
  *   - `Grid::timeStep` physics (falling/hanging/shatter/elimination) → Phase 1.6
- *   - RNG-driven initial board generation in `Grid::gameStart` → Phase 1.4
- *   - `LevelLights` integration inside `notifyImpact` → Phase 1.4
+ *   - `LevelLights` integration (Displayer/Communicator subsystem) → Phase 2
  *   - `shatterGarbage` / `handleEliminationCheckRequest` → Phase 1.5
  *
  * As with the managers, this is an instance (the future `GameSim` owns one),
@@ -281,8 +282,49 @@ export class Grid implements BlockGridSink, GarbageGridSink {
     const impact_top = y + height - 1;
     if (this.top_effective_row < impact_top) {
       this.top_effective_row = impact_top;
-      // TODO(Phase 1.4): LevelLights.levelRaise(this.top_effective_row)
+      // TODO(LevelLights): levelRaise(this.top_effective_row) — LevelLights is a
+      // display/netcode subsystem (Displayer + Communicator), deferred to Phase 2.
     }
-    // TODO(Phase 1.4): LevelLights.notifyImpact(y, height)
+    // TODO(LevelLights): notifyImpact(y, height)
+  }
+
+  /**
+   * Shift the whole board up one grid cell, opening an empty bottom row for a
+   * new creep row. Returns false (no shift) when the stack already reaches the
+   * top. Mirrors the grid-array half of `Grid::shiftGridUp` (Grid.cxx:339).
+   *
+   * The C++ version also calls `BlockManager::shiftUp`, `GarbageManager::shiftUp`,
+   * `Swapper::shiftUp`, and `LevelLights::levelRaise`. Those cross-subsystem
+   * side-effects are composed by {@link shiftBoardUp} (board.ts) in the same
+   * order, keeping this method a pure grid operation.
+   */
+  shiftGridUp(): boolean {
+    if (this.top_occupied_row === GC_PLAY_HEIGHT - 1) return false;
+
+    // Copy rows upward from the top down, so no source is clobbered before use.
+    for (let y = this.top_occupied_row + 1; y--;) {
+      for (let x = GC_PLAY_WIDTH; x--;) {
+        const src = this.at(x, y);
+        const dst = this.at(x, y + 1);
+        dst.state = src.state;
+        dst.resident_type = src.resident_type;
+        dst.resident = src.resident;
+      }
+    }
+
+    // Clear the new bottom row. (The C++ only does this under NDEBUG-off; our
+    // accessors always enforce the empty invariant, so we always clear.)
+    for (let x = GC_PLAY_WIDTH; x--;) {
+      const e = this.at(x, 0);
+      e.state = GR_EMPTY;
+      e.resident_type = GR_EMPTY;
+      e.resident = null;
+    }
+
+    this.top_occupied_row++;
+    this.top_effective_row++;
+    // TODO(LevelLights): levelRaise(this.top_effective_row) — deferred (Phase 2).
+
+    return true;
   }
 }
