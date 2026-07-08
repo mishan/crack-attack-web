@@ -133,6 +133,29 @@ describe('Grid safe-height + impact tracking', () => {
   });
 });
 
+describe('Grid.shiftGridUp', () => {
+  it('moves occupied cells up one row and clears the bottom', () => {
+    const grid = new Grid();
+    const b = mkBlock(0, BF_NORMAL_1);
+    grid.addBlock(0, 1, b, GR_BLOCK);
+    grid.top_occupied_row = 1;
+
+    expect(grid.shiftGridUp()).toBe(true);
+    expect(grid.stateAt(0, 0)).toBe(GR_EMPTY); // new empty bottom row
+    expect(grid.stateAt(0, 2)).toBe(GR_BLOCK); // block moved from row 1 to row 2
+    expect(grid.blockAt(0, 2)).toBe(b);
+    expect(grid.top_occupied_row).toBe(2);
+    expect(grid.top_effective_row).toBe(1); // 0 + 1
+  });
+
+  it('returns false at the top without shifting', () => {
+    const grid = new Grid();
+    grid.top_occupied_row = GC_PLAY_HEIGHT - 1;
+    expect(grid.shiftGridUp()).toBe(false);
+    expect(grid.top_occupied_row).toBe(GC_PLAY_HEIGHT - 1);
+  });
+});
+
 describe('Grid.gameStart', () => {
   it('clears residents and resets trackers', () => {
     const grid = new Grid();
