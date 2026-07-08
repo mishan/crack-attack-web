@@ -1,0 +1,19 @@
+{
+  "name": "@crack-attack/replay-check",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Golden-master harness: run a seed + action stream through @crack-attack/core and diff the per-tick state digest (against a C++ log or a stored golden master).",
+  "license": "GPL-2.0-or-later",
+  "type": "module",
+  "main": "./dist/index.js",
+  "bin": {
+    "replay-check": "./dist/cli.js"
+  },
+  "scripts": {
+    "build": "tsc -b",
+    "clean": "rm -rf dist tsconfig.tsbuildinfo"
+  },
+  "dependencies": {
+    "@crack-attack/core": "workspace:*"
+  }
+}

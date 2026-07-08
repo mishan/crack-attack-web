@@ -1,0 +1,14 @@
+{
+  "seed": 12345,
+  "ticks": 120,
+  "actions": [
+    { "tick": 3, "command": 8 },
+    { "tick": 9, "command": 8 },
+    { "tick": 15, "command": 16 },
+    { "tick": 30, "command": 32 },
+    { "tick": 45, "command": 32 },
+    { "tick": 60, "command": 32 },
+    { "tick": 75, "command": 4 },
+    { "tick": 90, "command": 32 }
+  ]
+}
