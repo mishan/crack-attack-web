@@ -104,6 +104,14 @@ export const BR_DIRECTION_4 = 1 << 3;
 export class Block {
   /** Free-store id (index into the manager's store). `Block.h:74` */
   id = 0;
+  /**
+   * TS-only: how many times this pool slot has been (re)allocated. `id` alone is
+   * a reusable slot index — the same `id` can name a different block after a
+   * delete + allocate — so `(id, generation)` is the stable per-lifetime key the
+   * client uses to match a sprite across ticks. Not a ported field; never in the
+   * sim digest and never drawn from the RNG.
+   */
+  generation = 0;
   /** Block color/flavor (BF_*). `Block.h:77` */
   flavor = 0;
   /** Grid column; for a block between cells this is the lowest/left edge. `Block.h:81` */
@@ -449,6 +457,7 @@ export class BlockManager {
     for (let n = 0; n < GC_BLOCK_STORE_SIZE; n++) {
       this.storeMap[n] = false;
       this.blockStore[n]!.id = n;
+      this.blockStore[n]!.generation = 0;
     }
 
     this.last_flavor_a = 0;
@@ -709,6 +718,8 @@ export class BlockManager {
     if (this.storeMap[id]) throw new Error(`BlockManager: double-allocate of id ${id}`);
     this.storeMap[id] = true;
     this.block_count++;
+    // Bump the slot's lifetime counter so reused ids get a fresh (id, generation).
+    this.blockStore[id]!.generation++;
   }
 
   private freeId(id: number): void {

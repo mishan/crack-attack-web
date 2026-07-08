@@ -79,6 +79,12 @@ export const GS_SHATTERING = 1 << 3;
 export class Garbage {
   /** Free-store id. `Garbage.h:100` */
   id = 0;
+  /**
+   * TS-only: pool-slot (re)allocation count, so `(id, generation)` is a stable
+   * per-lifetime key (an `id` alone is a reusable slot index). Used by the client
+   * to match a slab across ticks; not a ported field, never in the sim digest.
+   */
+  generation = 0;
   /** Garbage flavor (GF_*). `Garbage.h:103` */
   flavor = 0;
   /** Grid position (lowest/left cell). `Garbage.h:106` */
@@ -515,6 +521,7 @@ export class GarbageManager {
     for (let n = 0; n < GC_GARBAGE_STORE_SIZE; n++) {
       this.storeMap[n] = false;
       this.garbageStore[n]!.id = n;
+      this.garbageStore[n]!.generation = 0;
     }
   }
 
@@ -688,6 +695,8 @@ export class GarbageManager {
     if (this.storeMap[id]) throw new Error(`GarbageManager: double-allocate of id ${id}`);
     this.storeMap[id] = true;
     this.garbage_count++;
+    // Bump the slot's lifetime counter so reused ids get a fresh (id, generation).
+    this.garbageStore[id]!.generation++;
   }
 
   private freeId(id: number): void {

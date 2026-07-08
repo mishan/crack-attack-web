@@ -33,6 +33,14 @@ import {
 export type BlockPhase = 'resting' | 'falling' | 'swapping' | 'dying' | 'awaking';
 
 export interface BlockSprite {
+  /**
+   * Pool-slot id. NOT stable on its own — the core reuses slot ids after a block
+   * is deleted — so pair it with {@link generation} to match a sprite across
+   * ticks (see {@link ViewInterpolator}).
+   */
+  readonly id: number;
+  /** Slot (re)allocation count; `(id, generation)` is the stable per-lifetime key. */
+  readonly generation: number;
   /** Grid column. */
   readonly x: number;
   /** Grid row (integer target row). */
@@ -49,6 +57,13 @@ export interface BlockSprite {
 }
 
 export interface GarbageSprite {
+  /**
+   * Pool-slot id, reused after a slab is deleted — pair it with {@link generation}
+   * to match a slab across ticks (see {@link ViewInterpolator}).
+   */
+  readonly id: number;
+  /** Slot (re)allocation count; `(id, generation)` is the stable per-lifetime key. */
+  readonly generation: number;
   /** Origin (lowest-left) cell. */
   readonly x: number;
   readonly y: number;
@@ -90,10 +105,10 @@ function blockPhase(state: number): BlockPhase {
 }
 
 /**
- * Build the render model for `sim`. `alpha` is the inter-tick fraction from the
- * fixed-timestep loop; it is part of the contract for future interpolation.
+ * Build the render model for `sim` at its current tick. Smooth motion between
+ * ticks is the job of the {@link ViewInterpolator}, which blends two of these.
  */
-export function deriveViewModel(sim: GameSim, _alpha = 0): BoardViewModel {
+export function deriveViewModel(sim: GameSim): BoardViewModel {
   const grid = sim.grid;
   const blocks: BlockSprite[] = [];
   const garbage: GarbageSprite[] = [];
@@ -110,6 +125,8 @@ export function deriveViewModel(sim: GameSim, _alpha = 0): BoardViewModel {
       if (rt & GR_BLOCK) {
         const b = grid.blockAt(x, y);
         blocks.push({
+          id: b.id,
+          generation: b.generation,
           x,
           y,
           renderY: y + b.f_y / GC_STEPS_PER_GRID + creepOffset,
@@ -122,6 +139,8 @@ export function deriveViewModel(sim: GameSim, _alpha = 0): BoardViewModel {
         // Emit each slab once, at its origin cell.
         if (g.x === x && g.y === y) {
           garbage.push({
+            id: g.id,
+            generation: g.generation,
             x,
             y,
             renderY: y + g.f_y / GC_STEPS_PER_GRID + creepOffset,

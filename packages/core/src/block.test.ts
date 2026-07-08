@@ -57,6 +57,15 @@ describe('BlockManager store', () => {
     expect(() => bm.deleteBlock(block)).toThrow(/double-free/);
   });
 
+  it('bumps a slot generation on every (re)allocation', () => {
+    const bm = new BlockManager(new Grid(), new Rng(1));
+    bm.newBlock(0, 0, BF_NORMAL_1);
+    const first = bm.block(0).generation; // allocated once
+    bm.deleteBlock(bm.block(0)); // free slot 0
+    bm.newBlock(1, 1, BF_NORMAL_2); // lowest free slot is 0 again → new lifetime
+    expect(bm.block(0).generation).toBe(first + 1);
+  });
+
   it('rolls back the allocation when placement fails (no leaked slot)', () => {
     const grid = new Grid();
     const bm = new BlockManager(grid);
