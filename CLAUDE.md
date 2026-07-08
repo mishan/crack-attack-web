@@ -37,8 +37,8 @@ packages/
   client/    # Three.js renderer, input, HUD, audio (Vite app) — WIP
   server/    # lobby + lockstep relay (Node, ws) — WIP
 tools/
-  replay-check/  # golden-master harness: core vs C++ per-tick digests (planned)
-  obj2gltf/      # one-time .obj -> glTF asset conversion (planned)
+  replay-check/  # golden-master harness: core vs C++ per-tick digests
+  obj2gltf/      # one-time Wavefront OBJ (+MTL) -> glTF 2.0 asset conversion
 crack-attack/    # upstream C++ reference source — local only, gitignored (port from it)
 ```
 
