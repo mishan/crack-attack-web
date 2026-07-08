@@ -19,4 +19,5 @@ export * from './board.js';
 export * from './comboManager.js';
 export * from './garbageGenerator.js';
 export * from './controller.js';
+export * from './swapper.js';
 export * from './gameSim.js';

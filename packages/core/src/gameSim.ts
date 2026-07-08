@@ -36,6 +36,7 @@ import { GarbageManager } from './garbage.js';
 import { GarbageGenerator } from './garbageGenerator.js';
 import { GR_BLOCK, GR_EMPTY, Grid, type GridSimContext } from './grid.js';
 import { Rng } from './rng.js';
+import { Swapper } from './swapper.js';
 import { GC_PLAY_HEIGHT, GC_PLAY_WIDTH } from './constants.js';
 
 export class GameSim implements GridSimContext {
@@ -57,6 +58,8 @@ export class GameSim implements GridSimContext {
   readonly garbageStore: GarbageManager;
   readonly garbageGenerator: GarbageGenerator;
   readonly combos: ComboManager;
+  /** The player's swap cursor. */
+  readonly swapper = new Swapper();
 
   /**
    * Count of blocks currently awaking. Gameplay-relevant: Creep does not rise
@@ -103,6 +106,7 @@ export class GameSim implements GridSimContext {
     this.combos.gameStart();
     this.garbageGenerator.gameStart();
     this.grid.gameStart();
+    this.swapper.gameStart();
 
     // RNG-driven starting position: board fill, then the first creep row.
     generateInitialBoard(this.grid, this.blocks);
@@ -120,12 +124,8 @@ export class GameSim implements GridSimContext {
     // Game.cxx:383 — the tick counter advances at the top of a play step.
     this.clock.time_step++;
 
-    // Reference `actions` so the input contract is explicit; the systems that
-    // consume it (Swapper, Creep) are ported next.
-    void actions;
-
     // Game.cxx:386 — Swapper::timeStep(): continue/execute swaps and moves.
-    // TODO(physics): this.swapper.timeStep(actions)
+    this.swapper.timeStep(this, actions);
 
     // Game.cxx:399 — CountDownManager start-pause gate (intro countdown).
     // TODO(meta): start-pause gating
@@ -170,11 +170,10 @@ export class GameSim implements GridSimContext {
   }
 
   // --- BlockSimContext hooks -------------------------------------------------
-  // Bridges to subsystems not yet ported; no-ops for now (documented TODOs).
 
-  /** Swapper landing notification. No-op until the Swapper is ported. */
-  notifyLanding(_x: number, _y: number, _block: Block, _combo: ComboTabulator): void {
-    // TODO(Swapper): switch a swapping block's combo on landing (Swapper::notifyLanding).
+  /** A block landed — let the Swapper fold it into an in-progress swap's combo. */
+  notifyLanding(x: number, y: number, block: Block, combo: ComboTabulator): void {
+    this.swapper.notifyLanding(x, y, block, combo);
   }
 
   /** Start a garbage slab falling. No-op until Garbage physics is ported. */
