@@ -130,16 +130,19 @@ just use `pnpm` directly.
       injectable `GarbageOutSink` (solo deals locally; netcode/AI plug in here).
       Score reporting (display) and cosmetic Sign/Sparkle effects deferred; the
       `GarbageQueue` class is AI-only → Phase 3.
-- [~] Phase 1.6 — **GameSim driver + Block physics landed**: `gameSim.ts` owns
-  the Clock, gameplay Rng, Grid, and all managers; `gameStart` wires the C++
-  RNG-draw order (board fill → first creep row); `step(actions)` replicates
-  `Game::idlePlay`'s gameplay tick order and now walks the grid stepping block
-  residents. Block physics (`block.ts` `timeStep` fall/hang/dying/awaking,
-  `startFalling`/`startDying`/`startSwapping`/`finishSwapping`, `initializeAwaking`)
-  runs against a `BlockSimContext` (GameSim). Cosmetic death axes use a separate
-  unsynced `cosmeticRng`. Still `TODO(physics)`: Swapper, Creep, the Grid
-  elimination detector, and Garbage `timeStep` (the `notifyLanding` /
-  `startGarbageFalling` hooks are stubbed until those land).
+- [~] Phase 1.6 — **GameSim driver + Block physics + elimination detector
+  landed**: `gameSim.ts` owns the Clock, gameplay Rng, Grid, and all managers;
+  `gameStart` wires the C++ RNG-draw order (board fill → first creep row);
+  `step(actions)` replicates `Game::idlePlay`'s gameplay tick order (step block
+  residents → `Grid.timeStep` → ComboManager → GarbageGenerator). Block physics
+  (`block.ts` `timeStep` fall/hang/dying/awaking + `startFalling`/`startDying`/
+  `startSwapping`/`finishSwapping`/`initializeAwaking`) and the Grid elimination
+  detector (`Grid.timeStep` drain + `handleEliminationCheckRequest` 4-direction
+  pattern scan → `startDying` → combo) run against a `BlockSimContext` /
+  `GridSimContext` (GameSim). Cosmetic death axes use a separate unsynced
+  `cosmeticRng`. Still `TODO(physics)`: Swapper, Creep, and Garbage `timeStep` /
+  shattering (the `notifyLanding` / `startGarbageFalling` / `shatterGarbage`
+  hooks are stubbed until those land).
 - [~] Phase 1.7 (partial) — Controller/ActionState input snapshot (`controller.ts`);
   ActionRecorder replay still to come.
 - [ ] `tools/replay-check` digest harness + C++ instrumentation

@@ -126,4 +126,16 @@ describe('GameSim.step', () => {
     for (let i = 0; i < 20; i++) sim.step(noActions());
     expect(snapshot(sim)).toBe(before);
   });
+
+  it('the valid starting board never spontaneously eliminates', () => {
+    // The generator guarantees no immediate matches, so the elimination detector
+    // must not fire on the starting board across many ticks and seeds.
+    for (const seed of [1, 2, 3, 42, 20260708]) {
+      const sim = new GameSim(seed);
+      const blocksBefore = sim.blocks.block_count;
+      for (let i = 0; i < 30; i++) sim.step(noActions());
+      expect(sim.dying_count).toBe(0);
+      expect(sim.blocks.block_count).toBe(blocksBefore);
+    }
+  });
 });

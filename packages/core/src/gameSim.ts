@@ -24,7 +24,7 @@
  * GPL-2.0-or-later.
  */
 
-import type { Block, BlockSimContext } from './block.js';
+import type { Block } from './block.js';
 import { BlockManager } from './block.js';
 import { generateInitialBoard } from './board.js';
 import { Clock } from './clock.js';
@@ -34,11 +34,11 @@ import type { ActionState } from './controller.js';
 import type { Garbage } from './garbage.js';
 import { GarbageManager } from './garbage.js';
 import { GarbageGenerator } from './garbageGenerator.js';
-import { GR_BLOCK, GR_EMPTY, Grid } from './grid.js';
+import { GR_BLOCK, GR_EMPTY, Grid, type GridSimContext } from './grid.js';
 import { Rng } from './rng.js';
 import { GC_PLAY_HEIGHT, GC_PLAY_WIDTH } from './constants.js';
 
-export class GameSim implements BlockSimContext {
+export class GameSim implements GridSimContext {
   /** Shared tick counter (mirrors `Game::time_step`). */
   readonly clock = new Clock();
   /** The seed this sim was created with; `gameStart` reseeds from it. */
@@ -139,7 +139,7 @@ export class GameSim implements BlockSimContext {
 
     // Game.cxx:429 — Grid::timeStep(): drain elimination checks, detect
     // patterns, start dying, update top rows.
-    // TODO(physics): this.grid.timeStep()
+    this.grid.timeStep(this);
 
     // Game.cxx:432 — ComboManager::timeStep(): finish/emit combos.
     this.combos.timeStep();
