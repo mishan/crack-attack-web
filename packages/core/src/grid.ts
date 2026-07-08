@@ -7,10 +7,10 @@
  *
  * Progression: the element store + accessors + check-registry linkage (1.3);
  * `shiftGridUp` grid rise (1.4); and `timeStep` + `handleEliminationCheckRequest`
- * — the block-pattern elimination detector — plus the top-row recompute (1.6,
- * this file). The RNG initial board fill lives in `board.ts`. Deferred:
- *   - garbage shattering: the `shatterGarbage` body and the shatter traversal
- *     inside `handleEliminationCheckRequest` → Garbage physics
+ * — the block-pattern elimination detector, including garbage shattering
+ * (`shatterGarbage` + the shatter-synchronization traversal) — plus the top-row
+ * recompute (1.6, this file). The RNG initial board fill lives in `board.ts`.
+ * Deferred:
  *   - `LevelLights` integration (Displayer/Communicator subsystem) → Phase 2
  *
  * As with the managers, this is an instance (GameSim owns one), not a static
@@ -21,6 +21,9 @@
 
 import {
   GC_BLOCK_STORE_SIZE,
+  GC_FINAL_POP_DELAY,
+  GC_INITIAL_POP_DELAY,
+  GC_INTERNAL_POP_DELAY,
   GC_MIN_PATTERN_LENGTH,
   GC_PLAY_HEIGHT,
   GC_PLAY_WIDTH,
@@ -28,9 +31,9 @@ import {
 } from './constants.js';
 import type { Block, BlockSimContext } from './block.js';
 import type { ComboManager } from './comboManager.js';
-import type { Garbage } from './garbage.js';
+import type { Garbage, GarbageManager } from './garbage.js';
 import type { ComboTabulator } from './combo.js';
-import { flavorMatch, isColorlessFlavor } from './flavors.js';
+import { GF_BLACK, flavorMatch, isColorlessFlavor } from './flavors.js';
 
 // --- Grid element states (Grid.h:37-43) ------------------------------------
 //
@@ -91,6 +94,8 @@ export interface GarbageGridSink {
  */
 export interface GridSimContext extends BlockSimContext {
   readonly combos: ComboManager;
+  /** Garbage store — the elimination detector shatters touching garbage into it. */
+  readonly garbageStore: GarbageManager;
 }
 
 /**
@@ -411,9 +416,9 @@ export class Grid implements BlockGridSink, GarbageGridSink {
    * for same-flavor runs, and if a run of >= GC_MIN_PATTERN_LENGTH exists in
    * either axis, start every block in the pattern dying and report the combo.
    *
-   * Garbage shattering (the `shatterGarbage` calls and the shatter traversal)
-   * is structurally preserved but currently no-ops on blocks; the garbage side
-   * lands with Garbage physics.
+   * Garbage touching the pattern is shattered: `shatterGarbage` marks the
+   * connected garbage, then a synchronization pass converts each slab into
+   * awaking blocks/garbage with staggered pop timers.
    */
   private handleEliminationCheckRequest(
     ctx: GridSimContext,
@@ -496,22 +501,99 @@ export class Grid implements BlockGridSink, GarbageGridSink {
       if (x < GC_PLAY_WIDTH - 1) for (let ky = b; ky < t; ky++) this.shatterGarbage(x + 1, ky);
     }
 
-    // TODO(Garbage physics): synchronize shattering garbage — compute
-    // awaken/pop delays from shatter_count (GC_INITIAL/FINAL/INTERNAL_POP_DELAY)
-    // and call garbage.startShattering across [shatter_bottom, shatter_top).
-    // With no garbage shattered yet, shatter_bottom > shatter_top (nothing to do).
+    // If any garbage touched the pattern, walk the shatter area and let each slab
+    // convert itself into awaking blocks/garbage; `startShattering` advances
+    // `sX`/`popDelay` (they'd be by-reference in the C++). Pop timers are
+    // synchronized so sections pop left-to-right, bottom-to-top; the whole area
+    // finishes awaking together after `awakenDelay`. The `shatter_count > 0` gate
+    // keeps the delay formula from evaluating `(count - 1)` at -1 and doesn't rely
+    // on the `shatter_bottom > shatter_top` empty-range invariant.
+    if (this.shatter_count > 0) {
+      const awakenDelay =
+        GC_INITIAL_POP_DELAY +
+        GC_FINAL_POP_DELAY +
+        GC_INTERNAL_POP_DELAY * (this.shatter_count - 1);
+      let popDelay = GC_INITIAL_POP_DELAY;
+      for (let sY = this.shatter_bottom; sY < this.shatter_top; sY++) {
+        let sX = 0;
+        while (sX < GC_PLAY_WIDTH) {
+          if (this.stateAt(sX, sY) & GR_SHATTERING) {
+            const res = this.garbageAt(sX, sY).startShattering(
+              ctx,
+              sX,
+              sY,
+              popDelay,
+              awakenDelay,
+              activeCombo,
+            );
+            sX = res.sX;
+            popDelay = res.popDelay;
+          } else {
+            sX++;
+          }
+        }
+      }
+    }
 
     activeCombo.reportElimination(magnitude, block, ctx.clock.time_step);
   }
 
   /**
-   * Begin shattering the garbage at (x, y), if any. Mirrors
-   * `Grid::shatterGarbage` (Grid.h:216). The body — considerShattering, marking
-   * GR_SHATTERING, recursing to connected garbage, and accumulating the shatter
-   * bounds — is deferred with Garbage physics; for now it is a no-op on blocks.
+   * Mark the garbage at (x, y) — and every slab connected to it — as shattering,
+   * accumulating the shatter bounds and count. Mirrors `Grid::shatterGarbage` +
+   * `shatterGarbage_inline_split_` (Grid.h:216 / Grid.cxx:303). Gray/black rules:
+   * a slab only shatters if it consents (`considerShattering`), and black needs a
+   * gray shatter in progress. The shattered cells are converted later by the
+   * synchronization pass in `handleEliminationCheckRequest`.
    */
-  private shatterGarbage(x: number, y: number, _dueTo: Garbage | null = null): void {
+  private shatterGarbage(x: number, y: number, dueTo: Garbage | null = null): void {
     if (!(this.stateAt(x, y) & GR_GARBAGE)) return;
-    // TODO(Garbage physics): shatter connected garbage from here.
+    const garbage = this.garbageAt(x, y);
+
+    // Ask the garbage whether it shatters; handle black ourselves.
+    if (!garbage.considerShattering(dueTo)) return;
+    if (garbage.flavor === GF_BLACK && !this.gray_shatter) return;
+
+    // Grow the shatter bounds to the slab's actual vertical span (`garbage.y ..
+    // garbage.y + garbage.height`). The C++ derives these from the *contact* row
+    // `y` (`y ± garbage.height`), which for a tall slab can run past the grid;
+    // its raw array reads tolerate that, but our bounds-checked `stateAt` in the
+    // traversal below would throw. Using the true span covers exactly the marked
+    // cells (so the traversal visits the same GR_SHATTERING cells in the same
+    // order) while keeping every visited row a valid index — garbage never sits
+    // on row 0, so the span stays within 1..GC_PLAY_HEIGHT-1.
+    if (garbage.y + garbage.height > this.shatter_top) {
+      this.shatter_top = garbage.y + garbage.height;
+    }
+    if (garbage.y < this.shatter_bottom) this.shatter_bottom = garbage.y;
+
+    this.shatter_count += garbage.width * garbage.height;
+
+    // Mark all of the slab's cells shattering.
+    for (let h = 0; h < garbage.height; h++) {
+      for (let w = 0; w < garbage.width; w++) {
+        this.changeState(garbage.x + w, garbage.y + h, garbage, GR_SHATTERING);
+      }
+    }
+
+    // Recurse into garbage touching each side (passing this slab as `dueTo`).
+    if (garbage.x > 0) {
+      for (let h = 0; h < garbage.height; h++)
+        this.shatterGarbage(garbage.x - 1, garbage.y + h, garbage);
+    }
+    if (garbage.x + garbage.width < GC_PLAY_WIDTH) {
+      for (let h = 0; h < garbage.height; h++) {
+        this.shatterGarbage(garbage.x + garbage.width, garbage.y + h, garbage);
+      }
+    }
+    if (garbage.y > 1) {
+      for (let w = 0; w < garbage.width; w++)
+        this.shatterGarbage(garbage.x + w, garbage.y - 1, garbage);
+    }
+    if (garbage.y + garbage.height < GC_PLAY_HEIGHT) {
+      for (let w = 0; w < garbage.width; w++) {
+        this.shatterGarbage(garbage.x + w, garbage.y + garbage.height, garbage);
+      }
+    }
   }
 }

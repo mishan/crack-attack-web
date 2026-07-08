@@ -398,14 +398,19 @@ export class BlockManager {
   private next_pop_direction = BR_DIRECTION_1;
 
   // Creep-generation flavor history — the "no three in a row (globally or per
-  // column)" avoidance state. `BlockManager.h:230-233, 202`. The awaking-block
-  // history (`*_a`) is added with `newAwakingBlock` in Phase 1.5.
+  // column)" avoidance state. `BlockManager.h:230-233, 202`.
   private last_flavor_c = 0;
   private second_to_last_flavor_c = 0;
   /** Per-column last creep base-flavor. Public: the initial board fill seeds it. `BlockManager.h:202` */
   readonly last_row_c: number[];
   /** Per-column second-to-last creep base-flavor. Public: seeded by the board fill. `BlockManager.h:202` */
   readonly second_to_last_row_c: number[];
+  // Awaking-block flavor history (the `*_a` set) — the same no-three-in-a-row
+  // avoidance, but for blocks minted when garbage shatters. `BlockManager.h:230-233`.
+  private last_flavor_a = 0;
+  private second_to_last_flavor_a = 0;
+  private readonly last_row_a: number[];
+  private readonly second_to_last_row_a: number[];
   /** Column chosen to receive a special block this creep row, or -1. `BlockManager.h:233` */
   private special_block_location = -1;
 
@@ -424,6 +429,8 @@ export class BlockManager {
     this.storeMap = new Array<boolean>(GC_BLOCK_STORE_SIZE);
     this.last_row_c = new Array<number>(GC_PLAY_WIDTH).fill(0);
     this.second_to_last_row_c = new Array<number>(GC_PLAY_WIDTH).fill(0);
+    this.last_row_a = new Array<number>(GC_PLAY_WIDTH).fill(0);
+    this.second_to_last_row_a = new Array<number>(GC_PLAY_WIDTH).fill(0);
     for (let n = 0; n < GC_BLOCK_STORE_SIZE; n++) {
       this.blockStore[n] = new Block();
       this.blockStore[n]!.id = n;
@@ -444,9 +451,13 @@ export class BlockManager {
       this.blockStore[n]!.id = n;
     }
 
+    this.last_flavor_a = 0;
+    this.second_to_last_flavor_a = 0;
     this.last_flavor_c = 0;
     this.second_to_last_flavor_c = 0;
     for (let x = 0; x < GC_PLAY_WIDTH; x++) {
+      this.last_row_a[x] = 0;
+      this.second_to_last_row_a[x] = 0;
       this.last_row_c[x] = 0;
       this.second_to_last_row_c[x] = 0;
     }
@@ -478,6 +489,65 @@ export class BlockManager {
     } catch (e) {
       // Roll back so a failed placement (occupied/out-of-bounds cell) doesn't
       // permanently leak a pool slot.
+      this.freeId(id);
+      throw e;
+    }
+  }
+
+  /**
+   * Allocate an awaking block at (x, y) — a block minted when garbage shatters.
+   * Mirrors `BlockManager::newAwakingBlock` (BlockManager.cxx:71): pick a flavor
+   * avoiding three-in-a-row (globally and per column) against the awaking-block
+   * history, then build it in the awaking state. One gameplay RNG draw (retried
+   * on a repeat), so draw order is load-bearing.
+   *
+   * The RNG draw and history update happen *before* the store-full check — on
+   * purpose, and faithfully: the C++ `newAwakingBlock` always draws and updates
+   * history, then delegates to `newBlock`, whose store-full guard is *internal*.
+   * So the reference consumes this draw even when the store is full. Skipping it
+   * to make this a "true no-op on exhaustion" would drop a draw the C++ makes and
+   * desync the shared gameplay stream — the opposite of the intent. (The store
+   * holds one slot per cell, so exhaustion doesn't arise in normal play anyway.)
+   */
+  newAwakingBlock(
+    ctx: BlockSimContext,
+    x: number,
+    y: number,
+    popDelay: number,
+    awakeDelay: number,
+    combo: ComboTabulator,
+    popColor: number,
+  ): void {
+    let flavor: number;
+    do {
+      flavor = this.rng.number(BF_NUMBER_NORMAL);
+    } while (
+      (flavor === this.last_flavor_a && this.last_flavor_a === this.second_to_last_flavor_a) ||
+      (flavor === this.last_row_a[x] && this.last_row_a[x] === this.second_to_last_row_a[x])
+    );
+
+    this.second_to_last_row_a[x] = this.last_row_a[x]!;
+    this.last_row_a[x] = flavor;
+    this.second_to_last_flavor_a = this.last_flavor_a;
+    this.last_flavor_a = flavor;
+
+    // Store-full guard mirrors the C++ `newBlock` internal check (see above).
+    if (this.block_count === GC_BLOCK_STORE_SIZE) return;
+
+    const id = this.findFreeId();
+    this.allocateId(id);
+    try {
+      this.blockStore[id]!.initializeAwaking(
+        ctx,
+        x,
+        y,
+        flavor,
+        popDelay,
+        awakeDelay,
+        combo,
+        popColor,
+      );
+    } catch (e) {
       this.freeId(id);
       throw e;
     }

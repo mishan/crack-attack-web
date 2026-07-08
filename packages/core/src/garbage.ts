@@ -6,12 +6,11 @@
  *
  * Scope so far: the data model + allocation (Phase 1.3), the drop-placement
  * `newFallingGarbage(height, width, flavor, timeStep)` that computes a drop row
- * from the stack (Phase 1.5), and the per-tick physics — `timeStep`
- * (fall/land + awaking countdown), `startFalling`, and `initializeAwaking`
- * (Garbage physics). Deferred:
- *   - shatter *trigger*: `startShattering`, the Grid `shatterGarbage`
- *     detection, and the `newAwakingGarbage`/`newAwakingBlock` factories that
- *     turn an eliminated garbage into awaking rows → next branch.
+ * from the stack (Phase 1.5), the per-tick physics — `timeStep` (fall/land +
+ * awaking countdown), `startFalling`, and `initializeAwaking` (Garbage physics)
+ * — and shattering: `startShattering` + `GarbageManager.newAwakingGarbage`,
+ * driven by the Grid `shatterGarbage` detection when an elimination touches a
+ * slab. Rendering-only bits (Sound, Spring, X extreme effects) stay omitted.
  *
  * As with blocks, the manager is an instance owning its store (not a static
  * singleton), and grid placement is delegated to an injected sink. The
@@ -25,6 +24,7 @@ import type { BlockSimContext } from './block.js';
 import {
   GC_FALL_VELOCITY,
   GC_GARBAGE_STORE_SIZE,
+  GC_GARBAGE_TO_GARBAGE_SHATTER,
   GC_HANG_DELAY,
   GC_INTERNAL_POP_DELAY,
   GC_MAX_GARBAGE_HEIGHT,
@@ -34,7 +34,7 @@ import {
   GC_STEPS_PER_GRID,
 } from './constants.js';
 import type { ComboTabulator } from './combo.js';
-import { GF_BLACK, GF_GRAY, GF_NORMAL } from './flavors.js';
+import { GF_BLACK, GF_GRAY, GF_NORMAL, GF_SHATTER_TO_NORMAL_GARBAGE } from './flavors.js';
 import {
   GR_BLOCK,
   GR_EMPTY,
@@ -45,7 +45,18 @@ import {
   type GarbageGridSink,
   type Grid,
 } from './grid.js';
+
 import type { Rng } from './rng.js';
+
+/**
+ * The environment `Garbage.startShattering` needs: the block-physics context
+ * (grid/clock/block store + awaking counter, and the gameplay RNG on the block
+ * manager) plus the garbage store, to mint awaking blocks/garbage. Implemented
+ * by `GameSim`; a superset of {@link BlockSimContext}.
+ */
+export interface GarbageShatterContext extends BlockSimContext {
+  readonly garbageStore: GarbageManager;
+}
 
 /** Pop-direction bits cycle 1,2,4,8 → back to 1 (Garbage.cxx:175). */
 const BR_DIRECTION_4 = 1 << 3;
@@ -387,6 +398,80 @@ export class Garbage {
     }
   }
 
+  /**
+   * Convert one row (`sY`) of this shattering slab into awaking blocks — or, on
+   * an odd interior row (chance-gated) or for shatter-to-garbage flavors, into a
+   * fresh awaking garbage row. Faithful port of `Garbage::startShattering`
+   * (Garbage.cxx:329). Called once per occupied row from the Grid shatter
+   * traversal, with `sX` at our left edge; returns the advanced `sX` and
+   * `popDelay` (the C++ passes them by reference). On our top row the slab
+   * enters GS_SHATTERING and leaves the grid.
+   *
+   * Note on RNG order: the garbage-to-garbage `chanceIn` draw is short-circuited
+   * exactly as in the C++ (only drawn on a full-width, odd interior row), so the
+   * gameplay stream position matches.
+   */
+  startShattering(
+    ctx: GarbageShatterContext,
+    sX: number,
+    sY: number,
+    popDelay: number,
+    awakeDelay: number,
+    combo: ComboTabulator,
+  ): { sX: number; popDelay: number } {
+    // Validate the forced shatter-to-garbage precondition *before* touching the
+    // grid. A GF_SHATTER_TO_NORMAL_GARBAGE slab always takes the full-width
+    // awaking-garbage path (initializeAwaking stamps full width at x=0), so it
+    // must be full width at sX=0. Checking here — not after the removal loop —
+    // means a malformed slab throws without leaving a half-cleared row behind.
+    // (The other entry, the odd-row `chanceIn` path, requires width === full and
+    // therefore sX === 0 already, so it needs no pre-check.)
+    if (
+      this.flavor === GF_SHATTER_TO_NORMAL_GARBAGE &&
+      (this.width !== GC_PLAY_WIDTH || sX !== 0)
+    ) {
+      throw new RangeError(
+        `shatter-to-garbage requires a full-width slab at x=0 (width ${this.width}, sX ${sX})`,
+      );
+    }
+
+    // Vacate our cells on this row so the awaking block/garbage factories below
+    // see empty cells (our accessors always enforce the empty invariant; the
+    // C++ only does this under NDEBUG-off, but for us it is mandatory).
+    for (let w = 0; w < this.width; w++) ctx.grid.remove(sX + w, sY, this);
+
+    if (
+      (this.width === GC_PLAY_WIDTH &&
+        (sY - this.y) & 1 &&
+        ctx.blocks.rng.chanceIn(GC_GARBAGE_TO_GARBAGE_SHATTER)) ||
+      this.flavor === GF_SHATTER_TO_NORMAL_GARBAGE
+    ) {
+      // shatter this row into a new one-tall awaking garbage slab (full width at
+      // sX=0, guaranteed by the pre-check above and the chance path's width test)
+      ctx.garbageStore.newAwakingGarbage(ctx, sX, sY, 1, popDelay, awakeDelay, combo, this.flavor);
+      sX += GC_PLAY_WIDTH;
+      popDelay += GC_PLAY_WIDTH * GC_INTERNAL_POP_DELAY;
+    } else {
+      // shatter this row into individual awaking blocks
+      for (let w = 0; w < this.width; w++) {
+        ctx.blocks.newAwakingBlock(ctx, sX, sY, popDelay, awakeDelay, combo, this.flavor);
+        sX++;
+        popDelay += GC_INTERNAL_POP_DELAY;
+      }
+    }
+
+    // if this was our top row, we're fully off the grid now; enter the shatter
+    // state and release our pool slot (the C++ keeps it for a display animation
+    // then deletes it — with no display, we free it immediately). `id` order is
+    // not gameplay-observable, so this stays deterministic.
+    if (sY + 1 === this.y + this.height) {
+      this.state = GS_SHATTERING;
+      ctx.garbageStore.deleteGarbage(this);
+    }
+
+    return { sX, popDelay };
+  }
+
   /** Whether every cell directly below the slab is empty (so it may fall). */
   private isUnsupported(grid: Grid): boolean {
     for (let w = 0; w < this.width; w++) {
@@ -464,6 +549,42 @@ export class GarbageManager {
     } catch (e) {
       // Roll back so a failed placement (invalid dims / occupied / out-of-bounds
       // cell) doesn't permanently leak a pool slot.
+      this.freeId(id);
+      throw e;
+    }
+  }
+
+  /**
+   * Allocate an awaking garbage slab (a shattered row that pops into a fresh
+   * full-width garbage). Mirrors `GarbageManager::newAwakingGarbage`
+   * (GarbageManager.h:42). No-op when the store is full, as in the C++.
+   */
+  newAwakingGarbage(
+    ctx: BlockSimContext,
+    x: number,
+    y: number,
+    height: number,
+    popDelay: number,
+    awakeDelay: number,
+    combo: ComboTabulator | null,
+    popColor: number,
+  ): void {
+    if (this.garbage_count === GC_GARBAGE_STORE_SIZE) return;
+
+    const id = this.findFreeId();
+    this.allocateId(id);
+    try {
+      this.garbageStore[id]!.initializeAwaking(
+        x,
+        y,
+        height,
+        popDelay,
+        awakeDelay,
+        combo,
+        popColor,
+        ctx,
+      );
+    } catch (e) {
       this.freeId(id);
       throw e;
     }
