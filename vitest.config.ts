@@ -1,8 +1,9 @@
 import { fileURLToPath } from 'node:url';
 import { defineConfig } from 'vitest/config';
 
-// Resolve cross-package imports to source (not built dist) so tests run without
-// a prior `tsc -b`. Currently only the tools/* harness imports @crack-attack/core.
+// Resolve cross-package imports to source (not built dist) so `pnpm test` works
+// without a prior `tsc -b`. The client/tool tests import @crack-attack/core,
+// whose package entry points at dist/index.js — absent in a fresh checkout.
 const coreSrc = fileURLToPath(new URL('./packages/core/src/index.ts', import.meta.url));
 
 export default defineConfig({

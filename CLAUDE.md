@@ -49,7 +49,7 @@ and is load-bearing for determinism. If lint stops you here, that's the guard wo
 ## Toolchain
 
 pnpm workspaces, TypeScript (strict, project references), Vitest, ESLint (flat
-config) + Prettier. Node >= 20.
+config) + Prettier. Node `^20.19.0 || >=22.12.0` (the client's Vite 8 requirement).
 
 ```sh
 pnpm install
@@ -170,6 +170,17 @@ just use `pnpm` directly.
 - [~] Phase 1.7 (partial) — Controller/ActionState input snapshot (`controller.ts`);
   ActionRecorder replay still to come.
 - [ ] `tools/replay-check` digest harness + C++ instrumentation
-- [ ] Phase 2 client, Phase 3 AI, Phase 4 multiplayer, Phase 5 lobby
+- [~] Phase 2 — **client shell landed** (`packages/client`, Vite + Three.js):
+  a playable solo board. The platform layers around the deterministic core are
+  split so the sim-facing ones stay DOM-free and unit-tested — `FixedTimestep`
+  (50 Hz wall-clock accumulator + interpolation alpha), `KeyboardInput`
+  (rebindable `code`→`CC_*` map; normalizes combined directions to a single
+  move, since the Swapper faithfully ignores multi-direction masks), and
+  `deriveViewModel` (sim state → render sprites). `BoardView` (Three.js
+  instanced meshes) and `main.ts` (RAF loop, input listeners, restart) are the
+  thin DOM/WebGL layer. `pnpm --filter @crack-attack/client dev`. Still to come:
+  glTF assets (`tools/obj2gltf`), HUD polish (level lights, lose bar, combo
+  signs), audio, and cross-tick interpolation.
+- [ ] Phase 3 AI, Phase 4 multiplayer, Phase 5 lobby
 
 See `BROWSER_PORT_PLAN.md` for the full phase breakdown and suggested order of work.

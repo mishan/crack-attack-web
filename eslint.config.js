@@ -55,4 +55,14 @@ export default tseslint.config(
       'no-restricted-globals': 'off',
     },
   },
+  // The client is a browser app: DOM/WebGL globals are expected. TypeScript's
+  // DOM lib already checks these, so `no-undef` (which doesn't know the DOM) is
+  // redundant here and would false-positive on `window`, `requestAnimationFrame`,
+  // `KeyboardEvent`, etc.
+  {
+    files: ['packages/client/src/**/*.ts'],
+    rules: {
+      'no-undef': 'off',
+    },
+  },
 );
