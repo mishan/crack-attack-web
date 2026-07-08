@@ -5,26 +5,32 @@
  * naming its occupancy state and (optionally) a resident Block or Garbage.
  * Ported from `Grid.{h,cxx}`.
  *
- * Scope for this phase (1.3): the element store, its state flags, the inline
- * accessors, the top-row trackers, and the check-registry → combo linkage.
- * Phase 1.4 adds `shiftGridUp` (grid rise); the RNG initial board fill that the
- * C++ `Grid::gameStart` performs lives in `board.ts` (`generateInitialBoard`),
- * which coordinates the grid with the block store. Deferred:
- *   - `Grid::timeStep` physics (falling/hanging/shatter/elimination) → Phase 1.6
+ * Progression: the element store + accessors + check-registry linkage (1.3);
+ * `shiftGridUp` grid rise (1.4); and `timeStep` + `handleEliminationCheckRequest`
+ * — the block-pattern elimination detector — plus the top-row recompute (1.6,
+ * this file). The RNG initial board fill lives in `board.ts`. Deferred:
+ *   - garbage shattering: the `shatterGarbage` body and the shatter traversal
+ *     inside `handleEliminationCheckRequest` → Garbage physics
  *   - `LevelLights` integration (Displayer/Communicator subsystem) → Phase 2
- *   - `shatterGarbage` / `handleEliminationCheckRequest` → Phase 1.5
  *
- * As with the managers, this is an instance (the future `GameSim` owns one),
- * not a static singleton.
+ * As with the managers, this is an instance (GameSim owns one), not a static
+ * singleton.
  *
  * Original work Copyright (C) 2000 Daniel Nelson. GPL-2.0-or-later.
  */
 
-import { GC_BLOCK_STORE_SIZE, GC_PLAY_HEIGHT, GC_PLAY_WIDTH, GC_SAFE_HEIGHT } from './constants.js';
-import type { Block } from './block.js';
+import {
+  GC_BLOCK_STORE_SIZE,
+  GC_MIN_PATTERN_LENGTH,
+  GC_PLAY_HEIGHT,
+  GC_PLAY_WIDTH,
+  GC_SAFE_HEIGHT,
+} from './constants.js';
+import type { Block, BlockSimContext } from './block.js';
+import type { ComboManager } from './comboManager.js';
 import type { Garbage } from './garbage.js';
 import type { ComboTabulator } from './combo.js';
-import { flavorMatch } from './flavors.js';
+import { flavorMatch, isColorlessFlavor } from './flavors.js';
 
 // --- Grid element states (Grid.h:37-43) ------------------------------------
 //
@@ -79,6 +85,15 @@ export interface GarbageGridSink {
 }
 
 /**
+ * The environment `Grid.timeStep` needs to resolve elimination checks: the
+ * block-physics context (grid/clock/block store/counters, for `startDying`)
+ * plus the combo store. Implemented by `GameSim`.
+ */
+export interface GridSimContext extends BlockSimContext {
+  readonly combos: ComboManager;
+}
+
+/**
  * The playfield store and its accessors. Cells are stored column-major in a
  * flat array (`index = x * GC_PLAY_HEIGHT + y`) so `[x][y]` maps directly.
  */
@@ -99,6 +114,12 @@ export class Grid implements BlockGridSink, GarbageGridSink {
   top_effective_row = 0;
   /** Whether a gray shatter is in progress. `Grid.h:209` */
   gray_shatter = false;
+
+  // Scratch state for a single shatter cascade (Grid.h:226-228). Reset at the
+  // start of each elimination; used while marking connected garbage.
+  private shatter_count = 0;
+  private shatter_top = 0;
+  private shatter_bottom = GC_PLAY_HEIGHT;
 
   constructor() {
     this.elements = new Array<GridElement>(GC_PLAY_WIDTH * GC_PLAY_HEIGHT);
@@ -326,5 +347,171 @@ export class Grid implements BlockGridSink, GarbageGridSink {
     // TODO(LevelLights): levelRaise(this.top_effective_row) — deferred (Phase 2).
 
     return true;
+  }
+
+  /**
+   * One tick of grid logic. Mirrors `Grid::timeStep` (Grid.cxx:104): drain the
+   * pending elimination checks (detecting patterns and starting matched blocks
+   * dying), then recompute the top-occupied and top-effective rows.
+   */
+  timeStep(ctx: GridSimContext): void {
+    // Process elimination check requests. Bounded by the registry size so a
+    // corrupted check_count can't run away.
+    for (let n = 0; this.check_count > 0 && n < this.check_registry.length; n++) {
+      const entry = this.check_registry[n]!;
+      if (!entry.mark) continue;
+      entry.mark = false;
+      this.check_count--;
+
+      const block = ctx.blocks.block(n);
+      // only still-static blocks are eligible
+      if (!block.isStatic()) continue;
+
+      this.handleEliminationCheckRequest(ctx, block, block.current_combo ?? entry.combo);
+    }
+
+    // Recompute top_occupied_row: highest row holding anything. Scan down from
+    // the current value; floor at 0 (the creep row is always occupied in play).
+    this.top_occupied_row++;
+    for (;;) {
+      this.top_occupied_row--;
+      if (this.top_occupied_row <= 0) break;
+      let occupied = false;
+      for (let x = GC_PLAY_WIDTH; x--;) {
+        if (!(this.stateAt(x, this.top_occupied_row) & GR_EMPTY)) {
+          occupied = true;
+          break;
+        }
+      }
+      if (occupied) break;
+    }
+
+    // Recompute top_effective_row: highest row holding a block or *landed*
+    // garbage (initially falling garbage doesn't count). LevelLights::levelLower
+    // on a drop is deferred (Phase 2).
+    this.top_effective_row++;
+    for (;;) {
+      this.top_effective_row--;
+      if (this.top_effective_row <= 0) break;
+      let effective = false;
+      for (let x = GC_PLAY_WIDTH; x--;) {
+        const rt = this.residentTypeAt(x, this.top_effective_row);
+        if (rt & GR_EMPTY) continue;
+        if (rt & GR_GARBAGE && this.garbageAt(x, this.top_effective_row).initial_fall) continue;
+        effective = true;
+        break;
+      }
+      if (effective) break;
+    }
+  }
+
+  /**
+   * Detect and resolve an elimination pattern kernelled at `block`. Mirrors
+   * `Grid::handleEliminationCheckRequest` (Grid.cxx:154): scan four directions
+   * for same-flavor runs, and if a run of >= GC_MIN_PATTERN_LENGTH exists in
+   * either axis, start every block in the pattern dying and report the combo.
+   *
+   * Garbage shattering (the `shatterGarbage` calls and the shatter traversal)
+   * is structurally preserved but currently no-ops on blocks; the garbage side
+   * lands with Garbage physics.
+   */
+  private handleEliminationCheckRequest(
+    ctx: GridSimContext,
+    block: Block,
+    combo: ComboTabulator | null,
+  ): void {
+    const x = block.x;
+    const y = block.y;
+
+    // Extend the run left/right/down/up while cells are matching blocks.
+    let l = x;
+    while (l > 0 && this.stateAt(l - 1, y) & GR_BLOCK && this.matchAt(l - 1, y, block)) l--;
+
+    let r = x + 1;
+    while (r < GC_PLAY_WIDTH && this.stateAt(r, y) & GR_BLOCK && this.matchAt(r, y, block)) r++;
+
+    let b = y;
+    while (b > 1 && this.stateAt(x, b - 1) & GR_BLOCK && this.matchAt(x, b - 1, block)) b--;
+
+    let t = y + 1;
+    while (t < GC_PLAY_HEIGHT && this.stateAt(x, t) & GR_BLOCK && this.matchAt(x, t, block)) t++;
+
+    const w = r - l;
+    const h = t - b;
+
+    let magnitude = 0;
+    let pattern = 0;
+    if (w >= GC_MIN_PATTERN_LENGTH) {
+      pattern |= PT_HORIZONTAL;
+      magnitude += w;
+    }
+    if (h >= GC_MIN_PATTERN_LENGTH) {
+      pattern |= PT_VERTICAL;
+      magnitude += h;
+    }
+
+    if (pattern === 0) {
+      if (combo) block.endComboInvolvement(combo);
+      return;
+    }
+
+    // create a combo for the elimination if one wasn't passed in
+    const activeCombo: ComboTabulator = combo ?? ctx.combos.newComboTabulator();
+
+    // an L/T shape shares the kernel between both runs — count it once
+    if (pattern === (PT_HORIZONTAL | PT_VERTICAL)) magnitude--;
+
+    // reset the shatter scratch; gray/black shatter rules depend on the kernel
+    this.shatter_count = 0;
+    this.shatter_top = 0;
+    this.shatter_bottom = GC_PLAY_HEIGHT;
+    this.gray_shatter = isColorlessFlavor(block.flavor);
+
+    ctx.combos.specialBlockTally(activeCombo, block);
+    block.startDying(ctx, activeCombo, magnitude);
+
+    if (pattern & PT_HORIZONTAL) {
+      for (let kx = l; kx < r; kx++) {
+        if (kx === x) continue;
+        const other = this.blockAt(kx, y);
+        ctx.combos.specialBlockTally(activeCombo, other);
+        other.startDying(ctx, activeCombo, magnitude);
+      }
+      if (l > 0) this.shatterGarbage(l - 1, y);
+      if (y > 1) for (let kx = l; kx < r; kx++) this.shatterGarbage(kx, y - 1);
+      if (r < GC_PLAY_WIDTH) this.shatterGarbage(r, y);
+      if (y < GC_PLAY_HEIGHT - 1) for (let kx = l; kx < r; kx++) this.shatterGarbage(kx, y + 1);
+    }
+
+    if (pattern & PT_VERTICAL) {
+      for (let ky = b; ky < t; ky++) {
+        if (ky === y) continue;
+        const other = this.blockAt(x, ky);
+        ctx.combos.specialBlockTally(activeCombo, other);
+        other.startDying(ctx, activeCombo, magnitude);
+      }
+      if (b > 1) this.shatterGarbage(x, b - 1);
+      if (x > 0) for (let ky = b; ky < t; ky++) this.shatterGarbage(x - 1, ky);
+      if (t < GC_PLAY_HEIGHT) this.shatterGarbage(x, t);
+      if (x < GC_PLAY_WIDTH - 1) for (let ky = b; ky < t; ky++) this.shatterGarbage(x + 1, ky);
+    }
+
+    // TODO(Garbage physics): synchronize shattering garbage — compute
+    // awaken/pop delays from shatter_count (GC_INITIAL/FINAL/INTERNAL_POP_DELAY)
+    // and call garbage.startShattering across [shatter_bottom, shatter_top).
+    // With no garbage shattered yet, shatter_bottom > shatter_top (nothing to do).
+
+    activeCombo.reportElimination(magnitude, block, ctx.clock.time_step);
+  }
+
+  /**
+   * Begin shattering the garbage at (x, y), if any. Mirrors
+   * `Grid::shatterGarbage` (Grid.h:216). The body — considerShattering, marking
+   * GR_SHATTERING, recursing to connected garbage, and accumulating the shatter
+   * bounds — is deferred with Garbage physics; for now it is a no-op on blocks.
+   */
+  private shatterGarbage(x: number, y: number, _dueTo: Garbage | null = null): void {
+    if (!(this.stateAt(x, y) & GR_GARBAGE)) return;
+    // TODO(Garbage physics): shatter connected garbage from here.
   }
 }

@@ -150,6 +150,11 @@ export class Block {
     grid.addBlock(x, y, this, GR_BLOCK);
   }
 
+  /** Whether the block is resting and eligible for elimination checks (BS_STATIC). */
+  isStatic(): boolean {
+    return (this.state & BS_STATIC) !== 0;
+  }
+
   /**
    * Switch the block's combo involvement to `newCombo` (leaving any previous
    * one). Mirrors `Block::beginComboInvolvement` (Block.h:57).
