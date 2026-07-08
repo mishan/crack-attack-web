@@ -16,7 +16,7 @@ const newBoard = (seed: number): Board => {
   const grid = new Grid();
   const rng = new Rng(seed);
   const blocks = new BlockManager(grid, rng);
-  const garbage = new GarbageManager(grid);
+  const garbage = new GarbageManager(grid, rng);
   return { grid, blocks, garbage };
 };
 

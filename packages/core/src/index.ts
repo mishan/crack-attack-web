@@ -9,9 +9,12 @@
 
 export * from './constants.js';
 export * from './rng.js';
+export * from './clock.js';
 export * from './flavors.js';
 export * from './combo.js';
 export * from './block.js';
 export * from './garbage.js';
 export * from './grid.js';
 export * from './board.js';
+export * from './comboManager.js';
+export * from './garbageGenerator.js';

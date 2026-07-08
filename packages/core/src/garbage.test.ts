@@ -3,20 +3,24 @@ import { GC_GARBAGE_STORE_SIZE, GC_HANG_DELAY } from './constants.js';
 import { GF_BLACK, GF_GRAY, GF_NORMAL } from './flavors.js';
 import { GS_FALLING, GS_STATIC, Garbage, GarbageManager } from './garbage.js';
 import { GR_FALLING, GR_GARBAGE, Grid } from './grid.js';
+import { Rng } from './rng.js';
+
+const mkGrid = (): Grid => new Grid();
+const mkGm = (grid: Grid = mkGrid()): GarbageManager => new GarbageManager(grid, new Rng(1));
 
 describe('GarbageManager store', () => {
   it('starts empty with a fully allocated pool', () => {
-    const gm = new GarbageManager(new Grid());
+    const gm = mkGm();
     expect(gm.garbage_count).toBe(0);
     expect(gm.garbageStore).toHaveLength(GC_GARBAGE_STORE_SIZE);
     expect(gm.garbageStore.every((g, i) => g.id === i)).toBe(true);
   });
 
-  it('newFallingGarbage allocates and stamps all covered cells as FALLING', () => {
-    const grid = new Grid();
-    const gm = new GarbageManager(grid);
+  it('newFallingGarbageAt allocates and stamps all covered cells as FALLING', () => {
+    const grid = mkGrid();
+    const gm = mkGm(grid);
 
-    gm.newFallingGarbage(0, 10, 2, 3, GF_NORMAL, 100);
+    gm.newFallingGarbageAt(0, 10, 2, 3, GF_NORMAL, 100);
     expect(gm.garbage_count).toBe(1);
 
     const g = gm.garbage(0);
@@ -34,18 +38,18 @@ describe('GarbageManager store', () => {
   });
 
   it('deleteGarbage frees the slot', () => {
-    const gm = new GarbageManager(new Grid());
-    gm.newFallingGarbage(0, 10, 1, 1, GF_NORMAL, 0);
+    const gm = mkGm();
+    gm.newFallingGarbageAt(0, 10, 1, 1, GF_NORMAL, 0);
     gm.deleteGarbage(gm.garbage(0));
     expect(gm.garbage_count).toBe(0);
     expect(gm.storeMap[0]).toBe(false);
   });
 
   it('shiftUp increments y for every live garbage', () => {
-    const grid = new Grid();
-    const gm = new GarbageManager(grid);
-    gm.newFallingGarbage(0, 10, 1, 2, GF_NORMAL, 0);
-    gm.newFallingGarbage(0, 20, 1, 2, GF_NORMAL, 0);
+    const grid = mkGrid();
+    const gm = mkGm(grid);
+    gm.newFallingGarbageAt(0, 10, 1, 2, GF_NORMAL, 0);
+    gm.newFallingGarbageAt(0, 20, 1, 2, GF_NORMAL, 0);
     gm.shiftUp();
     expect(gm.garbage(0).y).toBe(11);
     expect(gm.garbage(1).y).toBe(21);

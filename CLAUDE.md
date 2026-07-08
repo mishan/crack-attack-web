@@ -111,13 +111,19 @@ just use `pnpm` directly.
       RNG-driven board/creep generation, combos, and `LevelLights` are deferred
       to the phases below and marked with `TODO(Phase …)` in-source.
 - [~] Phase 1.4 — **generation + rise landed**: RNG creep-row generation
-      (`BlockManager.newCreepRow`/`newCreepBlock`, non-X), initial board fill
-      (`board.ts` `generateInitialBoard`), and grid rise (`Grid.shiftGridUp` +
-      `board.ts` `shiftBoardUp`). All share one gameplay RNG stream; draw order
-      matches the C++. **Deferred within 1.4** (need Controller/combos/GameSim):
-      the Swapper input/swap-execution state machine and the Creep timer/loss
-      state machine; `LevelLights` is a Displayer/Communicator subsystem → Phase 2.
-- [ ] Phase 1.5 — Combos → garbage (ComboTabulator/GarbageGenerator/GarbageQueue)
+  (`BlockManager.newCreepRow`/`newCreepBlock`, non-X), initial board fill
+  (`board.ts` `generateInitialBoard`), and grid rise (`Grid.shiftGridUp` +
+  `board.ts` `shiftBoardUp`). All share one gameplay RNG stream; draw order
+  matches the C++. **Deferred within 1.4** (need Controller/combos/GameSim):
+  the Swapper input/swap-execution state machine and the Creep timer/loss
+  state machine; `LevelLights` is a Displayer/Communicator subsystem → Phase 2.
+- [x] Phase 1.5 — Combos → garbage: `combo.ts` (ComboTabulator), `comboManager.ts`,
+      `garbageGenerator.ts` (magnitude/multiplier → garbage dimensions + flavors,
+      drop-delay queue, per-tick drop), plus `GarbageManager.newFallingGarbage`
+      drop-placement and a shared `clock.ts`. Outbound garbage routes through an
+      injectable `GarbageOutSink` (solo deals locally; netcode/AI plug in here).
+      Score reporting (display) and cosmetic Sign/Sparkle effects deferred; the
+      `GarbageQueue` class is AI-only → Phase 3.
 - [ ] Phase 1.6 — `GameSim` tick driver (replicate `Game::timeStep` call order)
 - [ ] Phase 1.7-1.8 — Controller/ActionState + ActionRecorder replay
 - [ ] `tools/replay-check` digest harness + C++ instrumentation

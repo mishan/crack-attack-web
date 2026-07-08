@@ -4,12 +4,10 @@
  * The Garbage object and its fixed-size store/manager. Ported from
  * `Garbage.{h,cxx}` and the store half of `GarbageManager.{h,cxx}`.
  *
- * Scope for this phase (1.3): the data model and allocation only — the object
- * store, id allocation, `initializeStatic`/`initializeFalling`, the pure
- * `considerShattering` decision, and simple store ops. Deferred:
- *   - drop-placement `newFallingGarbage(height, width, flavor)` (uses
- *     Grid.top_occupied_row + garbage sizing) → Phase 1.5
- *   - awaking/shatter (`initializeAwaking`, `startShattering`) + combos → 1.5
+ * Scope so far: the data model + allocation (Phase 1.3) and the drop-placement
+ * `newFallingGarbage(height, width, flavor, timeStep)` that computes a drop row
+ * from the stack (Phase 1.5). Deferred:
+ *   - awaking/shatter (`initializeAwaking`, `startShattering`) + combos → 1.5+
  *   - per-tick physics (`timeStep`, falling) → Phase 1.6
  *
  * As with blocks, the manager is an instance owning its store (not a static
@@ -20,10 +18,18 @@
  * Original work Copyright (C) 2000 Daniel Nelson. GPL-2.0-or-later.
  */
 
-import { GC_GARBAGE_STORE_SIZE, GC_HANG_DELAY } from './constants.js';
+import {
+  GC_GARBAGE_STORE_SIZE,
+  GC_HANG_DELAY,
+  GC_MAX_GARBAGE_HEIGHT,
+  GC_PLAY_HEIGHT,
+  GC_PLAY_WIDTH,
+  GC_SAFE_HEIGHT,
+} from './constants.js';
 import type { ComboTabulator } from './combo.js';
 import { GF_BLACK, GF_GRAY } from './flavors.js';
-import { GR_FALLING, GR_GARBAGE, type GarbageGridSink } from './grid.js';
+import { GR_FALLING, GR_GARBAGE, type GarbageGridSink, type Grid } from './grid.js';
+import type { Rng } from './rng.js';
 
 // --- Garbage states (Garbage.h:53-56) --------------------------------------
 // NOTE: these GS_* are *garbage* states and are a different namespace from the
@@ -167,7 +173,11 @@ export class GarbageManager {
   /** Occupancy map over the store. `GarbageManager.h:97` */
   readonly storeMap: boolean[];
 
-  constructor(private readonly grid: GarbageGridSink) {
+  constructor(
+    private readonly grid: Grid,
+    /** Shared gameplay RNG (used to place sub-width garbage). */
+    private readonly rng: Rng,
+  ) {
     this.garbageStore = new Array<Garbage>(GC_GARBAGE_STORE_SIZE);
     this.storeMap = new Array<boolean>(GC_GARBAGE_STORE_SIZE);
     for (let n = 0; n < GC_GARBAGE_STORE_SIZE; n++) {
@@ -198,7 +208,7 @@ export class GarbageManager {
    * (GarbageManager.h:55), minus the display-only flavor-image request.
    * No-op when the store is full, as in the C++.
    */
-  newFallingGarbage(
+  newFallingGarbageAt(
     x: number,
     y: number,
     height: number,
@@ -211,6 +221,45 @@ export class GarbageManager {
     const id = this.findFreeId();
     this.allocateId(id);
     this.garbageStore[id]!.initializeFalling(x, y, height, width, flavor, timeStep, this.grid);
+  }
+
+  /**
+   * Try to drop a slab of `height`×`width` onto the board, computing its drop
+   * row from the current stack. Returns false (drop later) when there is no
+   * room. Mirrors the public `GarbageManager::newFallingGarbage(height, width,
+   * flavor)` (GarbageManager.cxx:47). `Grid.top_occupied_row` must be current.
+   *
+   * A sub-width slab is placed at a random column (one gameplay RNG draw), so
+   * this participates in the deterministic gameplay stream. `timeStep` is the
+   * current tick, threaded in for the falling garbage's hang alarm.
+   */
+  newFallingGarbage(height: number, width: number, flavor: number, timeStep: number): boolean {
+    if (height > GC_MAX_GARBAGE_HEIGHT) height = GC_MAX_GARBAGE_HEIGHT;
+
+    const dropRow =
+      this.grid.top_occupied_row >= GC_SAFE_HEIGHT
+        ? this.grid.top_occupied_row + 1
+        : GC_SAFE_HEIGHT + 1;
+
+    // No room; leave the top row free for the final creep.
+    if (dropRow + height > GC_PLAY_HEIGHT - 1) return false;
+
+    this.grid.top_occupied_row = dropRow + height - 1;
+
+    if (width === GC_PLAY_WIDTH) {
+      this.newFallingGarbageAt(0, dropRow, height, width, flavor, timeStep);
+    } else {
+      this.newFallingGarbageAt(
+        this.rng.number(GC_PLAY_WIDTH + 1 - width),
+        dropRow,
+        height,
+        width,
+        flavor,
+        timeStep,
+      );
+    }
+
+    return true;
   }
 
   /** Return a garbage slot to the free pool. Mirrors `GarbageManager::deleteGarbage`. */
