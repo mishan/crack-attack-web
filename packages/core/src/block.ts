@@ -4,11 +4,14 @@
  * The Block object and its fixed-size store/manager. Ported from `Block.{h,cxx}`
  * and the store half of `BlockManager.{h,cxx}`.
  *
- * Scope so far: the data model + allocation (Phase 1.3) and the RNG-driven
- * creep-row generation `newCreepRow`/`newCreepBlock` (Phase 1.4). Deferred:
- *   - awaking blocks + combo involvement (`initializeAwaking`, ...) → Phase 1.5
- *   - per-tick physics (`timeStep`, falling/dying/swapping) → Phase 1.6
- *   - X-mode special-block generation → Phase 6
+ * Scope so far: the data model + allocation (Phase 1.3), RNG-driven creep-row
+ * generation (Phase 1.4), and the per-tick Block physics — `timeStep`
+ * (fall/hang/dying/awaking), `startFalling`/`startDying`/`startSwapping`/
+ * `finishSwapping`, and `initializeAwaking` (Phase 1.6, this file). Physics runs
+ * against a {@link BlockSimContext} (implemented by GameSim). Deferred:
+ *   - the Swapper `notifyLanding` and Garbage-fall hooks (stubbed in the context
+ *     until Swapper/Garbage physics land)
+ *   - SparkleManager death sparks / Sound cues (cosmetic) and X-mode
  *
  * Architectural departure from the C++ (as the port plan calls for): the manager
  * is an instance owning its store, not a static singleton, so many sims can
@@ -22,13 +25,60 @@ import {
   BF_GRAY,
   BF_NUMBER_NORMAL,
   GC_BLOCK_STORE_SIZE,
+  GC_DYING_DELAY,
+  GC_FALL_VELOCITY,
+  GC_HANG_DELAY,
   GC_NO_SPECIAL_BLOCK_CHANCE_IN,
+  GC_PLAY_HEIGHT,
   GC_PLAY_WIDTH,
+  GC_STEPS_PER_GRID,
   GC_X_NO_SPECIAL_BLOCK_CHANCE_IN,
 } from './constants.js';
+import type { Clock } from './clock.js';
 import type { ComboTabulator } from './combo.js';
+import type { Garbage } from './garbage.js';
 import type { Rng } from './rng.js';
-import { GR_BLOCK, type BlockGridSink } from './grid.js';
+import {
+  GR_BLOCK,
+  GR_EMPTY,
+  GR_FALLING,
+  GR_GARBAGE,
+  GR_HANGING,
+  GR_IMMUTABLE,
+  type BlockGridSink,
+  type Grid,
+} from './grid.js';
+
+// --- Swap action flags (Swapper.h:41-43) -----------------------------------
+// Defined here because Block's swap methods key off them; the Swapper imports
+// these when it lands.
+
+export const SA_LEFT = 1 << 0;
+export const SA_RIGHT = 1 << 1;
+
+/**
+ * The per-tick environment Block physics needs. Implemented by `GameSim`, which
+ * owns the grid, clock, block store, and the awaking/dying counters. The two
+ * hooks bridge to subsystems not yet ported: `notifyLanding` (Swapper) and
+ * `startGarbageFalling` (Garbage physics) are no-ops until those land.
+ *
+ * `awaking_count`/`dying_count` are mutable (Block adjusts them as blocks enter
+ * and leave those states), mirroring the global `Game::awaking_count` /
+ * `dying_count`.
+ */
+export interface BlockSimContext {
+  readonly grid: Grid;
+  readonly clock: Clock;
+  readonly blocks: BlockManager;
+  awaking_count: number;
+  dying_count: number;
+  /** Unsynced cosmetic RNG (death rotation axis); never perturbs the gameplay stream. */
+  readonly cosmeticRng: Rng;
+  /** Swapper landing notification (Swapper.cxx notifyLanding). No-op until Swapper lands. */
+  notifyLanding(x: number, y: number, block: Block, combo: ComboTabulator): void;
+  /** Start a garbage slab falling (Garbage::startFalling). No-op until Garbage physics lands. */
+  startGarbageFalling(garbage: Garbage, combo: ComboTabulator | null, noHang: boolean): void;
+}
 
 // --- Block states (Block.h:33-38) ------------------------------------------
 
@@ -119,6 +169,209 @@ export class Block {
       this.current_combo.decrementInvolvement();
       this.current_combo = null;
     }
+  }
+
+  /**
+   * Initialize as an awaking block (a section of shattered garbage) and register
+   * it in the grid as immutable. Mirrors `Block::initializeAwaking` (Block.cxx:64).
+   * The block pops its appearance at `pop_delay` and finishes awaking at
+   * `awake_delay`, after which `timeStep` returns it to play.
+   */
+  initializeAwaking(
+    ctx: BlockSimContext,
+    x: number,
+    y: number,
+    flavor: number,
+    popDelay: number,
+    awakeDelay: number,
+    combo: ComboTabulator,
+    popColor: number,
+  ): void {
+    this.x = x;
+    this.y = y;
+    this.flavor = flavor;
+    this.f_y = 0;
+
+    this.state = BS_AWAKING;
+    this.alarm = ctx.clock.time_step + awakeDelay;
+    this.pop_alarm = ctx.clock.time_step + popDelay;
+    this.pop_direction = ctx.blocks.generatePopDirection();
+    this.pop_color = popColor;
+    this.current_combo = combo;
+
+    combo.incrementInvolvement();
+    ctx.awaking_count++;
+
+    ctx.grid.addBlock(x, y, this, GR_IMMUTABLE);
+  }
+
+  /**
+   * One tick of block physics. Mirrors `Block::timeStep` (Block.cxx:89): a
+   * static block that has lost its support starts falling; an awaking block
+   * counts down then returns to play; a falling block hangs then descends a
+   * cell at a time and lands; a dying block counts down then pops and is
+   * removed, pulling the block/garbage above into a combo fall.
+   *
+   * Called only for blocks at y >= 1 (GameSim iterates rows 1..H-1), so reads of
+   * `y - 1` stay in bounds.
+   */
+  timeStep(ctx: BlockSimContext): void {
+    const grid = ctx.grid;
+    const now = ctx.clock.time_step;
+
+    if (this.state & BS_STATIC) {
+      // We may have to fall.
+      if (grid.stateAt(this.x, this.y - 1) & GR_EMPTY) this.startFalling(ctx);
+      else return;
+    } else if (this.state & BS_AWAKING) {
+      // pop_alarm only switches appearance (a sound cue in the C++).
+      if (this.pop_alarm === now) this.pop_alarm = 0;
+
+      if (this.alarm === now) {
+        ctx.awaking_count--;
+        // startFalling() and elimination checks look for BS_STATIC.
+        this.state = BS_STATIC;
+
+        if (grid.stateAt(this.x, this.y - 1) & GR_EMPTY) {
+          this.startFalling(ctx, this.current_combo, true);
+        } else {
+          grid.changeState(this.x, this.y, this, GR_BLOCK);
+          grid.requestEliminationCheck(this, this.current_combo);
+        }
+      } else {
+        return;
+      }
+    }
+
+    // Deal with all other states (note the fall-through from STATIC/AWAKING).
+
+    if (this.state & BS_FALLING) {
+      // Blocks below us have already been stepped this tick.
+      if (this.alarm === now) this.alarm = 0; // hang alarm goes off
+
+      if (this.alarm === 0) {
+        if (this.f_y === 0) {
+          if (grid.stateAt(this.x, this.y - 1) & GR_EMPTY) {
+            // shift down one row
+            this.y--;
+            this.f_y = GC_STEPS_PER_GRID;
+            grid.remove(this.x, this.y + 1, this);
+            grid.addBlock(this.x, this.y, this, GR_FALLING);
+          } else {
+            // we've landed
+            this.state = BS_STATIC;
+            grid.changeState(this.x, this.y, this, GR_BLOCK);
+            grid.requestEliminationCheck(this, this.current_combo);
+            // if the block below is swapping, its combo may need switching
+            if (this.current_combo) {
+              ctx.notifyLanding(this.x, this.y, this, this.current_combo);
+            }
+          }
+        }
+
+        if (this.state & BS_FALLING) this.f_y -= GC_FALL_VELOCITY;
+      }
+    } else if (this.state & BS_DYING) {
+      if (--this.alarm === 0) {
+        ctx.dying_count--;
+        grid.remove(this.x, this.y, this);
+
+        // pull our upward neighbour into a combo fall
+        if (this.y < GC_PLAY_HEIGHT - 1) {
+          if (grid.stateAt(this.x, this.y + 1) & GR_BLOCK) {
+            grid.blockAt(this.x, this.y + 1).startFalling(ctx, this.current_combo);
+          } else if (grid.stateAt(this.x, this.y + 1) & GR_GARBAGE) {
+            ctx.startGarbageFalling(grid.garbageAt(this.x, this.y + 1), this.current_combo, false);
+          }
+        }
+
+        // a dying block always has a combo (set in startDying)
+        this.current_combo!.decrementInvolvement();
+        // SparkleManager death sparks + X-mode deactivation omitted (cosmetic).
+        ctx.blocks.deleteBlock(this);
+      } else if (this.alarm === GC_DYING_DELAY - 1) {
+        // grab the elimination magnitude from our combo (used for spark count)
+        this.pop_alarm = this.current_combo!.latest_magnitude;
+      }
+    }
+  }
+
+  /**
+   * Begin a fall for a resting block, linking it to an elimination `combo` if
+   * given, and cascade the fall up the column. Mirrors `Block::startFalling`
+   * (Block.cxx:234). This is a no-op unless the block is BS_STATIC: a block that
+   * is already falling (or swapping/dying) is left as-is, which also terminates
+   * the upward cascade at the first non-resting block.
+   */
+  startFalling(ctx: BlockSimContext, combo: ComboTabulator | null = null, noHang = false): void {
+    if (!(this.state & BS_STATIC)) return;
+
+    this.state = BS_FALLING;
+
+    // Grid element `state` is an *exclusive* value: a moving block is GR_FALLING
+    // (or GR_HANGING | GR_FALLING / GR_IMMUTABLE) with GR_BLOCK cleared — exactly
+    // as the C++ sets it. `resident_type` still reports GR_BLOCK, and
+    // `state & GR_BLOCK` deliberately matches only *resting* blocks (so the
+    // elimination scan and cascade skip moving ones). See grid.ts for the design.
+    const grid = ctx.grid;
+    if (noHang) {
+      this.alarm = 0;
+      grid.changeState(this.x, this.y, this, GR_FALLING);
+    } else {
+      this.alarm = ctx.clock.time_step + GC_HANG_DELAY;
+      grid.changeState(this.x, this.y, this, GR_HANGING | GR_FALLING);
+    }
+
+    if (combo) this.beginComboInvolvement(combo);
+
+    // cascade to the block/garbage directly above (passing our own combo)
+    if (this.y < GC_PLAY_HEIGHT - 1) {
+      if (grid.stateAt(this.x, this.y + 1) & GR_BLOCK) {
+        grid.blockAt(this.x, this.y + 1).startFalling(ctx, this.current_combo, noHang);
+      } else if (grid.stateAt(this.x, this.y + 1) & GR_GARBAGE) {
+        ctx.startGarbageFalling(grid.garbageAt(this.x, this.y + 1), this.current_combo, noHang);
+      }
+    }
+  }
+
+  /**
+   * Begin dying as part of an elimination. Mirrors `Block::startDying`
+   * (Block.cxx:268). Sets the dying countdown and a cosmetic rotation axis.
+   */
+  startDying(ctx: BlockSimContext, combo: ComboTabulator, sparkNumber: number): void {
+    void sparkNumber; // used only for the (omitted) death sound
+
+    ctx.dying_count++;
+    this.beginComboInvolvement(combo);
+    this.state = BS_DYING;
+    this.alarm = GC_DYING_DELAY;
+    ctx.grid.changeState(this.x, this.y, this, GR_IMMUTABLE);
+
+    // cosmetic death rotation axis — render-only, drawn from the unsynced
+    // cosmetic RNG so it never perturbs the gameplay stream.
+    const angle = 2 * Math.PI * ctx.cosmeticRng.numberFloat();
+    this.axis_x = Math.cos(angle);
+    this.axis_y = Math.sin(angle);
+  }
+
+  /**
+   * Enter the swapping state, moving in `direction` (SA_LEFT/SA_RIGHT). Mirrors
+   * `Block::startSwapping` (Block.cxx:293). The cell becomes immutable until the
+   * swap completes.
+   */
+  startSwapping(ctx: BlockSimContext, direction: number): void {
+    this.state = BS_SWAPPING | (direction & SA_RIGHT ? BS_SWAP_DIRECTION_MASK : 0);
+    ctx.grid.changeState(this.x, this.y, this, GR_IMMUTABLE);
+  }
+
+  /**
+   * Complete a swap, re-homing at column `sX` as a static block. Mirrors
+   * `Block::finishSwapping` (Block.cxx:302).
+   */
+  finishSwapping(ctx: BlockSimContext, sX: number): void {
+    this.state = BS_STATIC;
+    this.x = sX;
+    ctx.grid.addBlock(this.x, this.y, this, GR_BLOCK);
   }
 }
 
