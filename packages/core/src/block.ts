@@ -99,6 +99,27 @@ export class Block {
 
     grid.addBlock(x, y, this, GR_BLOCK);
   }
+
+  /**
+   * Switch the block's combo involvement to `newCombo` (leaving any previous
+   * one). Mirrors `Block::beginComboInvolvement` (Block.h:57).
+   */
+  beginComboInvolvement(newCombo: ComboTabulator): void {
+    if (this.current_combo) this.current_combo.decrementInvolvement();
+    this.current_combo = newCombo;
+    this.current_combo.incrementInvolvement();
+  }
+
+  /**
+   * Leave `oldCombo` if that is the block's current combo. Mirrors
+   * `Block::endComboInvolvement` (Block.h:65).
+   */
+  endComboInvolvement(oldCombo: ComboTabulator): void {
+    if (this.current_combo && this.current_combo === oldCombo) {
+      this.current_combo.decrementInvolvement();
+      this.current_combo = null;
+    }
+  }
 }
 
 /**
