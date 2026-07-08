@@ -110,7 +110,13 @@ just use `pnpm` directly.
       pools, flavor rules, check-registry linkage). Physics (`timeStep`),
       RNG-driven board/creep generation, combos, and `LevelLights` are deferred
       to the phases below and marked with `TODO(Phase …)` in-source.
-- [ ] Phase 1.4 — Swapper, Creep (incl. initial board fill + LevelLights)
+- [~] Phase 1.4 — **generation + rise landed**: RNG creep-row generation
+      (`BlockManager.newCreepRow`/`newCreepBlock`, non-X), initial board fill
+      (`board.ts` `generateInitialBoard`), and grid rise (`Grid.shiftGridUp` +
+      `board.ts` `shiftBoardUp`). All share one gameplay RNG stream; draw order
+      matches the C++. **Deferred within 1.4** (need Controller/combos/GameSim):
+      the Swapper input/swap-execution state machine and the Creep timer/loss
+      state machine; `LevelLights` is a Displayer/Communicator subsystem → Phase 2.
 - [ ] Phase 1.5 — Combos → garbage (ComboTabulator/GarbageGenerator/GarbageQueue)
 - [ ] Phase 1.6 — `GameSim` tick driver (replicate `Game::timeStep` call order)
 - [ ] Phase 1.7-1.8 — Controller/ActionState + ActionRecorder replay
