@@ -5,3 +5,6 @@ crack-attack
 pnpm-lock.yaml
 # Author-owned planning doc; kept verbatim.
 BROWSER_PORT_PLAN.md
+
+# Generated glTF assets (output of tools/obj2gltf), not hand-authored source.
+*.gltf

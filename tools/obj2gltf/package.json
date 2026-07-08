@@ -1,0 +1,15 @@
+{
+  "name": "@crack-attack/obj2gltf",
+  "version": "0.0.0",
+  "private": true,
+  "description": "One-time converter: Wavefront OBJ (+MTL) → glTF 2.0, for the original Crack Attack! models. Convert from the .obj sources; do not transcribe the generated obj_*.cxx.",
+  "license": "GPL-2.0-or-later",
+  "type": "module",
+  "bin": {
+    "obj2gltf": "./dist/cli.js"
+  },
+  "scripts": {
+    "build": "tsc -b",
+    "clean": "rm -rf dist tsconfig.tsbuildinfo"
+  }
+}
