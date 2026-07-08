@@ -130,8 +130,16 @@ just use `pnpm` directly.
       injectable `GarbageOutSink` (solo deals locally; netcode/AI plug in here).
       Score reporting (display) and cosmetic Sign/Sparkle effects deferred; the
       `GarbageQueue` class is AI-only → Phase 3.
-- [ ] Phase 1.6 — `GameSim` tick driver (replicate `Game::timeStep` call order)
-- [ ] Phase 1.7-1.8 — Controller/ActionState + ActionRecorder replay
+- [~] Phase 1.6 — **GameSim driver skeleton landed**: `gameSim.ts` owns the
+  Clock, gameplay Rng, Grid, and all managers; `gameStart` wires the C++
+  RNG-draw order (board fill → first creep row); `step(actions)` replicates
+  `Game::idlePlay`'s gameplay tick order and runs the ported subsystems
+  (ComboManager, GarbageGenerator). The per-tick **physics** (Swapper,
+  block/garbage `timeStep`, Creep, Grid elimination detector) are marked
+  `TODO(physics)` at their exact positions and land subsystem-by-subsystem
+  next, each exercised through the driver.
+- [~] Phase 1.7 (partial) — Controller/ActionState input snapshot (`controller.ts`);
+  ActionRecorder replay still to come.
 - [ ] `tools/replay-check` digest harness + C++ instrumentation
 - [ ] Phase 2 client, Phase 3 AI, Phase 4 multiplayer, Phase 5 lobby
 
