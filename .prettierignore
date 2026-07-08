@@ -1,0 +1,7 @@
+node_modules
+dist
+coverage
+crack-attack
+pnpm-lock.yaml
+# Author-owned planning doc; kept verbatim.
+BROWSER_PORT_PLAN.md

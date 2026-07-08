@@ -1,0 +1,23 @@
+{
+  "name": "@crack-attack/protocol",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Wire message types and encoding shared by the Crack Attack! client and server. Platform-agnostic.",
+  "license": "GPL-2.0-or-later",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -b",
+    "clean": "rm -rf dist tsconfig.tsbuildinfo"
+  },
+  "dependencies": {
+    "@crack-attack/core": "workspace:*"
+  }
+}

@@ -1,0 +1,20 @@
+{
+  "name": "@crack-attack/core",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Deterministic Crack Attack! simulation. Zero runtime dependencies; runs identically in browser and Node.",
+  "license": "GPL-2.0-or-later",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -b",
+    "clean": "rm -rf dist tsconfig.tsbuildinfo"
+  }
+}
