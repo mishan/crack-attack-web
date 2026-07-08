@@ -56,6 +56,12 @@ importers:
         specifier: workspace:*
         version: link:../protocol
 
+  tools/replay-check:
+    dependencies:
+      '@crack-attack/core':
+        specifier: workspace:*
+        version: link:../../packages/core
+
 packages:
 
   '@esbuild/aix-ppc64@0.21.5':

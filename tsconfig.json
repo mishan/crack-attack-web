@@ -4,6 +4,7 @@
     { "path": "./packages/core" },
     { "path": "./packages/protocol" },
     { "path": "./packages/server" },
-    { "path": "./packages/client" }
+    { "path": "./packages/client" },
+    { "path": "./tools/replay-check" }
   ]
 }
