@@ -18,3 +18,5 @@ export * from './grid.js';
 export * from './board.js';
 export * from './comboManager.js';
 export * from './garbageGenerator.js';
+export * from './controller.js';
+export * from './gameSim.js';
