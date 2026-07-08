@@ -116,4 +116,14 @@ describe('GameSim.step', () => {
     // the very top row is always empty at game start
     expect(sim.grid.stateAt(0, GC_PLAY_HEIGHT - 1)).toBe(GR_EMPTY);
   });
+
+  it('the starting stack is fully supported, so block physics leaves it unchanged', () => {
+    // The initial board fills each column contiguously from the creep row up,
+    // so no block is floating and nothing eliminates (no detector yet): stepping
+    // must not move any block.
+    const sim = new GameSim(20260708);
+    const before = snapshot(sim);
+    for (let i = 0; i < 20; i++) sim.step(noActions());
+    expect(snapshot(sim)).toBe(before);
+  });
 });
