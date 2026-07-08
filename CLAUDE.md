@@ -81,6 +81,12 @@ just use `pnpm` directly.
 - Ported constants and logic carry a source reference back to the C++ file and line
   (e.g. `Game.h:145`). Keep these — they make faithfulness auditable. Do not "tidy"
   transcribed numbers.
+- Ported struct/state fields deliberately keep the C++ `snake_case` names
+  (`block_count`, `top_occupied_row`, `f_y`, ...) so the sim reads one-to-one
+  against the reference and desyncs are easy to trace. This is an intentional
+  exception to idiomatic TS camelCase for the simulation's internal surface; a
+  Phase 2 client-facing facade can expose idiomatic names if needed. New TS-only
+  API (methods, the RNG helpers, etc.) stays camelCase.
 - Prefer typed arrays / plain objects and fixed-size stores in the sim; no allocation
   during play (mirrors the C++ object stores).
 - The RNG (`packages/core/src/rng.ts`) mirrors the C++ `Random` helper API
@@ -105,8 +111,12 @@ just use `pnpm` directly.
 - [x] Phase 1.2 — seedable PRNG → `packages/core/src/rng.ts` (production RNG;
       Mulberry32-based, serializable). C++ sequence-exact validation deferred to the
       RNG-draw-log harness.
-- [ ] Phase 1.3 — Grid + Block/Garbage stores
-- [ ] Phase 1.4 — Swapper, Creep
+- [x] Phase 1.3 — Grid + Block/Garbage stores → `grid.ts`, `block.ts`,
+      `garbage.ts`, `flavors.ts` (element store + accessors, fixed-size object
+      pools, flavor rules, check-registry linkage). Physics (`timeStep`),
+      RNG-driven board/creep generation, combos, and `LevelLights` are deferred
+      to the phases below and marked with `TODO(Phase …)` in-source.
+- [ ] Phase 1.4 — Swapper, Creep (incl. initial board fill + LevelLights)
 - [ ] Phase 1.5 — Combos → garbage (ComboTabulator/GarbageGenerator/GarbageQueue)
 - [ ] Phase 1.6 — `GameSim` tick driver (replicate `Game::timeStep` call order)
 - [ ] Phase 1.7-1.8 — Controller/ActionState + ActionRecorder replay
