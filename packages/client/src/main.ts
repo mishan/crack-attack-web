@@ -14,6 +14,7 @@
 import { GameSim } from '@crack-attack/core';
 import { KeyboardInput } from './input/keyboard.js';
 import { BoardView } from './render/boardView.js';
+import { HudView } from './render/hudView.js';
 import { FixedTimestep } from './sim/fixedTimestep.js';
 import { deriveViewModel } from './view/boardViewModel.js';
 import { ViewInterpolator } from './view/viewInterpolator.js';
@@ -33,6 +34,7 @@ function boot(): void {
   const initial = deriveViewModel(sim);
   interp.push(initial);
   const view = new BoardView(app, initial.width, initial.visibleHeight);
+  const hud = hudEl ? new HudView(hudEl) : null;
 
   const fitToWindow = (): void => view.resize(globalThis.innerWidth, globalThis.innerHeight);
   fitToWindow();
@@ -70,15 +72,7 @@ function boot(): void {
     const vm = interp.sample(clock.alpha); // blend the last two ticks
     view.update(vm);
     view.render();
-
-    if (hudEl) {
-      const danger = Math.round(vm.hud.dangerFraction * 100);
-      hudEl.textContent =
-        `tick ${vm.hud.tick}\n` +
-        `danger ${danger}%\n` +
-        (vm.hud.dyingCount ? `popping ${vm.hud.dyingCount}\n` : '') +
-        (vm.hud.lost ? 'LOST — press R' : '');
-    }
+    hud?.update(vm.hud);
 
     globalThis.requestAnimationFrame(frame);
   };

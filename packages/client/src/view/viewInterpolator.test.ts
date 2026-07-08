@@ -28,10 +28,12 @@ function model(
     cursor: { x: 2, y: Math.floor(cursorRenderY), renderY: cursorRenderY },
     hud: {
       tick: 0,
+      elapsedSeconds: 0,
       awakingCount: 0,
       dyingCount: 0,
       topEffectiveRow: 0,
       dangerFraction: 0,
+      lossCountdown: null,
       lost: false,
     },
   };
