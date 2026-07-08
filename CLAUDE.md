@@ -116,13 +116,17 @@ just use `pnpm` directly.
       pools, flavor rules, check-registry linkage). Physics (`timeStep`),
       RNG-driven board/creep generation, combos, and `LevelLights` are deferred
       to the phases below and marked with `TODO(Phase …)` in-source.
-- [~] Phase 1.4 — **generation + rise landed**: RNG creep-row generation
-  (`BlockManager.newCreepRow`/`newCreepBlock`, non-X), initial board fill
-  (`board.ts` `generateInitialBoard`), and grid rise (`Grid.shiftGridUp` +
-  `board.ts` `shiftBoardUp`). All share one gameplay RNG stream; draw order
-  matches the C++. **Deferred within 1.4** (need Controller/combos/GameSim):
-  the Swapper input/swap-execution state machine and the Creep timer/loss
-  state machine; `LevelLights` is a Displayer/Communicator subsystem → Phase 2.
+- [x] Phase 1.4 — **generation + rise + Creep landed**: RNG creep-row generation
+      (`BlockManager.newCreepRow`/`newCreepBlock`, non-X), initial board fill
+      (`board.ts` `generateInitialBoard`), grid rise (`Grid.shiftGridUp` +
+      `board.ts` `shiftBoardUp`, now including `Swapper.shiftUp`), and the Creep
+      state machine (`creep.ts`): velocity ramp, safe-height freeze, loss countdown,
+      per-grid board rise + fresh creep row + elimination linking, and manual
+      advance. All share one gameplay RNG stream; draw order matches the C++. Creep
+      owns the first-row draw in `gameStart` and runs at the `Game::idlePlay`
+      position in `GameSim.step`; loss routes through a `notifyLoss` hook
+      (`GameSim.lost`). `LevelLights`/`LoseBar` are Displayer/Communicator
+      subsystems → Phase 2.
 - [x] Phase 1.5 — Combos → garbage: `combo.ts` (ComboTabulator), `comboManager.ts`,
       `garbageGenerator.ts` (magnitude/multiplier → garbage dimensions + flavors,
       drop-delay queue, per-tick drop), plus `GarbageManager.newFallingGarbage`
