@@ -4,11 +4,14 @@
  * The Garbage object and its fixed-size store/manager. Ported from
  * `Garbage.{h,cxx}` and the store half of `GarbageManager.{h,cxx}`.
  *
- * Scope so far: the data model + allocation (Phase 1.3) and the drop-placement
+ * Scope so far: the data model + allocation (Phase 1.3), the drop-placement
  * `newFallingGarbage(height, width, flavor, timeStep)` that computes a drop row
- * from the stack (Phase 1.5). Deferred:
- *   - awaking/shatter (`initializeAwaking`, `startShattering`) + combos → 1.5+
- *   - per-tick physics (`timeStep`, falling) → Phase 1.6
+ * from the stack (Phase 1.5), and the per-tick physics — `timeStep`
+ * (fall/land + awaking countdown), `startFalling`, and `initializeAwaking`
+ * (Garbage physics). Deferred:
+ *   - shatter *trigger*: `startShattering`, the Grid `shatterGarbage`
+ *     detection, and the `newAwakingGarbage`/`newAwakingBlock` factories that
+ *     turn an eliminated garbage into awaking rows → next branch.
  *
  * As with blocks, the manager is an instance owning its store (not a static
  * singleton), and grid placement is delegated to an injected sink. The
@@ -18,18 +21,35 @@
  * Original work Copyright (C) 2000 Daniel Nelson. GPL-2.0-or-later.
  */
 
+import type { BlockSimContext } from './block.js';
 import {
+  GC_FALL_VELOCITY,
   GC_GARBAGE_STORE_SIZE,
   GC_HANG_DELAY,
+  GC_INTERNAL_POP_DELAY,
   GC_MAX_GARBAGE_HEIGHT,
   GC_PLAY_HEIGHT,
   GC_PLAY_WIDTH,
   GC_SAFE_HEIGHT,
+  GC_STEPS_PER_GRID,
 } from './constants.js';
 import type { ComboTabulator } from './combo.js';
-import { GF_BLACK, GF_GRAY } from './flavors.js';
-import { GR_FALLING, GR_GARBAGE, type GarbageGridSink, type Grid } from './grid.js';
+import { GF_BLACK, GF_GRAY, GF_NORMAL } from './flavors.js';
+import {
+  GR_BLOCK,
+  GR_EMPTY,
+  GR_FALLING,
+  GR_GARBAGE,
+  GR_HANGING,
+  GR_IMMUTABLE,
+  type GarbageGridSink,
+  type Grid,
+} from './grid.js';
 import type { Rng } from './rng.js';
+
+/** Pop-direction bits cycle 1,2,4,8 → back to 1 (Garbage.cxx:175). */
+const BR_DIRECTION_4 = 1 << 3;
+const BR_DIRECTION_1 = 1 << 0;
 
 // --- Garbage states (Garbage.h:53-56) --------------------------------------
 // NOTE: these GS_* are *garbage* states and are a different namespace from the
@@ -161,6 +181,217 @@ export class Garbage {
     if (this.flavor === GF_GRAY) return dueTo.flavor === GF_GRAY;
     if (this.flavor === GF_BLACK) return dueTo.flavor === GF_BLACK;
     if (dueTo.flavor === GF_GRAY) return false;
+    return true;
+  }
+
+  /**
+   * Initialize as awaking garbage (the transient state a shattered slab passes
+   * through before it pops into blocks/garbage) and stamp its cells GR_IMMUTABLE.
+   * Mirrors `Garbage::initializeAwaking` (Garbage.cxx:95). Awaking garbage is
+   * always full width. Bumps `awaking_count` (Creep won't rise while > 0).
+   *
+   * Currently only reachable via shattering, which is a later branch; ported
+   * here so the awaking half of `timeStep` is complete and testable.
+   */
+  initializeAwaking(
+    x: number,
+    y: number,
+    height: number,
+    popDelay: number,
+    awakeDelay: number,
+    combo: ComboTabulator | null,
+    popColor: number,
+    ctx: BlockSimContext,
+  ): void {
+    // Awaking garbage is always full width: validate the dimensions and require
+    // x === 0 up front so a bad call fails fast instead of stamping partway then
+    // throwing on an out-of-bounds cell.
+    assertGarbageDims(height, GC_PLAY_WIDTH);
+    if (x !== 0) {
+      throw new RangeError(`Awaking garbage must be full-width at x=0 (got x ${x})`);
+    }
+
+    this.x = x;
+    this.y = y;
+    this.height = height;
+    this.width = GC_PLAY_WIDTH;
+    this.flavor = GF_NORMAL;
+    this.f_y = 0;
+
+    this.state = GS_AWAKING;
+    this.alarm = ctx.clock.time_step + awakeDelay;
+    this.pop_alarm = ctx.clock.time_step + popDelay;
+    this.sections_popped = 0;
+    this.pop_direction = ctx.blocks.generatePopDirectionN(height * this.width);
+    this.pop_color = popColor;
+    this.initial_fall = false;
+    this.awaking_combo = combo;
+
+    // Stamp the slab first, then bump the counter — if any addGarbage throws
+    // (occupied/out-of-bounds), awaking_count is left untouched so a partial
+    // placement can't wrongly freeze Creep's rise.
+    for (let h = 0; h < height; h++) {
+      for (let w = 0; w < this.width; w++) {
+        ctx.grid.addGarbage(x + w, y + h, this, GR_IMMUTABLE);
+      }
+    }
+
+    ctx.awaking_count++;
+  }
+
+  /**
+   * One tick of garbage physics. Faithful port of `Garbage::timeStep`
+   * (Garbage.cxx:135). Called from the bottom-to-top grid walk with the walk
+   * cursor `(lX, lY)`; returns the advanced cursor so a multi-cell slab is
+   * visited once. Handles the fall-start check (GS_STATIC), the awaking pop
+   * countdown (GS_AWAKING), and the per-cell fall + landing (GS_FALLING).
+   */
+  timeStep(ctx: BlockSimContext, lX: number, lY: number): [number, number] {
+    const grid = ctx.grid;
+    const now = ctx.clock.time_step;
+
+    // Advance the grid-walk cursor over our footprint. Full-width (or 1-tall)
+    // garbage owns whole rows, so we can skip them; a narrow tall slab is only
+    // acted on when the walk reaches its top row.
+    if (this.height === 1 || this.width === GC_PLAY_WIDTH) {
+      lY += this.height - 1;
+      lX += this.width - 1;
+    } else {
+      lX += this.width - 1;
+      if (lY !== this.y + this.height - 1) return [lX, lY];
+    }
+
+    // --- states that may change due to falling ---
+    if (this.state & GS_STATIC) {
+      if (this.isUnsupported(grid)) this.startFalling(ctx);
+    } else if (this.state & GS_AWAKING) {
+      // Pop one section each GC_INTERNAL_POP_DELAY; the last section doesn't
+      // re-arm the pop timer.
+      if (this.sections_popped < this.width * this.height && this.pop_alarm === now) {
+        this.sections_popped++;
+        if (this.sections_popped < this.width * this.height) {
+          this.pop_direction =
+            this.pop_direction & BR_DIRECTION_4 ? BR_DIRECTION_1 : this.pop_direction << 1;
+          this.pop_alarm = now + GC_INTERNAL_POP_DELAY;
+        }
+      }
+
+      if (this.alarm === now) {
+        ctx.awaking_count--;
+
+        if (this.isUnsupported(grid)) {
+          // fall, passing the stored combo along to blocks above
+          this.startFalling(ctx, this.awaking_combo, true, true);
+        } else {
+          this.state = GS_STATIC;
+          for (let h = 0; h < this.height; h++) {
+            for (let w = 0; w < this.width; w++) {
+              grid.changeState(this.x + w, this.y + h, this, GR_GARBAGE);
+            }
+          }
+        }
+      }
+    }
+
+    // --- falling ---
+    if (this.state & GS_FALLING) {
+      if (this.alarm === now) this.alarm = 0; // hang alarm fires
+
+      if (this.alarm === 0) {
+        // at a cell boundary, decide whether to drop another row or land
+        if (this.f_y === 0) {
+          if (this.isUnsupported(grid)) {
+            this.y--;
+            this.f_y = GC_STEPS_PER_GRID;
+            for (let h = 0; h < this.height; h++) {
+              for (let w = 0; w < this.width; w++) {
+                grid.remove(this.x + w, this.y + h + 1, this);
+              }
+            }
+            for (let h = 0; h < this.height; h++) {
+              for (let w = 0; w < this.width; w++) {
+                grid.addGarbage(this.x + w, this.y + h, this, GR_FALLING);
+              }
+            }
+          } else {
+            // landed
+            this.state = GS_STATIC;
+            if (this.initial_fall) {
+              this.initial_fall = false;
+              grid.notifyImpact(this.y, this.height);
+            }
+            for (let h = 0; h < this.height; h++) {
+              for (let w = 0; w < this.width; w++) {
+                grid.changeState(this.x + w, this.y + h, this, GR_GARBAGE);
+              }
+            }
+          }
+        }
+
+        if (this.state & GS_FALLING) this.f_y -= GC_FALL_VELOCITY;
+      }
+    }
+
+    return [lX, lY];
+  }
+
+  /**
+   * Begin (or continue, for cascade calls) a fall. Faithful port of
+   * `Garbage::startFalling` (Garbage.cxx:283). Garbage carries no combo of its
+   * own but relays a combo fall to its upward neighbors so a chain keeps its
+   * tally. `selfCall` skips the support re-check the caller already did.
+   */
+  startFalling(
+    ctx: BlockSimContext,
+    combo: ComboTabulator | null = null,
+    noHang = false,
+    selfCall = false,
+  ): void {
+    const grid = ctx.grid;
+
+    if (!selfCall) {
+      if (!(this.state & GS_STATIC)) return;
+      // not going to fall if anything below isn't empty-or-already-falling
+      for (let w = 0; w < this.width; w++) {
+        if (!(grid.stateAt(this.x + w, this.y - 1) & (GR_EMPTY | GR_FALLING))) return;
+      }
+    }
+
+    this.state = GS_FALLING;
+
+    if (noHang) {
+      this.alarm = 0;
+      for (let h = 0; h < this.height; h++) {
+        for (let w = 0; w < this.width; w++) {
+          grid.changeState(this.x + w, this.y + h, this, GR_FALLING);
+        }
+      }
+    } else {
+      this.alarm = ctx.clock.time_step + GC_HANG_DELAY;
+      for (let h = 0; h < this.height; h++) {
+        for (let w = 0; w < this.width; w++) {
+          grid.changeState(this.x + w, this.y + h, this, GR_HANGING | GR_FALLING);
+        }
+      }
+    }
+
+    // relay a combo fall to whatever rests directly on top of us
+    if (this.y + this.height < GC_PLAY_HEIGHT) {
+      for (let w = 0; w < this.width; w++) {
+        const ax = this.x + w;
+        const ay = this.y + this.height;
+        const s = grid.stateAt(ax, ay);
+        if (s & GR_BLOCK) grid.blockAt(ax, ay).startFalling(ctx, combo, noHang);
+        else if (s & GR_GARBAGE) grid.garbageAt(ax, ay).startFalling(ctx, combo, noHang);
+      }
+    }
+  }
+
+  /** Whether every cell directly below the slab is empty (so it may fall). */
+  private isUnsupported(grid: Grid): boolean {
+    for (let w = 0; w < this.width; w++) {
+      if (!(grid.stateAt(this.x + w, this.y - 1) & GR_EMPTY)) return false;
+    }
     return true;
   }
 }

@@ -12,13 +12,11 @@
  * gameplay portion of `Game::idlePlay` (Game.cxx:345) in its exact call order.
  * Wall-clock accumulation stays *outside* the sim: callers feed it whole ticks.
  *
- * STATUS — driver skeleton (Phase 1.6). Construction, `gameStart` wiring, the
- * input snapshot, and the tick order are in place, and the subsystems that are
- * already ported (ComboManager, GarbageGenerator) run each tick. The per-tick
- * *physics* — Swapper, the block/garbage `timeStep` state machines, Creep, and
- * the Grid elimination detector — are marked with `TODO(physics)` at their exact
- * positions in `step` and are ported subsystem-by-subsystem in follow-up steps,
- * each exercised through this driver.
+ * STATUS — the tick driver and all gameplay physics are wired: Swapper, the
+ * block and garbage `timeStep` state machines, Creep (rise/loss), the Grid
+ * elimination detector, ComboManager, and GarbageGenerator each run at their
+ * `Game::idlePlay` position. The remaining `TODO(shatter)` is the garbage
+ * shatter *trigger* (Grid detection + awaking factories), ported next.
  *
  * Original work Copyright (C) 2000 Daniel Nelson, (C) 2004 Andrew Sayman.
  * GPL-2.0-or-later.
@@ -162,19 +160,34 @@ export class GameSim implements CreepSimContext {
   /**
    * Step every grid resident, bottom-to-top. Mirrors the grid walk in
    * `Game::idlePlay` (Game.cxx:415-423). Row 0 (the creep row) is skipped, as in
-   * the C++, so block reads of `y - 1` stay in bounds. Garbage stepping is a
-   * TODO until Garbage physics lands.
+   * the C++, so block reads of `y - 1` stay in bounds. Garbage advances the walk
+   * cursor over its footprint (`Garbage.timeStep` returns the new `[x, y]`) — the
+   * C++ passes the loop vars by reference. A full-width or 1-tall slab advances
+   * both `x` and `y` so it runs exactly once; a tall, narrow slab only advances
+   * `x`, so `timeStep` is invoked once per row it occupies but early-returns until
+   * the walk reaches its top row, where it does the actual work.
    */
   private stepResidents(): void {
-    for (let y = 1; y < GC_PLAY_HEIGHT; y++) {
-      for (let x = 0; x < GC_PLAY_WIDTH; x++) {
+    let y = 1;
+    while (y < GC_PLAY_HEIGHT) {
+      let x = 0;
+      while (x < GC_PLAY_WIDTH) {
         const rt = this.grid.residentTypeAt(x, y);
-        if (rt & GR_EMPTY) continue;
+        if (rt & GR_EMPTY) {
+          x++;
+          continue;
+        }
         if (rt & GR_BLOCK) {
           this.grid.blockAt(x, y).timeStep(this);
+          x++;
+        } else {
+          // Garbage may advance both cursor coords (full-width slabs skip rows).
+          const [nx, ny] = this.grid.garbageAt(x, y).timeStep(this, x, y);
+          x = nx + 1;
+          y = ny;
         }
-        // else GR_GARBAGE — TODO(physics): this.grid.garbageAt(x, y).timeStep(x, y)
       }
+      y++;
     }
   }
 
@@ -185,9 +198,9 @@ export class GameSim implements CreepSimContext {
     this.swapper.notifyLanding(x, y, block, combo);
   }
 
-  /** Start a garbage slab falling. No-op until Garbage physics is ported. */
-  startGarbageFalling(_garbage: Garbage, _combo: ComboTabulator | null, _noHang: boolean): void {
-    // TODO(Garbage physics): Garbage::startFalling — cascade a fall into garbage above.
+  /** A block/garbage fall reached a garbage slab below it — cascade the fall. */
+  startGarbageFalling(garbage: Garbage, combo: ComboTabulator | null, noHang: boolean): void {
+    garbage.startFalling(this, combo, noHang);
   }
 
   // --- CreepSimContext hooks -------------------------------------------------

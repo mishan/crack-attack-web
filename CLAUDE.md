@@ -134,19 +134,17 @@ just use `pnpm` directly.
       injectable `GarbageOutSink` (solo deals locally; netcode/AI plug in here).
       Score reporting (display) and cosmetic Sign/Sparkle effects deferred; the
       `GarbageQueue` class is AI-only → Phase 3.
-- [~] Phase 1.6 — **GameSim driver + Block physics + elimination detector
-  landed**: `gameSim.ts` owns the Clock, gameplay Rng, Grid, and all managers;
-  `gameStart` wires the C++ RNG-draw order (board fill → first creep row);
-  `step(actions)` replicates `Game::idlePlay`'s gameplay tick order (step block
-  residents → `Grid.timeStep` → ComboManager → GarbageGenerator). Block physics
-  (`block.ts` `timeStep` fall/hang/dying/awaking + `startFalling`/`startDying`/
-  `startSwapping`/`finishSwapping`/`initializeAwaking`) and the Grid elimination
-  detector (`Grid.timeStep` drain + `handleEliminationCheckRequest` 4-direction
-  pattern scan → `startDying` → combo) run against a `BlockSimContext` /
-  `GridSimContext` (GameSim). Cosmetic death axes use a separate unsynced
-  `cosmeticRng`. Still `TODO(physics)`: Creep and Garbage `timeStep` /
-  shattering (the `startGarbageFalling` / `shatterGarbage` hooks are stubbed
-  until those land).
+- [x] Phase 1.6 — **GameSim driver + Block physics + elimination detector
+      landed**: `gameSim.ts` owns the Clock, gameplay Rng, Grid, and all managers;
+      `gameStart` wires the C++ RNG-draw order (board fill → first creep row);
+      `step(actions)` replicates `Game::idlePlay`'s gameplay tick order (step block
+      residents → `Grid.timeStep` → ComboManager → GarbageGenerator). Block physics
+      (`block.ts` `timeStep` fall/hang/dying/awaking + `startFalling`/`startDying`/
+      `startSwapping`/`finishSwapping`/`initializeAwaking`) and the Grid elimination
+      detector (`Grid.timeStep` drain + `handleEliminationCheckRequest` 4-direction
+      pattern scan → `startDying` → combo) run against a `BlockSimContext` /
+      `GridSimContext` (GameSim). Cosmetic death axes use a separate unsynced
+      `cosmeticRng`.
 - [x] Phase 1.4/1.6 — **Swapper landed** (`swapper.ts`): input-driven cursor
       move (rate-limited by `GC_MOVE_DELAY`) and the swap state machine
       (allow/disallow checks, `GC_SWAP_DELAY` execution, two-sided swaps link a
@@ -154,6 +152,14 @@ just use `pnpm` directly.
       `GameSim.step` at the `Game::idlePlay` position; `notifyLanding` now delegates
       to it. X `reverseControls` and the `CountDownManager` intro gate deferred;
       `swap_factor`/`color` are render-only and left to the client.
+- [x] Phase 1.6 — **Garbage physics landed** (`garbage.ts`): `Garbage.timeStep`
+      (fall-start check → `startFalling`, awaking pop countdown, per-cell fall +
+      landing `notifyImpact`), `startFalling` (hang alarm, grid restamp, upward
+      combo-fall cascade into blocks/garbage), and `initializeAwaking`. Wired into
+      `GameSim.stepResidents` (garbage advances the walk cursor over its footprint)
+      and the `startGarbageFalling` hook. Still `TODO(shatter)`: the shatter
+      _trigger_ — `Garbage.startShattering`, the Grid `shatterGarbage` detection,
+      and the `newAwakingGarbage`/`newAwakingBlock` factories → next branch.
 - [~] Phase 1.7 (partial) — Controller/ActionState input snapshot (`controller.ts`);
   ActionRecorder replay still to come.
 - [ ] `tools/replay-check` digest harness + C++ instrumentation
