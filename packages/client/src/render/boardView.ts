@@ -13,6 +13,7 @@
 import {
   AmbientLight,
   BoxGeometry,
+  type BufferGeometry,
   Color,
   DirectionalLight,
   EdgesGeometry,
@@ -30,6 +31,7 @@ import {
   Vector3,
   WebGLRenderer,
 } from 'three';
+import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { GC_BLOCK_STORE_SIZE, GC_GARBAGE_STORE_SIZE } from '@crack-attack/core';
 import type { BoardViewModel } from '../view/boardViewModel.js';
 import { blockColor, garbageColor } from './palette.js';
@@ -110,6 +112,47 @@ export class BoardView {
     this.renderer = new WebGLRenderer({ antialias: true });
     this.renderer.setPixelRatio(Math.min(globalThis.devicePixelRatio ?? 1, 2));
     container.appendChild(this.renderer.domElement);
+
+    // Upgrade the block geometry from the fallback cube to the real rounded-cube
+    // model (converted by tools/obj2gltf). Async; blocks render as boxes until it
+    // arrives, and stay boxes if the fetch fails.
+    void this.loadBlockModel();
+  }
+
+  /**
+   * Fetch the glTF block model and swap its geometry into the block instances.
+   * The per-instance colours (instanceColor) and material are unaffected — only
+   * the shape changes. Normalizes the model to `BLOCK_SIZE` and centres it.
+   */
+  private async loadBlockModel(): Promise<void> {
+    try {
+      const url = new URL('models/block.gltf', document.baseURI).href;
+      const gltf = await new GLTFLoader().loadAsync(url);
+
+      let geometry: BufferGeometry | null = null;
+      gltf.scene.traverse((o) => {
+        if (!geometry && (o as Mesh).isMesh) geometry = (o as Mesh).geometry as BufferGeometry;
+      });
+      if (!geometry) return; // no mesh in the model → keep the box fallback
+
+      // Centre at the origin and scale so the largest dimension fills a cell.
+      const geom = geometry as BufferGeometry;
+      geom.computeBoundingBox();
+      const box = geom.boundingBox;
+      if (box) {
+        const size = box.getSize(new Vector3());
+        const center = box.getCenter(new Vector3());
+        const maxDim = Math.max(size.x, size.y, size.z) || 1;
+        geom.translate(-center.x, -center.y, -center.z);
+        geom.scale(BLOCK_SIZE / maxDim, BLOCK_SIZE / maxDim, BLOCK_SIZE / maxDim);
+      }
+
+      const old = this.blocks.geometry;
+      this.blocks.geometry = geom;
+      old.dispose();
+    } catch {
+      // Keep the box fallback; the model is a visual upgrade, not required.
+    }
   }
 
   /** World position for a cell (writes into `this.pos`). */

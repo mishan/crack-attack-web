@@ -180,8 +180,11 @@ just use `pnpm` directly.
   (blends the last two ticks by the render `alpha`, matching sprites by pool
   `(id, generation)`, so motion is smooth above 50 Hz). `BoardView` (Three.js instanced meshes) and
   `main.ts` (RAF loop, input listeners, restart) are the thin DOM/WebGL layer.
-  `pnpm --filter @crack-attack/client dev`. Still to come: glTF assets
-  (`tools/obj2gltf`), HUD polish (level lights, lose bar, combo signs), and audio.
+  Blocks render the real rounded-cube glTF model (`public/models/block.gltf`,
+  converted by `tools/obj2gltf`), loaded via `GLTFLoader` and swapped into the
+  block `InstancedMesh` (box fallback until it arrives).
+  `pnpm --filter @crack-attack/client dev`. Still to come: textured/garbage glTF
+  models, HUD polish (level lights, lose bar, combo signs), and audio.
 - [ ] Phase 3 AI, Phase 4 multiplayer, Phase 5 lobby
 
 See `BROWSER_PORT_PLAN.md` for the full phase breakdown and suggested order of work.
