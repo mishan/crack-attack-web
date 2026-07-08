@@ -20,6 +20,7 @@ import {
   BS_SWAPPING,
   GC_PLAY_HEIGHT,
   GC_PLAY_WIDTH,
+  GC_DYING_DELAY,
   GC_SAFE_HEIGHT,
   GC_STEPS_PER_GRID,
   GC_STEPS_PER_SECOND,
@@ -55,6 +56,12 @@ export interface BlockSprite {
   readonly phase: BlockPhase;
   /** True for the incoming creep row (grid row 0) — not yet playable; drawn dim. */
   readonly preview: boolean;
+  /**
+   * For a `dying` block, how far through its pop countdown it is (0 at the start,
+   * →1 as it's about to be removed). 0 for every other phase. Drives the
+   * shrink/spin pop animation.
+   */
+  readonly deathProgress: number;
 }
 
 export interface GarbageSprite {
@@ -132,6 +139,15 @@ export function deriveViewModel(sim: GameSim): BoardViewModel {
 
       if (rt & GR_BLOCK) {
         const b = grid.blockAt(x, y);
+        const phase = blockPhase(b.state);
+        // A dying block is drawn with `alarm` ranging over [GC_DYING_DELAY .. 1]
+        // (it's removed the tick `alarm` would hit 0), so divide by
+        // `GC_DYING_DELAY - 1` to run deathProgress 0 → 1 across those visible
+        // frames — reaching a full 1.0 on the last frame before it pops.
+        const deathProgress =
+          phase === 'dying'
+            ? Math.max(0, Math.min(1, (GC_DYING_DELAY - b.alarm) / (GC_DYING_DELAY - 1)))
+            : 0;
         blocks.push({
           id: b.id,
           generation: b.generation,
@@ -139,8 +155,9 @@ export function deriveViewModel(sim: GameSim): BoardViewModel {
           y,
           renderY: y + b.f_y / GC_STEPS_PER_GRID + creepOffset,
           flavor: b.flavor,
-          phase: blockPhase(b.state),
+          phase,
           preview: y === 0,
+          deathProgress,
         });
       } else if (rt & GR_GARBAGE) {
         const g = grid.garbageAt(x, y);

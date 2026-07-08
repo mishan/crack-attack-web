@@ -57,6 +57,9 @@ export class BoardView {
   private readonly scl = new Vector3();
   private readonly rot = new Quaternion();
   private readonly color = new Color();
+  // A tumble axis for the pop animation, and the colour it flashes toward.
+  private readonly spinAxis = new Vector3(0.35, 1, 0.15).normalize();
+  private readonly flash = new Color(0xffffff);
 
   constructor(container: HTMLElement, width: number, visibleHeight: number) {
     this.halfW = (width - 1) / 2;
@@ -166,14 +169,24 @@ export class BoardView {
     let i = 0;
     for (const b of vm.blocks) {
       this.place(b.x, b.renderY);
-      this.scl.setScalar(b.phase === 'dying' ? 0.6 : 1);
+      this.color.copy(blockColor(b.flavor));
+
+      if (b.phase === 'dying') {
+        // Pop: shrink toward nothing, tumble, and flash white over the countdown.
+        this.scl.setScalar(Math.max(0.02, 1 - 0.92 * b.deathProgress));
+        this.rot.setFromAxisAngle(this.spinAxis, b.deathProgress * Math.PI * 1.5);
+        this.color.lerp(this.flash, 0.6 * b.deathProgress);
+      } else {
+        this.scl.setScalar(1);
+        this.rot.identity();
+        if (b.phase === 'awaking') this.color.multiplyScalar(0.5);
+        // Dim the incoming creep row so it reads as "not yet in play" — the lowest
+        // full-brightness row is the bottom *playable* row the cursor can reach.
+        if (b.preview) this.color.multiplyScalar(0.35);
+      }
+
       this.m.compose(this.pos, this.rot, this.scl);
       this.blocks.setMatrixAt(i, this.m);
-      this.color.copy(blockColor(b.flavor));
-      if (b.phase === 'awaking') this.color.multiplyScalar(0.5);
-      // Dim the incoming creep row so it reads as "not yet in play" — the lowest
-      // full-brightness row is the bottom *playable* row the cursor can reach.
-      if (b.preview) this.color.multiplyScalar(0.35);
       this.blocks.setColorAt(i, this.color);
       i++;
     }
@@ -181,7 +194,10 @@ export class BoardView {
     this.blocks.instanceMatrix.needsUpdate = true;
     if (this.blocks.instanceColor) this.blocks.instanceColor.needsUpdate = true;
 
-    // Garbage slabs (per-instance scale encodes width × height).
+    // Garbage slabs (per-instance scale encodes width × height). The block loop
+    // leaves `this.rot` set to a dying block's tumble, so reset it to identity
+    // before composing slab transforms (slabs are axis-aligned).
+    this.rot.identity();
     let g = 0;
     for (const s of vm.garbage) {
       const cx = s.x + (s.width - 1) / 2;

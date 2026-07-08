@@ -22,6 +22,7 @@ function model(
         flavor: 0,
         phase: 'falling',
         preview: false,
+        deathProgress: 0,
       },
     ],
     garbage: [],
