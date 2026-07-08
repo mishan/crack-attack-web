@@ -24,6 +24,7 @@ import { BF_NUMBER_NORMAL, GC_PLAY_WIDTH } from './constants.js';
 import type { BlockManager } from './block.js';
 import type { GarbageManager } from './garbage.js';
 import { GR_EMPTY, type Grid } from './grid.js';
+import type { Swapper } from './swapper.js';
 
 /**
  * Fill the initial board with resting blocks. Mirrors the generation half of
@@ -80,17 +81,24 @@ export function generateInitialBoard(grid: Grid, blocks: BlockManager): void {
 /**
  * Raise the whole board one cell and shift the object stores to match. Mirrors
  * the full behavior of `Grid::shiftGridUp` (Grid.cxx:339): the grid array shift
- * (via `grid.shiftGridUp`) followed by `BlockManager::shiftUp` and
- * `GarbageManager::shiftUp`, in that order. Returns false when the board can't
- * rise (already at the top). `Swapper::shiftUp` and `LevelLights::levelRaise`
- * are wired in when those subsystems land.
+ * (via `grid.shiftGridUp`) followed by `BlockManager::shiftUp`,
+ * `GarbageManager::shiftUp`, and `Swapper::shiftUp`, in that order. Returns
+ * false when the board can't rise (already at the top). The `swapper` is
+ * optional so board-only tests can shift without a cursor; `LevelLights::
+ * levelRaise` stays deferred (Phase 2).
  */
-export function shiftBoardUp(grid: Grid, blocks: BlockManager, garbage: GarbageManager): boolean {
+export function shiftBoardUp(
+  grid: Grid,
+  blocks: BlockManager,
+  garbage: GarbageManager,
+  swapper?: Swapper,
+): boolean {
   if (!grid.shiftGridUp()) return false;
 
   blocks.shiftUp();
   garbage.shiftUp();
-  // TODO: Swapper.shiftUp() (Phase 1.4 swapper) and LevelLights.levelRaise (Phase 2).
+  swapper?.shiftUp();
+  // TODO: LevelLights.levelRaise (Phase 2).
 
   return true;
 }

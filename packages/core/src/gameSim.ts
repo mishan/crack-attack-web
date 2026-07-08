@@ -26,20 +26,21 @@
 
 import type { Block } from './block.js';
 import { BlockManager } from './block.js';
-import { generateInitialBoard } from './board.js';
+import { generateInitialBoard, shiftBoardUp } from './board.js';
 import { Clock } from './clock.js';
 import { ComboManager } from './comboManager.js';
+import { Creep, type CreepSimContext } from './creep.js';
 import type { ComboTabulator } from './combo.js';
 import type { ActionState } from './controller.js';
 import type { Garbage } from './garbage.js';
 import { GarbageManager } from './garbage.js';
 import { GarbageGenerator } from './garbageGenerator.js';
-import { GR_BLOCK, GR_EMPTY, Grid, type GridSimContext } from './grid.js';
+import { GR_BLOCK, GR_EMPTY, Grid } from './grid.js';
 import { Rng } from './rng.js';
 import { Swapper } from './swapper.js';
 import { GC_PLAY_HEIGHT, GC_PLAY_WIDTH } from './constants.js';
 
-export class GameSim implements GridSimContext {
+export class GameSim implements CreepSimContext {
   /** Shared tick counter (mirrors `Game::time_step`). */
   readonly clock = new Clock();
   /** The seed this sim was created with; `gameStart` reseeds from it. */
@@ -60,6 +61,11 @@ export class GameSim implements GridSimContext {
   readonly combos: ComboManager;
   /** The player's swap cursor. */
   readonly swapper = new Swapper();
+  /** Board rise + loss state machine. */
+  readonly creep = new Creep();
+
+  /** True once Creep has detected a game loss. Mirrors solo `GS_END_PLAY`. */
+  lost = false;
 
   /**
    * Count of blocks currently awaking. Gameplay-relevant: Creep does not rise
@@ -93,6 +99,7 @@ export class GameSim implements GridSimContext {
     this.clock.time_step = 0;
     this.awaking_count = 0;
     this.dying_count = 0;
+    this.lost = false;
 
     // Reseed both RNGs so a restart is fully deterministic and does not depend
     // on draws made during the previous game.
@@ -108,9 +115,11 @@ export class GameSim implements GridSimContext {
     this.grid.gameStart();
     this.swapper.gameStart();
 
-    // RNG-driven starting position: board fill, then the first creep row.
+    // RNG-driven starting position: board fill (Grid::gameStart), then the first
+    // creep row (Creep::gameStart → BlockManager::newCreepRow). Draw order is
+    // load-bearing, so Creep owns the first-row draw exactly as the C++ does.
     generateInitialBoard(this.grid, this.blocks);
-    this.blocks.newCreepRow();
+    this.creep.gameStart(this);
   }
 
   /**
@@ -134,8 +143,8 @@ export class GameSim implements GridSimContext {
     // Bottom-to-top so a block's support is stepped before the block itself.
     this.stepResidents();
 
-    // Game.cxx:426 — Creep::timeStep(actions): rise, safe-height freeze, loss.
-    // TODO(physics): this.creep.timeStep(actions)
+    // Game.cxx:426 — Creep::timeStep(): rise, safe-height freeze, loss.
+    this.creep.timeStep(this, actions);
 
     // Game.cxx:429 — Grid::timeStep(): drain elimination checks, detect
     // patterns, start dying, update top rows.
@@ -179,5 +188,21 @@ export class GameSim implements GridSimContext {
   /** Start a garbage slab falling. No-op until Garbage physics is ported. */
   startGarbageFalling(_garbage: Garbage, _combo: ComboTabulator | null, _noHang: boolean): void {
     // TODO(Garbage physics): Garbage::startFalling — cascade a fall into garbage above.
+  }
+
+  // --- CreepSimContext hooks -------------------------------------------------
+
+  /**
+   * Raise the whole board one row: grid array, block/garbage stores, and the
+   * swap cursor. Mirrors `Grid::shiftGridUp` (Grid.cxx:339). Returns false when
+   * the board can't rise (top row occupied).
+   */
+  shiftBoardUp(): boolean {
+    return shiftBoardUp(this.grid, this.blocks, this.garbageStore, this.swapper);
+  }
+
+  /** Creep detected a loss. In solo play this simply ends the game. */
+  notifyLoss(): void {
+    this.lost = true;
   }
 }
