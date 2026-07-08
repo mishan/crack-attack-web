@@ -140,9 +140,16 @@ just use `pnpm` directly.
   detector (`Grid.timeStep` drain + `handleEliminationCheckRequest` 4-direction
   pattern scan → `startDying` → combo) run against a `BlockSimContext` /
   `GridSimContext` (GameSim). Cosmetic death axes use a separate unsynced
-  `cosmeticRng`. Still `TODO(physics)`: Swapper, Creep, and Garbage `timeStep` /
-  shattering (the `notifyLanding` / `startGarbageFalling` / `shatterGarbage`
-  hooks are stubbed until those land).
+  `cosmeticRng`. Still `TODO(physics)`: Creep and Garbage `timeStep` /
+  shattering (the `startGarbageFalling` / `shatterGarbage` hooks are stubbed
+  until those land).
+- [x] Phase 1.4/1.6 — **Swapper landed** (`swapper.ts`): input-driven cursor
+      move (rate-limited by `GC_MOVE_DELAY`) and the swap state machine
+      (allow/disallow checks, `GC_SWAP_DELAY` execution, two-sided swaps link a
+      shared combo, queued move/swap debounce, `notifyLanding`). Wired into
+      `GameSim.step` at the `Game::idlePlay` position; `notifyLanding` now delegates
+      to it. X `reverseControls` and the `CountDownManager` intro gate deferred;
+      `swap_factor`/`color` are render-only and left to the client.
 - [~] Phase 1.7 (partial) — Controller/ActionState input snapshot (`controller.ts`);
   ActionRecorder replay still to come.
 - [ ] `tools/replay-check` digest harness + C++ instrumentation
