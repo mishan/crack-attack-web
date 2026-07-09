@@ -198,9 +198,9 @@ just use `pnpm` directly.
   boundary (faithful to `GL_CLIP_PLANE_PLAY_FLOOR`) hides it below the play floor,
   so it slides up dim (`creep_colors` at 0.25×) as the board creeps and snaps to
   full brightness when the grid shift promotes it to row 1. Garbage slabs render
-  one rounded-cube per cell (the same glTF
-  geometry, tinted by flavor), faithful to `DrawGarbage.cxx` stamping block
-  geometry at each garbage square, and carry the mottled garbage lightmap: a
+  as a single solid bar per piece (a unit cube scaled to the slab's width ×
+  height, tinted by flavor) — a smooth surface distinct from the faceted blocks —
+  and carry the mottled garbage lightmap: a
   baked 64×64 luminance map (`public/textures/garbage_lightmap.png`, remapped to
   the reference's [0.85, 1.0] range) is sampled by _world_ position via an
   `onBeforeCompile` patch on the garbage material (UV = worldXY·(-1/PLAY_WIDTH) +
