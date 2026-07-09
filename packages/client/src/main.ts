@@ -14,6 +14,7 @@
 import { GameSim, GC_STEPS_PER_SECOND } from '@crack-attack/core';
 import { KeyboardInput } from './input/keyboard.js';
 import { BoardView } from './render/boardView.js';
+import { GarbageDecalView } from './render/garbageDecalView.js';
 import { HudView } from './render/hudView.js';
 import { SignsView } from './render/signsView.js';
 import { FixedTimestep } from './sim/fixedTimestep.js';
@@ -38,7 +39,10 @@ function boot(): void {
   const initial = deriveViewModel(sim);
   interp.push(initial);
   const view = new BoardView(app, initial.width, initial.visibleHeight);
-  const signs = new SignsView(view.scene, (initial.width - 1) / 2, (initial.visibleHeight - 1) / 2);
+  const halfW = (initial.width - 1) / 2;
+  const halfH = (initial.visibleHeight - 1) / 2;
+  const signs = new SignsView(view.scene, halfW, halfH);
+  const decals = new GarbageDecalView(view.scene, halfW, halfH);
   const hud = hudEl ? new HudView(hudEl) : null;
 
   const fitToWindow = (): void => view.resize(globalThis.innerWidth, globalThis.innerHeight);
@@ -53,6 +57,7 @@ function boot(): void {
       interp.reset();
       interp.push(deriveViewModel(sim));
       signs.clear();
+      decals.clear();
       input.clear();
       return;
     }
@@ -86,6 +91,7 @@ function boot(): void {
 
     const vm = interp.sample(clock.alpha); // blend the last two ticks
     view.update(vm);
+    decals.update(vm.garbage);
     view.render();
     hud?.update(vm.hud);
 
