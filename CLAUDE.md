@@ -234,7 +234,7 @@ just use `pnpm` directly.
   robustness. The red/blue rule is the pure, tested `view/levelLights.ts`. `pnpm --filter @crack-attack/client dev`. Still to come: audio.
 - [~] Phase 4 (started) — **protocol messages landed** (`packages/protocol`):
   the wire surface for **input-relay lockstep**, a deliberate upgrade from the
-  C++ `Communicator`'s event exchange. Both clients run *both* sims (`GameSim`
+  C++ `Communicator`'s event exchange. Both clients run _both_ sims (`GameSim`
   is instanced for exactly this) from a shared seed, advancing a tick only when
   both players' inputs for it are known; local input is scheduled `inputDelay`
   ticks ahead to hide latency. Consequences: garbage events never cross the
