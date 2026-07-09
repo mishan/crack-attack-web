@@ -188,6 +188,11 @@ just use `pnpm` directly.
   between ticks) and `swapRight`, and `BoardView` swings the block a semicircle
   around the edge it shares with its partner (faithful to the `swap_factor`
   transform in `DrawBlocks.cxx`), so the two blocks pass on opposite sides.
+  Blocks minted when garbage shatters pop in one-by-one: `deriveViewModel` reports
+  each awaking block's `awakeProgress` (from its `pop_alarm`, staggered per block
+  and interpolated between ticks), and `BoardView` grows it (0.5→1), tumbles it
+  into alignment, and eases its colour from the garbage flavour to the block
+  flavour — faithful to the `BS_AWAKING` pop in `DrawBlocks.cxx`.
   The incoming creep row (grid row 0) rises in from off-screen: a
   world-space clip plane on the block/garbage materials at the row 0 / row 1
   boundary (faithful to `GL_CLIP_PLANE_PLAY_FLOOR`) hides it below the play floor,

@@ -13,7 +13,7 @@ import {
   GameSim,
   noActions,
 } from '@crack-attack/core';
-import { deriveViewModel } from './boardViewModel.js';
+import { POP_ROTATE_TIME, computeAwakeProgress, deriveViewModel } from './boardViewModel.js';
 
 describe('deriveViewModel', () => {
   it('reports playfield dimensions from the core constants', () => {
@@ -125,6 +125,11 @@ describe('deriveViewModel', () => {
     }
   });
 
+  it('reports awakeProgress 1 for a fresh board (nothing awaking)', () => {
+    const vm = deriveViewModel(new GameSim(1));
+    for (const b of vm.blocks) expect(b.awakeProgress).toBe(1);
+  });
+
   it('surfaces HUD counters and a clamped danger fraction', () => {
     const sim = new GameSim(1);
     const vm = deriveViewModel(sim);
@@ -153,5 +158,25 @@ describe('deriveViewModel', () => {
       expect(g.width).toBeGreaterThan(0);
       expect(g.height).toBeGreaterThan(0);
     }
+  });
+});
+
+describe('computeAwakeProgress', () => {
+  it('is 1 for an already-popped block (pop_alarm 0)', () => {
+    expect(computeAwakeProgress(0, 123)).toBe(1);
+  });
+
+  it('is 0 while the block is still dormant (pop far in the future)', () => {
+    expect(computeAwakeProgress(100 + POP_ROTATE_TIME, 100)).toBe(0);
+    expect(computeAwakeProgress(100 + POP_ROTATE_TIME + 5, 100)).toBe(0);
+  });
+
+  it('rises from 0 to ~1 across the pop-rotate window', () => {
+    const now = 100;
+    // remaining = POP_ROTATE_TIME → 0; remaining = 1 → nearly 1.
+    expect(computeAwakeProgress(now + POP_ROTATE_TIME, now)).toBe(0);
+    expect(computeAwakeProgress(now + 1, now)).toBeCloseTo(1 - 1 / POP_ROTATE_TIME, 5);
+    // Monotonic as the pop approaches.
+    expect(computeAwakeProgress(now + 3, now)).toBeGreaterThan(computeAwakeProgress(now + 6, now));
   });
 });

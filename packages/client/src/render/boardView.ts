@@ -38,7 +38,14 @@ import {
   WebGLRenderer,
 } from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
-import { GC_BLOCK_STORE_SIZE, GC_PLAY_HEIGHT, GC_PLAY_WIDTH } from '@crack-attack/core';
+import {
+  BR_DIRECTION_1,
+  BR_DIRECTION_2,
+  BR_DIRECTION_4,
+  GC_BLOCK_STORE_SIZE,
+  GC_PLAY_HEIGHT,
+  GC_PLAY_WIDTH,
+} from '@crack-attack/core';
 import type { BoardViewModel } from '../view/boardViewModel.js';
 import { blockColor, garbageColor } from './palette.js';
 
@@ -83,6 +90,9 @@ export class BoardView {
   // from the shared edge it swings around.
   private readonly yAxis = new Vector3(0, 1, 0);
   private readonly swapOffset = new Vector3();
+  // Scratch for the awaking pop tumble: the X tumble axis and a spare quaternion.
+  private readonly xAxis = new Vector3(1, 0, 0);
+  private readonly qTmp = new Quaternion();
   // Garbage lightmap uniform, shared with the patched garbage shader. Starts as
   // a 1×1 white texture (no modulation) and is swapped for the real mottled map
   // once it loads. Kept as a stable object so updating `.value` reaches the
@@ -300,10 +310,26 @@ export class BoardView {
         this.place(b.x + dir * 0.5, b.renderY); // pivot on the shared edge
         this.swapOffset.set(-dir * 0.5, 0, 0).applyAxisAngle(this.yAxis, theta);
         this.pos.add(this.swapOffset);
+      } else if (b.phase === 'awaking' && b.awakeProgress < 1) {
+        // Pop-in: a shattered-garbage cell wakes as a small garbage-coloured cube,
+        // then grows (0.5→1), tumbles into alignment, and shifts to its block
+        // colour as it pops — staggered per block by its pop delay (faithful to
+        // the BS_AWAKING branch of DrawBlocks.cxx, minus the reference's hard
+        // end-of-pop rotation snap so the tumble resolves smoothly to identity).
+        const progress = b.awakeProgress;
+        const p = 1 - progress; // 1 dormant → 0 popped
+        this.scl.setScalar(0.5 + 0.5 * progress);
+        const a = p * (Math.PI / 4); // ≤45° tumble, → 0 as it finishes
+        const signX = b.popDirection & (BR_DIRECTION_1 | BR_DIRECTION_4) ? 1 : -1;
+        const signY = b.popDirection & (BR_DIRECTION_1 | BR_DIRECTION_2) ? 1 : -1;
+        this.rot.setFromAxisAngle(this.xAxis, signX * a);
+        this.qTmp.setFromAxisAngle(this.yAxis, signY * a);
+        this.rot.multiply(this.qTmp);
+        // Colour eases from the garbage flavour it shattered from to the block flavour.
+        this.color.lerp(garbageColor(b.popColor), p);
       } else {
         this.scl.setScalar(1);
         this.rot.identity();
-        if (b.phase === 'awaking') this.color.multiplyScalar(0.5);
         // Dim the incoming creep row (`creep_colors` are 0.25× in the original) so
         // it reads as "not yet in play": it rises up dim from below the play floor
         // and snaps to full brightness when the grid shift promotes it to row 1.
