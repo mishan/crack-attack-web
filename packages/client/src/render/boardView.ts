@@ -43,7 +43,7 @@ import {
   BR_DIRECTION_2,
   BR_DIRECTION_4,
   GC_BLOCK_STORE_SIZE,
-  GC_PLAY_HEIGHT,
+  GC_GARBAGE_STORE_SIZE,
   GC_PLAY_WIDTH,
 } from '@crack-attack/core';
 import type { BoardViewModel } from '../view/boardViewModel.js';
@@ -51,10 +51,6 @@ import { blockColor, garbageColor } from './palette.js';
 
 const CELL = 1;
 const BLOCK_SIZE = 0.92;
-// Garbage is drawn one cube *per cell* (as in DrawGarbage.cxx, which stamps
-// block-shaped geometry at every garbage grid square), so the instance pool has
-// to cover the whole play area rather than one instance per slab.
-const GARBAGE_CELL_CAP = GC_PLAY_WIDTH * GC_PLAY_HEIGHT;
 
 export class BoardView {
   readonly scene = new Scene();
@@ -157,10 +153,13 @@ export class BoardView {
       clippingPlanes: [this.floorPlane],
     });
     this.patchGarbageLightmap(garbageMaterial);
+    // Garbage is a single solid slab per piece (a unit cube scaled to the slab's
+    // width × height), not one cube per cell — the original draws it as a smooth
+    // bar with a flat surface, distinct from the faceted blocks.
     this.garbage = new InstancedMesh(
-      new BoxGeometry(BLOCK_SIZE, BLOCK_SIZE, BLOCK_SIZE),
+      new BoxGeometry(CELL, CELL, CELL),
       garbageMaterial,
-      GARBAGE_CELL_CAP,
+      GC_GARBAGE_STORE_SIZE,
     );
     this.garbage.count = 0;
     this.scene.add(this.garbage);
@@ -186,12 +185,11 @@ export class BoardView {
   }
 
   /**
-   * Fetch the glTF block model and swap its geometry into both the block and the
-   * garbage instances (garbage cells are drawn with the same cube shape in the
-   * original). The per-instance colours (instanceColor) and materials are
-   * unaffected — only the shape changes. Normalizes the model to `BLOCK_SIZE`
-   * and centres it. The garbage mesh gets a clone so each mesh owns and disposes
-   * its own geometry.
+   * Fetch the glTF block model and swap its geometry into the block instances.
+   * The per-instance colours (instanceColor) and material are unaffected — only
+   * the shape changes. Normalizes the model to `BLOCK_SIZE` and centres it. The
+   * garbage mesh keeps its plain box (it renders as a smooth solid slab, not the
+   * faceted block shape).
    */
   private async loadBlockModel(): Promise<void> {
     try {
@@ -217,11 +215,8 @@ export class BoardView {
       }
 
       const oldBlocks = this.blocks.geometry;
-      const oldGarbage = this.garbage.geometry;
       this.blocks.geometry = geom;
-      this.garbage.geometry = geom.clone();
       oldBlocks.dispose();
-      oldGarbage.dispose();
     } catch {
       // Keep the box fallback; the model is a visual upgrade, not required.
     }
@@ -345,26 +340,23 @@ export class BoardView {
     this.blocks.instanceMatrix.needsUpdate = true;
     if (this.blocks.instanceColor) this.blocks.instanceColor.needsUpdate = true;
 
-    // Garbage: one cube per cell of every slab (faithful to DrawGarbage.cxx,
-    // which stamps block geometry at each garbage square rather than one stretched
-    // box). The block loop leaves `this.rot` set to a dying block's tumble, so
-    // reset it to identity before composing garbage transforms.
+    // Garbage: one solid slab per piece — a unit cube scaled to the slab's
+    // width × height (a slight inset leaves a seam between neighbours). The block
+    // loop leaves `this.rot` set to a dying block's tumble, so reset it to identity
+    // before composing the axis-aligned slab transforms.
     this.rot.identity();
-    this.scl.setScalar(1);
     let g = 0;
     for (const s of vm.garbage) {
+      const cx = s.x + (s.width - 1) / 2;
+      const cy = s.renderY + (s.height - 1) / 2;
+      this.place(cx, cy);
+      this.scl.set(s.width * 0.98, s.height * 0.98, 0.98);
+      this.m.compose(this.pos, this.rot, this.scl);
+      this.garbage.setMatrixAt(g, this.m);
       this.color.copy(garbageColor(s.flavor));
       if (s.awaking) this.color.multiplyScalar(0.6);
-      for (let dy = 0; dy < s.height; dy++) {
-        for (let dx = 0; dx < s.width; dx++) {
-          if (g >= GARBAGE_CELL_CAP) break;
-          this.place(s.x + dx, s.renderY + dy);
-          this.m.compose(this.pos, this.rot, this.scl);
-          this.garbage.setMatrixAt(g, this.m);
-          this.garbage.setColorAt(g, this.color);
-          g++;
-        }
-      }
+      this.garbage.setColorAt(g, this.color);
+      g++;
     }
     this.garbage.count = g;
     this.garbage.instanceMatrix.needsUpdate = true;
