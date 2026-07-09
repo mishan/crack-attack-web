@@ -1,10 +1,14 @@
 import { describe, expect, it } from 'vitest';
 import {
   ActionState,
+  BS_DYING,
   CC_ADVANCE,
   CC_RIGHT,
+  GC_DYING_DELAY,
+  GC_PLAY_HEIGHT,
   GC_PLAY_WIDTH,
   GC_SAFE_HEIGHT,
+  GR_BLOCK,
   GameSim,
   noActions,
 } from '@crack-attack/core';
@@ -29,6 +33,41 @@ describe('deriveViewModel', () => {
     // With no creep accumulated yet, renderY equals the integer grid row.
     expect(vm.cursor.renderY).toBe(vm.cursor.y);
     expect(sim.creep.creep).toBe(0);
+  });
+
+  it('reports deathProgress 0 for a fresh board (nothing dying)', () => {
+    const vm = deriveViewModel(new GameSim(1));
+    for (const b of vm.blocks) {
+      expect(b.phase).not.toBe('dying');
+      expect(b.deathProgress).toBe(0);
+    }
+  });
+
+  it("maps a dying block's countdown to deathProgress, reaching 1.0 on its last frame", () => {
+    const sim = new GameSim(1);
+    // Force one resting block into the dying state and check the mapping at the
+    // start (alarm = GC_DYING_DELAY → 0) and at the last visible tick (alarm = 1
+    // → 1.0), using the same GC_DYING_DELAY - 1 denominator as the view model.
+    let picked = false;
+    for (let x = 0; x < GC_PLAY_WIDTH && !picked; x++) {
+      for (let y = 1; y < GC_PLAY_HEIGHT && !picked; y++) {
+        if (sim.grid.residentTypeAt(x, y) & GR_BLOCK) {
+          const block = sim.grid.blockAt(x, y);
+          block.state = BS_DYING;
+
+          block.alarm = GC_DYING_DELAY; // just started dying
+          const progressAt = (): number =>
+            deriveViewModel(sim).blocks.find((s) => s.id === block.id)!.deathProgress;
+          expect(progressAt()).toBeCloseTo(0, 5);
+
+          block.alarm = 1; // final frame before it pops
+          expect(progressAt()).toBeCloseTo(1, 5);
+
+          picked = true;
+        }
+      }
+    }
+    expect(picked).toBe(true);
   });
 
   it('emits one sprite per live block (matches block_count)', () => {
