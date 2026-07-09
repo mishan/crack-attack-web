@@ -73,23 +73,31 @@ function boot(): void {
   // --- loop ----------------------------------------------------------------
   let lastMs = performance.now();
   const frame = (nowMs: number): void => {
-    const steps = clock.sample(nowMs);
-    for (let s = 0; s < steps; s++) {
-      sim.step(input.actionState());
-      // Interpolation only needs the last two ticks, so under catch-up (steps > 1)
-      // skip the expensive grid-walk for the intermediate ticks that get discarded.
-      if (s >= steps - 2) interp.push(deriveViewModel(sim));
+    // Advance the sim only while the game is live. On a loss we stop stepping, so
+    // the clock (and thus the HUD timer) and the board freeze on the final tick
+    // until the player restarts.
+    if (!sim.lost) {
+      const steps = clock.sample(nowMs);
+      for (let s = 0; s < steps; s++) {
+        sim.step(input.actionState());
+        // Interpolation only needs the last two ticks, so under catch-up (steps > 1)
+        // skip the expensive grid-walk for the intermediate ticks that get
+        // discarded — but always capture the tick a loss lands on.
+        if (s >= steps - 2 || sim.lost) interp.push(deriveViewModel(sim));
+        if (sim.lost) break;
+      }
+      // Spawn reward signs for the combos that fired across this frame's ticks.
+      for (const ev of sim.drainSignEvents()) signs.spawn(ev.gridX, ev.gridY, ev.kind, ev.level);
     }
 
-    // Spawn reward signs for the combos that fired across this frame's ticks.
-    for (const ev of sim.drainSignEvents()) signs.spawn(ev.gridX, ev.gridY, ev.kind, ev.level);
-
-    // Signs float on wall-clock time so they stay smooth between sim ticks.
+    // Signs float on wall-clock time (and keep fading out after a loss).
     const dtTicks = Math.min(MAX_SIGN_DT_TICKS, (nowMs - lastMs) / MS_PER_TICK);
     lastMs = nowMs;
     signs.update(dtTicks);
 
-    const vm = interp.sample(clock.alpha); // blend the last two ticks
+    // After a loss show the frozen final tick (alpha 1) rather than interpolating
+    // toward a state the sim will never reach.
+    const vm = interp.sample(sim.lost ? 1 : clock.alpha);
     view.update(vm);
     decals.update(vm.garbage);
     view.render();
