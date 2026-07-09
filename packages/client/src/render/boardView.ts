@@ -15,9 +15,11 @@ import {
   BoxGeometry,
   type BufferGeometry,
   Color,
+  DataTexture,
   DirectionalLight,
   EdgesGeometry,
   Fog,
+  type IUniform,
   InstancedMesh,
   LineBasicMaterial,
   LineSegments,
@@ -27,17 +29,24 @@ import {
   PerspectiveCamera,
   PlaneGeometry,
   Quaternion,
+  RepeatWrapping,
   Scene,
+  type Texture,
+  TextureLoader,
   Vector3,
   WebGLRenderer,
 } from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
-import { GC_BLOCK_STORE_SIZE, GC_GARBAGE_STORE_SIZE } from '@crack-attack/core';
+import { GC_BLOCK_STORE_SIZE, GC_PLAY_HEIGHT, GC_PLAY_WIDTH } from '@crack-attack/core';
 import type { BoardViewModel } from '../view/boardViewModel.js';
 import { blockColor, garbageColor } from './palette.js';
 
 const CELL = 1;
 const BLOCK_SIZE = 0.92;
+// Garbage is drawn one cube *per cell* (as in DrawGarbage.cxx, which stamps
+// block-shaped geometry at every garbage grid square), so the instance pool has
+// to cover the whole play area rather than one instance per slab.
+const GARBAGE_CELL_CAP = GC_PLAY_WIDTH * GC_PLAY_HEIGHT;
 
 export class BoardView {
   readonly scene = new Scene();
@@ -60,6 +69,11 @@ export class BoardView {
   // A tumble axis for the pop animation, and the colour it flashes toward.
   private readonly spinAxis = new Vector3(0.35, 1, 0.15).normalize();
   private readonly flash = new Color(0xffffff);
+  // Garbage lightmap uniform, shared with the patched garbage shader. Starts as
+  // a 1×1 white texture (no modulation) and is swapped for the real mottled map
+  // once it loads. Kept as a stable object so updating `.value` reaches the
+  // already-compiled program without a recompile.
+  private readonly lightmap: IUniform<Texture>;
 
   constructor(container: HTMLElement, width: number, visibleHeight: number) {
     this.halfW = (width - 1) / 2;
@@ -85,8 +99,6 @@ export class BoardView {
     wall.position.set(0, 0, -0.8);
     this.scene.add(wall);
 
-    const cube = new BoxGeometry(CELL, CELL, CELL);
-
     // Per-instance colours come from `InstancedMesh.setColorAt` (→ instanceColor).
     // Three enables the `USE_INSTANCING_COLOR` shader path automatically when an
     // instanceColor attribute is present — no `vertexColors: true` needed (that
@@ -99,10 +111,18 @@ export class BoardView {
     this.blocks.count = 0;
     this.scene.add(this.blocks);
 
+    // Garbage shares the block's cube shape but reads a little rougher/darker.
+    // One instance per garbage cell (not per slab); the loaded glTF geometry is
+    // swapped into both meshes together.
+    const white = new DataTexture(new Uint8Array([255, 255, 255, 255]), 1, 1);
+    white.needsUpdate = true;
+    this.lightmap = { value: white };
+    const garbageMaterial = new MeshStandardMaterial({ roughness: 0.8, metalness: 0.0 });
+    this.patchGarbageLightmap(garbageMaterial);
     this.garbage = new InstancedMesh(
-      cube,
-      new MeshStandardMaterial({ roughness: 0.8, metalness: 0.0 }),
-      GC_GARBAGE_STORE_SIZE,
+      new BoxGeometry(BLOCK_SIZE, BLOCK_SIZE, BLOCK_SIZE),
+      garbageMaterial,
+      GARBAGE_CELL_CAP,
     );
     this.garbage.count = 0;
     this.scene.add(this.garbage);
@@ -120,12 +140,17 @@ export class BoardView {
     // model (converted by tools/obj2gltf). Async; blocks render as boxes until it
     // arrives, and stay boxes if the fetch fails.
     void this.loadBlockModel();
+    // Load the mottled garbage lightmap; garbage stays flat-tinted until it lands.
+    void this.loadGarbageLightmap();
   }
 
   /**
-   * Fetch the glTF block model and swap its geometry into the block instances.
-   * The per-instance colours (instanceColor) and material are unaffected — only
-   * the shape changes. Normalizes the model to `BLOCK_SIZE` and centres it.
+   * Fetch the glTF block model and swap its geometry into both the block and the
+   * garbage instances (garbage cells are drawn with the same cube shape in the
+   * original). The per-instance colours (instanceColor) and materials are
+   * unaffected — only the shape changes. Normalizes the model to `BLOCK_SIZE`
+   * and centres it. The garbage mesh gets a clone so each mesh owns and disposes
+   * its own geometry.
    */
   private async loadBlockModel(): Promise<void> {
     try {
@@ -150,11 +175,64 @@ export class BoardView {
         geom.scale(BLOCK_SIZE / maxDim, BLOCK_SIZE / maxDim, BLOCK_SIZE / maxDim);
       }
 
-      const old = this.blocks.geometry;
+      const oldBlocks = this.blocks.geometry;
+      const oldGarbage = this.garbage.geometry;
       this.blocks.geometry = geom;
-      old.dispose();
+      this.garbage.geometry = geom.clone();
+      oldBlocks.dispose();
+      oldGarbage.dispose();
     } catch {
       // Keep the box fallback; the model is a visual upgrade, not required.
+    }
+  }
+
+  /**
+   * Patch the garbage material to modulate its albedo by a world-position-tied
+   * lightmap, reproducing `DrawGarbage.cxx`: the mottled luminance map is sampled
+   * at `worldXY * conv + 0.5` (one tile spans the board width), so the sheen flows
+   * continuously across every cell of a slab — and across slabs sharing a column —
+   * rather than tiling per cube. The map is pre-remapped to [0.85, 1.0] luminance
+   * when baked, so the shader just multiplies. Blocks are left untouched (only
+   * *special* blocks are lightmapped in the original, via a separate 1-D map).
+   */
+  private patchGarbageLightmap(material: MeshStandardMaterial): void {
+    const conv = -1 / GC_PLAY_WIDTH; // DC_GARBAGE_LIGHTMAP_COORD_CONVERTER in cell units
+    material.onBeforeCompile = (shader) => {
+      shader.uniforms.uLightmap = this.lightmap;
+      shader.uniforms.uLmConv = { value: conv };
+      shader.vertexShader =
+        'varying vec2 vLmUv;\nuniform float uLmConv;\n' +
+        shader.vertexShader.replace(
+          '#include <project_vertex>',
+          '#include <project_vertex>\n' +
+            '  vec4 lmWorld = modelMatrix * instanceMatrix * vec4(transformed, 1.0);\n' +
+            '  vLmUv = lmWorld.xy * uLmConv + 0.5;',
+        );
+      shader.fragmentShader =
+        'varying vec2 vLmUv;\nuniform sampler2D uLightmap;\n' +
+        shader.fragmentShader.replace(
+          '#include <color_fragment>',
+          '#include <color_fragment>\n  diffuseColor.rgb *= texture2D(uLightmap, vLmUv).r;',
+        );
+    };
+  }
+
+  /**
+   * Fetch the baked garbage lightmap and hand it to the patched shader by swapping
+   * the shared uniform's `.value` (no material recompile). Tiles (RepeatWrapping)
+   * for boards taller/wider than one map. Stays the white no-op texture on failure.
+   */
+  private async loadGarbageLightmap(): Promise<void> {
+    try {
+      const url = new URL('textures/garbage_lightmap.png', document.baseURI).href;
+      const tex = await new TextureLoader().loadAsync(url);
+      tex.wrapS = RepeatWrapping;
+      tex.wrapT = RepeatWrapping;
+      const previous = this.lightmap.value;
+      this.lightmap.value = tex;
+      previous.dispose();
+    } catch {
+      // Keep the flat white lightmap; the sheen is a visual upgrade, not required.
     }
   }
 
@@ -194,22 +272,26 @@ export class BoardView {
     this.blocks.instanceMatrix.needsUpdate = true;
     if (this.blocks.instanceColor) this.blocks.instanceColor.needsUpdate = true;
 
-    // Garbage slabs (per-instance scale encodes width × height). The block loop
-    // leaves `this.rot` set to a dying block's tumble, so reset it to identity
-    // before composing slab transforms (slabs are axis-aligned).
+    // Garbage: one cube per cell of every slab (faithful to DrawGarbage.cxx,
+    // which stamps block geometry at each garbage square rather than one stretched
+    // box). The block loop leaves `this.rot` set to a dying block's tumble, so
+    // reset it to identity before composing garbage transforms.
     this.rot.identity();
+    this.scl.setScalar(1);
     let g = 0;
     for (const s of vm.garbage) {
-      const cx = s.x + (s.width - 1) / 2;
-      const cy = s.renderY + (s.height - 1) / 2;
-      this.place(cx, cy);
-      this.scl.set(s.width * 0.98, s.height * 0.98, 0.98);
-      this.m.compose(this.pos, this.rot, this.scl);
-      this.garbage.setMatrixAt(g, this.m);
       this.color.copy(garbageColor(s.flavor));
       if (s.awaking) this.color.multiplyScalar(0.6);
-      this.garbage.setColorAt(g, this.color);
-      g++;
+      for (let dy = 0; dy < s.height; dy++) {
+        for (let dx = 0; dx < s.width; dx++) {
+          if (g >= GARBAGE_CELL_CAP) break;
+          this.place(s.x + dx, s.renderY + dy);
+          this.m.compose(this.pos, this.rot, this.scl);
+          this.garbage.setMatrixAt(g, this.m);
+          this.garbage.setColorAt(g, this.color);
+          g++;
+        }
+      }
     }
     this.garbage.count = g;
     this.garbage.instanceMatrix.needsUpdate = true;
