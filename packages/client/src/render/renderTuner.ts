@@ -12,8 +12,13 @@
 
 import type { BoardView, RenderTuning } from './boardView.js';
 
+/** The numeric (slider-able) fields of RenderTuning — excludes `flatShading`. */
+type NumericKey = {
+  [K in keyof RenderTuning]: RenderTuning[K] extends number ? K : never;
+}[keyof RenderTuning];
+
 interface Knob {
-  key: keyof RenderTuning;
+  key: NumericKey;
   label: string;
   min: number;
   max: number;
@@ -56,6 +61,7 @@ const CSS = `
   cursor: pointer;
 }
 .render-tuner .row { display: flex; flex-direction: column; margin: 6px 0; }
+.render-tuner .row.toggle { flex-direction: row; align-items: center; gap: 8px; cursor: pointer; }
 .render-tuner .row .top { display: flex; justify-content: space-between; }
 .render-tuner .row .val { font-variant-numeric: tabular-nums; opacity: 0.85; }
 .render-tuner input[type='range'] { width: 100%; accent-color: #6a86c8; }
@@ -77,7 +83,8 @@ const format = (t: RenderTuning): string =>
   `{ ambient: ${t.ambient}, keyIntensity: ${t.keyIntensity}, ` +
   `keyAzimuthDeg: ${t.keyAzimuthDeg}, keyElevationDeg: ${t.keyElevationDeg}, ` +
   `fillIntensity: ${t.fillIntensity}, shininess: ${t.shininess}, ` +
-  `specular: ${t.specular}, garbageRoughness: ${t.garbageRoughness} }`;
+  `specular: ${t.specular}, garbageRoughness: ${t.garbageRoughness}, ` +
+  `flatShading: ${t.flatShading} }`;
 
 /** Mount the tuner panel and wire it to `view`. Returns the root element. */
 export function mountRenderTuner(view: BoardView, initial: RenderTuning): HTMLElement {
@@ -127,6 +134,21 @@ export function mountRenderTuner(view: BoardView, initial: RenderTuning): HTMLEl
     row.append(top, slider);
     body.appendChild(row);
   }
+
+  // Flat shading: a boolean toggle (crisp per-facet edges vs smooth normals).
+  const toggleRow = document.createElement('label');
+  toggleRow.className = 'row toggle';
+  const checkbox = document.createElement('input');
+  checkbox.type = 'checkbox';
+  checkbox.checked = tuning.flatShading;
+  const toggleLabel = document.createElement('span');
+  toggleLabel.textContent = 'Flat shading (crisp facets)';
+  checkbox.addEventListener('change', () => {
+    tuning.flatShading = checkbox.checked;
+    view.applyRenderTuning(tuning);
+  });
+  toggleRow.append(checkbox, toggleLabel);
+  body.appendChild(toggleRow);
 
   const copy = document.createElement('button');
   copy.type = 'button';

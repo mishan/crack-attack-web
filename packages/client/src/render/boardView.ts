@@ -71,17 +71,24 @@ export interface RenderTuning {
   /** Block specular level, 0–255 gray. */
   specular: number;
   garbageRoughness: number;
+  /** Flat-shade the blocks (crisp per-facet edges) instead of smooth normals. */
+  flatShading: boolean;
 }
 
+// Faithful to the reference block material (`DrawBlocks.cxx`): black material
+// ambient (→ near-zero AmbientLight so the diffuse falloff across the pyramid
+// facets stays high-contrast), a gray specular (`GL_SPECULAR` 0.5 → 128), and a
+// broad `GL_SHININESS` 10. The key light is the "headlight" a bit above the view.
 export const DEFAULT_RENDER_TUNING: RenderTuning = {
-  ambient: 0.5,
-  keyIntensity: 1.2,
-  keyAzimuthDeg: 17,
-  keyElevationDeg: 46,
-  fillIntensity: 0.35,
-  shininess: 18,
+  ambient: 0.14,
+  keyIntensity: 1.35,
+  keyAzimuthDeg: 14,
+  keyElevationDeg: 30,
+  fillIntensity: 0.22,
+  shininess: 10,
   specular: 128,
   garbageRoughness: 0.5,
+  flatShading: false,
 };
 
 export class BoardView {
@@ -262,6 +269,11 @@ export class BoardView {
     this.blockMaterial.shininess = t.shininess;
     const g = Math.max(0, Math.min(1, t.specular / 255));
     this.blockMaterial.specular.setRGB(g, g, g);
+    // flatShading changes the compiled shader, so only recompile when it flips.
+    if (this.blockMaterial.flatShading !== t.flatShading) {
+      this.blockMaterial.flatShading = t.flatShading;
+      this.blockMaterial.needsUpdate = true;
+    }
     this.garbageMaterial.roughness = t.garbageRoughness;
   }
 
