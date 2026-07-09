@@ -18,12 +18,14 @@ import {
   BS_DYING,
   BS_FALLING,
   BS_SWAPPING,
+  BS_SWAP_DIRECTION_MASK,
   GC_PLAY_HEIGHT,
   GC_PLAY_WIDTH,
   GC_DYING_DELAY,
   GC_SAFE_HEIGHT,
   GC_STEPS_PER_GRID,
   GC_STEPS_PER_SECOND,
+  GC_SWAP_DELAY,
   GR_BLOCK,
   GR_EMPTY,
   GR_GARBAGE,
@@ -62,6 +64,18 @@ export interface BlockSprite {
    * shrink/spin pop animation.
    */
   readonly deathProgress: number;
+  /**
+   * For a `swapping` block, how far through the swap it is (0 at the start, →1 as
+   * it reaches its destination cell). 0 for every other phase. Drives the
+   * revolving-door swap animation (the block swings a semicircle around the edge
+   * it shares with its swap partner).
+   */
+  readonly swapFactor: number;
+  /**
+   * For a `swapping` block, whether it is moving right (`true`, its partner cell
+   * is to the right) or left. Selects which shared edge the swap pivots around.
+   */
+  readonly swapRight: boolean;
 }
 
 export interface GarbageSprite {
@@ -132,6 +146,20 @@ export function deriveViewModel(sim: GameSim): BoardViewModel {
   // is one row. Row 0 is the incoming preview that rises into play from below.
   const creepOffset = sim.creep.creep / GC_STEPS_PER_GRID;
 
+  // Swap progress is global (one swap at a time). `swap_alarm` is the tick the
+  // swap *completes* (the swapper clears SS_SWAPPING when `swap_alarm === now`),
+  // so a block only renders as swapping while `swap_alarm - now` runs over
+  // [GC_SWAP_DELAY .. 1] — GC_SWAP_DELAY visible frames. Divide by
+  // `GC_SWAP_DELAY - 1` (as the dying pop does) so the factor reaches a full 1.0
+  // on the last swapping frame, landing the block exactly on its destination
+  // before it becomes static — no end-of-swap snap. Both blocks share it.
+  const now = sim.clock.time_step;
+  const swapRemaining = sim.swapper.swap_alarm - now;
+  const swapFactor = Math.max(
+    0,
+    Math.min(1, (GC_SWAP_DELAY - swapRemaining) / (GC_SWAP_DELAY - 1)),
+  );
+
   for (let x = 0; x < GC_PLAY_WIDTH; x++) {
     for (let y = 0; y < GC_PLAY_HEIGHT; y++) {
       const rt = grid.residentTypeAt(x, y);
@@ -148,6 +176,7 @@ export function deriveViewModel(sim: GameSim): BoardViewModel {
           phase === 'dying'
             ? Math.max(0, Math.min(1, (GC_DYING_DELAY - b.alarm) / (GC_DYING_DELAY - 1)))
             : 0;
+        const swapping = phase === 'swapping';
         blocks.push({
           id: b.id,
           generation: b.generation,
@@ -158,6 +187,8 @@ export function deriveViewModel(sim: GameSim): BoardViewModel {
           phase,
           preview: y === 0,
           deathProgress,
+          swapFactor: swapping ? swapFactor : 0,
+          swapRight: swapping && (b.state & BS_SWAP_DIRECTION_MASK) !== 0,
         });
       } else if (rt & GR_GARBAGE) {
         const g = grid.garbageAt(x, y);

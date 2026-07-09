@@ -183,7 +183,12 @@ just use `pnpm` directly.
   thin DOM/WebGL layer. Blocks render the real rounded-cube glTF model
   (`public/models/block.gltf`, converted by `tools/obj2gltf`), loaded via
   `GLTFLoader` and swapped into the block `InstancedMesh` (box fallback until it
-  arrives). The incoming creep row (grid row 0) rises in from off-screen: a
+  arrives). A swap animates as a revolving door: `deriveViewModel` exposes each
+  swapping block's `swapFactor` (from the swapper's `swap_alarm`, interpolated
+  between ticks) and `swapRight`, and `BoardView` swings the block a semicircle
+  around the edge it shares with its partner (faithful to the `swap_factor`
+  transform in `DrawBlocks.cxx`), so the two blocks pass on opposite sides.
+  The incoming creep row (grid row 0) rises in from off-screen: a
   world-space clip plane on the block/garbage materials at the row 0 / row 1
   boundary (faithful to `GL_CLIP_PLANE_PLAY_FLOOR`) hides it below the play floor,
   so it slides up dim (`creep_colors` at 0.25×) as the board creeps and snaps to

@@ -71,8 +71,16 @@ export class ViewInterpolator {
 
     const blocks = curr.blocks.map((b) => {
       const p = prevBlocks.get(b.id);
+      // Blend renderY and the swap progress (both continuous); every other field
+      // is taken from the current tick. swapFactor is only *used* while the block
+      // is swapping, but blending it unconditionally is harmless and keeps the
+      // revolving-door smooth above 50 Hz.
       return p && p.generation === b.generation
-        ? { ...b, renderY: lerp(p.renderY, b.renderY, t) }
+        ? {
+            ...b,
+            renderY: lerp(p.renderY, b.renderY, t),
+            swapFactor: lerp(p.swapFactor, b.swapFactor, t),
+          }
         : b;
     });
     const garbage = curr.garbage.map((g) => {
