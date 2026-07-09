@@ -185,7 +185,10 @@ just use `pnpm` directly.
   thin DOM/WebGL layer. Blocks render the real rounded-cube glTF model
   (`public/models/block.gltf`, converted by `tools/obj2gltf`), loaded via
   `GLTFLoader` and swapped into the block `InstancedMesh` (box fallback until it
-  arrives). A swap animates as a revolving door: `deriveViewModel` exposes each
+  arrives), lit as glossy plastic (a `MeshPhongMaterial` with a gray specular
+  highlight) by a camera-side "headlight" — faithful to the reference's
+  `GL_SPECULAR`/`GL_SHININESS` + `DC_HEADLIGHT_*` setup — so the beveled facets
+  gleam. A swap animates as a revolving door: `deriveViewModel` exposes each
   swapping block's `swapFactor` (from the swapper's `swap_alarm`, interpolated
   between ticks) and `swapRight`, and `BoardView` swings the block a semicircle
   around the edge it shares with its partner (faithful to the `swap_factor`

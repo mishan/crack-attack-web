@@ -14,9 +14,10 @@
 import { GameSim, GC_STEPS_PER_SECOND } from '@crack-attack/core';
 import { KeyboardInput } from './input/keyboard.js';
 import { mountTouchControls } from './input/touchControls.js';
-import { BoardView } from './render/boardView.js';
+import { BoardView, DEFAULT_RENDER_TUNING } from './render/boardView.js';
 import { GarbageDecalView } from './render/garbageDecalView.js';
 import { HudView } from './render/hudView.js';
+import { mountRenderTuner } from './render/renderTuner.js';
 import { SignsView } from './render/signsView.js';
 import { FixedTimestep } from './sim/fixedTimestep.js';
 import { deriveViewModel } from './view/boardViewModel.js';
@@ -45,6 +46,11 @@ function boot(): void {
   const signs = new SignsView(view.scene, halfW, halfH);
   const decals = new GarbageDecalView(view.scene, halfW, halfH);
   const hud = hudEl ? new HudView(hudEl) : null;
+
+  // Temporary lighting/material tuner — open with `?tune` in the URL.
+  if (new URLSearchParams(globalThis.location.search).has('tune')) {
+    mountRenderTuner(view, DEFAULT_RENDER_TUNING);
+  }
 
   const fitToWindow = (): void => view.resize(globalThis.innerWidth, globalThis.innerHeight);
   fitToWindow();
