@@ -183,11 +183,15 @@ just use `pnpm` directly.
   thin DOM/WebGL layer. Blocks render the real rounded-cube glTF model
   (`public/models/block.gltf`, converted by `tools/obj2gltf`), loaded via
   `GLTFLoader` and swapped into the block `InstancedMesh` (box fallback until it
-  arrives). A DOM `HudView` overlay shows a play clock, a vertical lose bar that
+  arrives). Garbage slabs render one rounded-cube per cell (the same glTF
+  geometry, tinted by flavor), faithful to `DrawGarbage.cxx` stamping block
+  geometry at each garbage square. Block/garbage flavor colours in
+  `render/palette.ts` reproduce the reference `block_colors`/`garbage_colors`
+  tables. A DOM `HudView` overlay shows a play clock, a vertical lose bar that
   fills toward the safe height and tints green→yellow→red, and a status line
   (popping count, loss countdown, game over) — presentation thresholds/formatting
   live in the pure `view/hud.ts`. `pnpm --filter @crack-attack/client dev`. Still
-  to come: textured/garbage glTF models, combo/score signs, and audio.
+  to come: per-flavor garbage face textures/lightmaps, combo/score signs, and audio.
 - [ ] Phase 3 AI, Phase 4 multiplayer, Phase 5 lobby
 
 See `BROWSER_PORT_PLAN.md` for the full phase breakdown and suggested order of work.

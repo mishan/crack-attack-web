@@ -1,10 +1,13 @@
 /**
  * palette.ts — flavor → colour mapping for the renderer.
  *
- * The original uses textured glTF models per flavor (Phase 2 asset conversion is
- * a later tool); for the shell we render solid-coloured blocks. Colours are a
- * platform-layer choice — restyle freely; only the flavor *indices* are load-
- * bearing (they come from the deterministic core).
+ * The original draws blocks and garbage as lit, solid-coloured cubes (no per-
+ * flavor texture — see `DrawBlocks.cxx`/`DrawGarbage.cxx`), tinted by fixed RGB
+ * tables. We reproduce those tables here so the port reads like the reference:
+ * `block_colors[BF_NUMBER]` and `garbage_colors[GF_NUMBER]`. Colours are a
+ * platform-layer choice, but matching the original keeps flavors recognisable.
+ * Only the flavor *indices* are load-bearing (they come from the deterministic
+ * core); the RGB values are cosmetic.
  */
 
 import {
@@ -15,29 +18,65 @@ import {
   BF_NORMAL_3,
   BF_NORMAL_4,
   BF_NORMAL_5,
+  BF_SPECIAL_COLOR_1,
+  BF_SPECIAL_COLOR_2,
+  BF_SPECIAL_COLOR_3,
+  BF_SPECIAL_COLOR_4,
+  BF_SPECIAL_COLOR_5,
   BF_WHITE,
+  BF_WILD,
   GF_BLACK,
+  GF_COLOR_1,
+  GF_COLOR_2,
+  GF_COLOR_3,
+  GF_COLOR_4,
+  GF_COLOR_5,
   GF_GRAY,
+  GF_NORMAL,
+  GF_WHITE,
 } from '@crack-attack/core';
 import { Color } from 'three';
 
-/** The five normal block colours, plus fallbacks for special flavors. */
+/** Pack a float RGB triple (as written in the C++ tables) into a hex int. */
+function rgb(r: number, g: number, b: number): number {
+  const to8 = (v: number): number => Math.round(Math.max(0, Math.min(1, v)) * 255);
+  return (to8(r) << 16) | (to8(g) << 8) | to8(b);
+}
+
+/**
+ * `Displayer::block_colors[BF_NUMBER]` (DrawBlocks.cxx). The five specials are
+ * 2× the normal channels in the original (clamped to [0, 1] on upload).
+ */
 const BLOCK_COLORS: Record<number, number> = {
-  [BF_NORMAL_1]: 0xe0483f, // red
-  [BF_NORMAL_2]: 0x46b24a, // green
-  [BF_NORMAL_3]: 0x3f7fe0, // blue
-  [BF_NORMAL_4]: 0xe0c53f, // yellow
-  [BF_NORMAL_5]: 0xa04fd0, // purple
-  [BF_GRAY]: 0x8a909c,
-  [BF_BLACK]: 0x2a2d35,
-  [BF_WHITE]: 0xf2f4f8,
+  [BF_NORMAL_1]: rgb(0.73, 0.0, 0.73), // purple
+  [BF_NORMAL_2]: rgb(0.2, 0.2, 0.8), // blue
+  [BF_NORMAL_3]: rgb(0.0, 0.6, 0.05), // green
+  [BF_NORMAL_4]: rgb(0.85, 0.85, 0.0), // yellow
+  [BF_NORMAL_5]: rgb(1.0, 0.4, 0.0), // orange
+  [BF_WILD]: rgb(1.0, 0.0, 0.0), // wild (red)
+  [BF_GRAY]: rgb(0.4, 0.4, 0.4),
+  [BF_BLACK]: rgb(0.05, 0.05, 0.05),
+  [BF_WHITE]: rgb(0.95, 0.95, 0.95),
+  [BF_SPECIAL_COLOR_1]: rgb(2.0 * 0.73, 0.0, 2.0 * 0.73),
+  [BF_SPECIAL_COLOR_2]: rgb(2.0 * 0.2, 2.0 * 0.2, 2.0 * 0.8),
+  [BF_SPECIAL_COLOR_3]: rgb(0.0, 2.0 * 0.6, 2.0 * 0.05),
+  [BF_SPECIAL_COLOR_4]: rgb(2.0 * 0.85, 2.0 * 0.85, 0.0),
+  [BF_SPECIAL_COLOR_5]: rgb(2.0 * 1.0, 2.0 * 0.4, 0.0),
 };
 
-const DEFAULT_BLOCK = 0xff5bd0; // eye-catching magenta for any unmapped special
+const DEFAULT_BLOCK = 0xff5bd0; // eye-catching magenta for any unmapped flavor
 
+/** `Displayer::garbage_colors[GF_NUMBER]` (DrawGarbage.cxx). */
 const GARBAGE_COLORS: Record<number, number> = {
-  [GF_GRAY]: 0x6c7280,
-  [GF_BLACK]: 0x23262d,
+  [GF_NORMAL]: rgb(1.0, 0.0, 0.0), // red
+  [GF_GRAY]: rgb(0.4, 0.4, 0.4),
+  [GF_BLACK]: rgb(0.05, 0.05, 0.05),
+  [GF_WHITE]: rgb(0.95, 0.95, 0.95),
+  [GF_COLOR_1]: rgb(0.73, 0.0, 0.73), // purple
+  [GF_COLOR_2]: rgb(0.2, 0.2, 0.8), // blue
+  [GF_COLOR_3]: rgb(0.0, 0.6, 0.05), // green
+  [GF_COLOR_4]: rgb(0.85, 0.85, 0.0), // yellow
+  [GF_COLOR_5]: rgb(1.0, 0.4, 0.0), // orange
 };
 const DEFAULT_GARBAGE = 0x9aa3b2;
 
