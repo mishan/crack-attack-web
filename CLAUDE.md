@@ -178,13 +178,16 @@ just use `pnpm` directly.
   move, since the Swapper faithfully ignores multi-direction masks), and
   `deriveViewModel` (sim state → render sprites), and `ViewInterpolator`
   (blends the last two ticks by the render `alpha`, matching sprites by pool
-  `(id, generation)`, so motion is smooth above 50 Hz). `BoardView` (Three.js instanced meshes) and
-  `main.ts` (RAF loop, input listeners, restart) are the thin DOM/WebGL layer.
-  Blocks render the real rounded-cube glTF model (`public/models/block.gltf`,
-  converted by `tools/obj2gltf`), loaded via `GLTFLoader` and swapped into the
-  block `InstancedMesh` (box fallback until it arrives).
-  `pnpm --filter @crack-attack/client dev`. Still to come: textured/garbage glTF
-  models, HUD polish (level lights, lose bar, combo signs), and audio.
+  `(id, generation)`, so motion is smooth above 50 Hz). `BoardView` (Three.js
+  instanced meshes) and `main.ts` (RAF loop, input listeners, restart) are the
+  thin DOM/WebGL layer. Blocks render the real rounded-cube glTF model
+  (`public/models/block.gltf`, converted by `tools/obj2gltf`), loaded via
+  `GLTFLoader` and swapped into the block `InstancedMesh` (box fallback until it
+  arrives). A DOM `HudView` overlay shows a play clock, a vertical lose bar that
+  fills toward the safe height and tints green→yellow→red, and a status line
+  (popping count, loss countdown, game over) — presentation thresholds/formatting
+  live in the pure `view/hud.ts`. `pnpm --filter @crack-attack/client dev`. Still
+  to come: textured/garbage glTF models, combo/score signs, and audio.
 - [ ] Phase 3 AI, Phase 4 multiplayer, Phase 5 lobby
 
 See `BROWSER_PORT_PLAN.md` for the full phase breakdown and suggested order of work.

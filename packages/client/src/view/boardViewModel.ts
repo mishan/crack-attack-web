@@ -22,6 +22,7 @@ import {
   GC_PLAY_WIDTH,
   GC_SAFE_HEIGHT,
   GC_STEPS_PER_GRID,
+  GC_STEPS_PER_SECOND,
   GR_BLOCK,
   GR_EMPTY,
   GR_GARBAGE,
@@ -76,11 +77,18 @@ export interface GarbageSprite {
 
 export interface Hud {
   readonly tick: number;
+  /** Elapsed play time in seconds (`tick / GC_STEPS_PER_SECOND`). */
+  readonly elapsedSeconds: number;
   readonly awakingCount: number;
   readonly dyingCount: number;
   readonly topEffectiveRow: number;
   /** Fraction of the way to the safe-height loss line, clamped to [0, 1]. */
   readonly dangerFraction: number;
+  /**
+   * Ticks left before losing while the stack is frozen against the safe height,
+   * or null when not in the loss countdown. Drives the urgent HUD warning.
+   */
+  readonly lossCountdown: number | null;
   readonly lost: boolean;
 }
 
@@ -165,10 +173,12 @@ export function deriveViewModel(sim: GameSim): BoardViewModel {
     cursor: { x: sim.swapper.x, y: sim.swapper.y, renderY: sim.swapper.y + creepOffset },
     hud: {
       tick: sim.clock.time_step,
+      elapsedSeconds: sim.clock.time_step / GC_STEPS_PER_SECOND,
       awakingCount: sim.awaking_count,
       dyingCount: sim.dying_count,
       topEffectiveRow: grid.top_effective_row,
       dangerFraction,
+      lossCountdown: sim.creep.creep_freeze ? sim.creep.loss_alarm : null,
       lost: sim.lost,
     },
   };
