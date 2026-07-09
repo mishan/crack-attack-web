@@ -194,9 +194,15 @@ just use `pnpm` directly.
   reference `block_colors`/`garbage_colors` tables. A DOM `HudView` overlay shows
   a play clock, a vertical lose bar that fills toward the safe height and tints
   green→yellow→red, and a status line (popping count, loss countdown, game over)
-  — presentation thresholds/formatting live in the pure `view/hud.ts`.
-  `pnpm --filter @crack-attack/client dev`. Still to come: per-flavor garbage face
-  decals (`garbage_flavor_*.png`), combo/score signs, and audio.
+  — presentation thresholds/formatting live in the pure `view/hud.ts`. Combo
+  reward signs float up on a match: the core reports `SignEvent`s (multiplier /
+  magnitude / special) on an optional `SignSink` at the exact points
+  `SignManager::createSign` fires — drawing no gameplay RNG, so they stay cosmetic
+  — and `GameSim` buffers them for `drainSignEvents()`; `render/signsView.ts`
+  spawns camera-facing sprites from the converted sign art
+  (`public/textures/signs/sign_*.png`), animating the hold→fade→inflate→float life
+  from the pure `view/signs.ts`. `pnpm --filter @crack-attack/client dev`. Still to
+  come: per-flavor garbage face decals (`garbage_flavor_*.png`) and audio.
 - [ ] Phase 3 AI, Phase 4 multiplayer, Phase 5 lobby
 
 See `BROWSER_PORT_PLAN.md` for the full phase breakdown and suggested order of work.
