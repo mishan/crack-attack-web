@@ -159,17 +159,18 @@ export class BoardView {
     this.camera.position.set(0, 0.5, Math.max(14, visibleHeight * 1.5));
     this.camera.lookAt(0, 0, 0);
 
-    // Key light comes from clearly *above and to the side* (not along the view
-    // axis) so the block's beveled facets shade directionally and the glossy
-    // specular gleam sits toward the top of each block — the original's angled
-    // look, rather than a symmetric head-on hotspot. A dim opposite fill keeps
-    // the shadowed sides from going flat, and ambient lifts the darks.
-    this.ambientLight = new AmbientLight(0xffffff, 0.5);
+    // Lighting: an ambient lift, a key "headlight" that comes from above and to
+    // the side (so the block's beveled facets shade directionally and the glossy
+    // gleam sits toward the top — the original's angled look, not a head-on
+    // hotspot), and a dim opposite fill. Their intensities and the key direction
+    // are the single source of truth in DEFAULT_RENDER_TUNING and are set by
+    // `applyRenderTuning` at the end of the constructor; only the fill's fixed
+    // *position* is set here (it isn't tunable).
+    this.ambientLight = new AmbientLight(0xffffff);
     this.scene.add(this.ambientLight);
-    this.keyLight = new DirectionalLight(0xffffff, 1.2);
-    this.keyLight.position.set(3, 11, 10); // ~48° up-and-right of the view axis
+    this.keyLight = new DirectionalLight(0xffffff);
     this.scene.add(this.keyLight);
-    this.fillLight = new DirectionalLight(0xffffff, 0.35);
+    this.fillLight = new DirectionalLight(0xffffff);
     this.fillLight.position.set(-6, 2, 6);
     this.scene.add(this.fillLight);
 
@@ -185,15 +186,10 @@ export class BoardView {
     // Three enables the `USE_INSTANCING_COLOR` shader path automatically when an
     // instanceColor attribute is present — no `vertexColors: true` needed (that
     // flag is for per-*vertex* colours, a different attribute).
-    // Glossy plastic look, faithful to the reference block material: a gray
-    // specular highlight (`GL_SPECULAR` 0.5) with a soft, broad falloff
-    // (`GL_SHININESS` 10 → a higher Blinn-Phong exponent here). instanceColor
-    // drives the diffuse colour.
-    this.blockMaterial = new MeshPhongMaterial({
-      specular: new Color(0x808080),
-      shininess: 18, // broad, soft gleam (spreads across facets, not a hotspot)
-      clippingPlanes: [this.floorPlane],
-    });
+    // Glossy plastic look faithful to the reference block material: instanceColor
+    // drives the diffuse; the gray specular highlight and its falloff (`GL_SPECULAR`
+    // / `GL_SHININESS`) come from DEFAULT_RENDER_TUNING via `applyRenderTuning`.
+    this.blockMaterial = new MeshPhongMaterial({ clippingPlanes: [this.floorPlane] });
     this.blocks = new InstancedMesh(
       new BoxGeometry(BLOCK_SIZE, BLOCK_SIZE, BLOCK_SIZE),
       this.blockMaterial,
@@ -202,14 +198,15 @@ export class BoardView {
     this.blocks.count = 0;
     this.scene.add(this.blocks);
 
-    // Garbage shares the block's cube shape but reads a little rougher/darker.
-    // One instance per garbage cell (not per slab); the loaded glTF geometry is
-    // swapped into both meshes together.
+    // Garbage renders as one solid slab per piece (a plain box, below) — it keeps
+    // its own material and box geometry; the loaded glTF block model is swapped
+    // into the *block* mesh only, not this one.
     const white = new DataTexture(new Uint8Array([255, 255, 255, 255]), 1, 1);
     white.needsUpdate = true;
     this.lightmap = { value: white };
+    // roughness comes from DEFAULT_RENDER_TUNING via `applyRenderTuning` (a little
+    // sheen so slabs catch the headlight like the blocks).
     this.garbageMaterial = new MeshStandardMaterial({
-      roughness: 0.5, // a little sheen so slabs catch the headlight like the blocks
       metalness: 0.0,
       clippingPlanes: [this.floorPlane],
     });

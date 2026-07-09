@@ -52,13 +52,25 @@ const CSS = `
   backdrop-filter: blur(3px);
   user-select: none;
 }
-.render-tuner h3 {
+.render-tuner .tuner-header {
+  display: block;
+  width: 100%;
   margin: 0 0 8px;
-  font-size: 12px;
-  font-weight: 600;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  text-align: left;
+  font: 600 12px/1.4 system-ui, sans-serif;
   letter-spacing: 0.02em;
   opacity: 0.8;
   cursor: pointer;
+}
+.render-tuner .tuner-header::after {
+  content: ' ▾';
+}
+.render-tuner.collapsed .tuner-header::after {
+  content: ' ▸';
 }
 .render-tuner .row { display: flex; flex-direction: column; margin: 6px 0; }
 .render-tuner .row.toggle { flex-direction: row; align-items: center; gap: 8px; cursor: pointer; }
@@ -89,6 +101,9 @@ const format = (t: RenderTuning): string =>
 /** Mount the tuner panel and wire it to `view`. Returns the root element. */
 export function mountRenderTuner(view: BoardView, initial: RenderTuning): HTMLElement {
   const tuning: RenderTuning = { ...initial };
+  // Apply the initial tuning immediately so the scene matches the overlay before
+  // any slider is touched (and so non-default `initial` values take effect).
+  view.applyRenderTuning(tuning);
 
   const style = document.createElement('style');
   style.textContent = CSS;
@@ -97,9 +112,17 @@ export function mountRenderTuner(view: BoardView, initial: RenderTuning): HTMLEl
   const root = document.createElement('div');
   root.className = 'render-tuner';
 
-  const header = document.createElement('h3');
-  header.textContent = 'Render tuner ▸';
-  header.addEventListener('click', () => root.classList.toggle('collapsed'));
+  // A real <button> so the collapse toggle is focusable and works with a keyboard
+  // / assistive tech; aria-expanded reflects the state.
+  const header = document.createElement('button');
+  header.type = 'button';
+  header.className = 'tuner-header';
+  header.textContent = 'Render tuner';
+  header.setAttribute('aria-expanded', 'true');
+  header.addEventListener('click', () => {
+    const collapsed = root.classList.toggle('collapsed');
+    header.setAttribute('aria-expanded', String(!collapsed));
+  });
   root.appendChild(header);
 
   const body = document.createElement('div');
