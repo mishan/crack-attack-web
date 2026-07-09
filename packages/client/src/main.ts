@@ -4,7 +4,8 @@
  * Wires the platform layers around the deterministic core into a playable solo
  * board: a {@link FixedTimestep} advances a `GameSim` at 50 Hz from real time,
  * {@link KeyboardInput} feeds it the player's actions, {@link deriveViewModel}
- * turns each frame's sim state into sprites, and {@link BoardView} draws them.
+ * turns each tick's sim state into sprites, {@link ViewInterpolator} smooths the
+ * motion between ticks by the render `alpha`, and {@link BoardView} draws it.
  *
  * The sim is authoritative and deterministic; everything here is replaceable
  * platform glue (and stays out of `packages/core`, which must not touch the DOM).
@@ -15,6 +16,7 @@ import { KeyboardInput } from './input/keyboard.js';
 import { BoardView } from './render/boardView.js';
 import { FixedTimestep } from './sim/fixedTimestep.js';
 import { deriveViewModel } from './view/boardViewModel.js';
+import { ViewInterpolator } from './view/viewInterpolator.js';
 
 const SEED = 0x1a2b3c4d;
 
@@ -26,8 +28,10 @@ function boot(): void {
   let sim = new GameSim(SEED);
   const clock = new FixedTimestep();
   const input = new KeyboardInput();
-  // One grid walk to read the board dimensions the renderer needs.
+  const interp = new ViewInterpolator();
+  // One grid walk to read the board dimensions and seed the interpolator.
   const initial = deriveViewModel(sim);
+  interp.push(initial);
   const view = new BoardView(app, initial.width, initial.visibleHeight);
 
   const fitToWindow = (): void => view.resize(globalThis.innerWidth, globalThis.innerHeight);
@@ -39,6 +43,8 @@ function boot(): void {
     if (e.code === 'KeyR') {
       sim = new GameSim(SEED); // fresh deterministic game
       clock.reset();
+      interp.reset();
+      interp.push(deriveViewModel(sim));
       input.clear();
       return;
     }
@@ -54,9 +60,14 @@ function boot(): void {
   // --- loop ----------------------------------------------------------------
   const frame = (nowMs: number): void => {
     const steps = clock.sample(nowMs);
-    for (let s = 0; s < steps; s++) sim.step(input.actionState());
+    for (let s = 0; s < steps; s++) {
+      sim.step(input.actionState());
+      // Interpolation only needs the last two ticks, so under catch-up (steps > 1)
+      // skip the expensive grid-walk for the intermediate ticks that get discarded.
+      if (s >= steps - 2) interp.push(deriveViewModel(sim));
+    }
 
-    const vm = deriveViewModel(sim, clock.alpha);
+    const vm = interp.sample(clock.alpha); // blend the last two ticks
     view.update(vm);
     view.render();
 

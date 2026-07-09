@@ -176,11 +176,12 @@ just use `pnpm` directly.
   (50 Hz wall-clock accumulator + interpolation alpha), `KeyboardInput`
   (rebindable `code`→`CC_*` map; normalizes combined directions to a single
   move, since the Swapper faithfully ignores multi-direction masks), and
-  `deriveViewModel` (sim state → render sprites). `BoardView` (Three.js
-  instanced meshes) and `main.ts` (RAF loop, input listeners, restart) are the
-  thin DOM/WebGL layer. `pnpm --filter @crack-attack/client dev`. Still to come:
-  glTF assets (`tools/obj2gltf`), HUD polish (level lights, lose bar, combo
-  signs), audio, and cross-tick interpolation.
+  `deriveViewModel` (sim state → render sprites), and `ViewInterpolator`
+  (blends the last two ticks by the render `alpha`, matching sprites by pool
+  `(id, generation)`, so motion is smooth above 50 Hz). `BoardView` (Three.js instanced meshes) and
+  `main.ts` (RAF loop, input listeners, restart) are the thin DOM/WebGL layer.
+  `pnpm --filter @crack-attack/client dev`. Still to come: glTF assets
+  (`tools/obj2gltf`), HUD polish (level lights, lose bar, combo signs), and audio.
 - [ ] Phase 3 AI, Phase 4 multiplayer, Phase 5 lobby
 
 See `BROWSER_PORT_PLAN.md` for the full phase breakdown and suggested order of work.

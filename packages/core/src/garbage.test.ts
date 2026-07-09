@@ -59,6 +59,15 @@ describe('GarbageManager store', () => {
     expect(gm.storeMap[0]).toBe(false);
   });
 
+  it('bumps a slot generation on every (re)allocation', () => {
+    const gm = mkGm();
+    gm.newFallingGarbageAt(0, 10, 1, 1, GF_NORMAL, 0);
+    const first = gm.garbage(0).generation; // allocated once
+    gm.deleteGarbage(gm.garbage(0)); // free slot 0
+    gm.newFallingGarbageAt(0, 20, 1, 1, GF_NORMAL, 0); // lowest free slot 0 reused
+    expect(gm.garbage(0).generation).toBe(first + 1);
+  });
+
   it('shiftUp increments y for every live garbage', () => {
     const grid = mkGrid();
     const gm = mkGm(grid);
