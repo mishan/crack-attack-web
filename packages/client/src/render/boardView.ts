@@ -27,6 +27,7 @@ import {
   Mesh,
   MeshStandardMaterial,
   PerspectiveCamera,
+  Plane,
   PlaneGeometry,
   Quaternion,
   RepeatWrapping,
@@ -59,6 +60,15 @@ export class BoardView {
 
   private readonly halfW: number;
   private readonly halfH: number;
+  /**
+   * The play-floor clip plane. Faithful to the original's
+   * `GL_CLIP_PLANE_PLAY_FLOOR`: it hides everything below the boundary between the
+   * incoming creep row (grid row 0) and the lowest playable row (row 1), so the
+   * dim creep row rises up into view from off-screen as the board creeps, rather
+   * than sitting fully visible at the bottom. Applied to the block + garbage
+   * materials only (the back wall and cursor are unclipped).
+   */
+  private readonly floorPlane: Plane;
 
   // Scratch objects reused every frame (no per-frame allocation).
   private readonly m = new Matrix4();
@@ -78,6 +88,12 @@ export class BoardView {
   constructor(container: HTMLElement, width: number, visibleHeight: number) {
     this.halfW = (width - 1) / 2;
     this.halfH = (visibleHeight - 1) / 2;
+
+    // Floor sits at the cell boundary between row 0 (creep) and row 1 (playable):
+    // row r maps to world y = r - halfH, so the boundary is at 0.5 - halfH. Keep
+    // fragments with y ≥ floorY, i.e. `y*1 + (-floorY) ≥ 0` → Plane((0,1,0), -floorY).
+    const floorY = 0.5 - this.halfH;
+    this.floorPlane = new Plane(new Vector3(0, 1, 0), -floorY);
 
     this.scene.background = new Color(0x0b0d12);
     this.scene.fog = new Fog(0x0b0d12, 22, 40);
@@ -105,7 +121,11 @@ export class BoardView {
     // flag is for per-*vertex* colours, a different attribute).
     this.blocks = new InstancedMesh(
       new BoxGeometry(BLOCK_SIZE, BLOCK_SIZE, BLOCK_SIZE),
-      new MeshStandardMaterial({ roughness: 0.45, metalness: 0.05 }),
+      new MeshStandardMaterial({
+        roughness: 0.45,
+        metalness: 0.05,
+        clippingPlanes: [this.floorPlane],
+      }),
       GC_BLOCK_STORE_SIZE,
     );
     this.blocks.count = 0;
@@ -117,7 +137,11 @@ export class BoardView {
     const white = new DataTexture(new Uint8Array([255, 255, 255, 255]), 1, 1);
     white.needsUpdate = true;
     this.lightmap = { value: white };
-    const garbageMaterial = new MeshStandardMaterial({ roughness: 0.8, metalness: 0.0 });
+    const garbageMaterial = new MeshStandardMaterial({
+      roughness: 0.8,
+      metalness: 0.0,
+      clippingPlanes: [this.floorPlane],
+    });
     this.patchGarbageLightmap(garbageMaterial);
     this.garbage = new InstancedMesh(
       new BoxGeometry(BLOCK_SIZE, BLOCK_SIZE, BLOCK_SIZE),
@@ -134,6 +158,9 @@ export class BoardView {
 
     this.renderer = new WebGLRenderer({ antialias: true });
     this.renderer.setPixelRatio(Math.min(globalThis.devicePixelRatio ?? 1, 2));
+    // Honour per-material clippingPlanes (the play floor) without clipping the
+    // whole scene — the back wall and cursor must stay whole.
+    this.renderer.localClippingEnabled = true;
     container.appendChild(this.renderer.domElement);
 
     // Upgrade the block geometry from the fallback cube to the real rounded-cube
@@ -258,9 +285,10 @@ export class BoardView {
         this.scl.setScalar(1);
         this.rot.identity();
         if (b.phase === 'awaking') this.color.multiplyScalar(0.5);
-        // Dim the incoming creep row so it reads as "not yet in play" — the lowest
-        // full-brightness row is the bottom *playable* row the cursor can reach.
-        if (b.preview) this.color.multiplyScalar(0.35);
+        // Dim the incoming creep row (`creep_colors` are 0.25× in the original) so
+        // it reads as "not yet in play": it rises up dim from below the play floor
+        // and snaps to full brightness when the grid shift promotes it to row 1.
+        if (b.preview) this.color.multiplyScalar(0.25);
       }
 
       this.m.compose(this.pos, this.rot, this.scl);

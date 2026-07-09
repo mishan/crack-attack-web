@@ -183,7 +183,12 @@ just use `pnpm` directly.
   thin DOM/WebGL layer. Blocks render the real rounded-cube glTF model
   (`public/models/block.gltf`, converted by `tools/obj2gltf`), loaded via
   `GLTFLoader` and swapped into the block `InstancedMesh` (box fallback until it
-  arrives). Garbage slabs render one rounded-cube per cell (the same glTF
+  arrives). The incoming creep row (grid row 0) rises in from off-screen: a
+  world-space clip plane on the block/garbage materials at the row 0 / row 1
+  boundary (faithful to `GL_CLIP_PLANE_PLAY_FLOOR`) hides it below the play floor,
+  so it slides up dim (`creep_colors` at 0.25×) as the board creeps and snaps to
+  full brightness when the grid shift promotes it to row 1. Garbage slabs render
+  one rounded-cube per cell (the same glTF
   geometry, tinted by flavor), faithful to `DrawGarbage.cxx` stamping block
   geometry at each garbage square, and carry the mottled garbage lightmap: a
   baked 64×64 luminance map (`public/textures/garbage_lightmap.png`, remapped to
