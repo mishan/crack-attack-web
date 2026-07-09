@@ -8,6 +8,7 @@ function model(
   blockRenderY: number,
   cursorRenderY: number,
   generation = 1,
+  swapFactor = 0,
 ): BoardViewModel {
   return {
     width: 6,
@@ -20,9 +21,11 @@ function model(
         y: Math.floor(blockRenderY),
         renderY: blockRenderY,
         flavor: 0,
-        phase: 'falling',
+        phase: swapFactor > 0 ? 'swapping' : 'falling',
         preview: false,
         deathProgress: 0,
+        swapFactor,
+        swapRight: true,
       },
     ],
     garbage: [],
@@ -96,6 +99,15 @@ describe('ViewInterpolator', () => {
     expect(vi.sample(-1).blocks[0]!.renderY).toBe(6); // clamped to 0
     expect(vi.sample(NaN).blocks[0]!.renderY).toBe(5); // non-finite → current
     expect(vi.sample(Infinity).blocks[0]!.renderY).toBe(5);
+  });
+
+  it('lerps a matched sprite swapFactor between the two frames', () => {
+    const vi = new ViewInterpolator();
+    vi.push(model(1, 5, 4, 1, 0.2)); // prev: swapping, 20% through
+    vi.push(model(1, 5, 4, 1, 0.4)); // curr: 40% through
+    expect(vi.sample(0).blocks[0]!.swapFactor).toBeCloseTo(0.2);
+    expect(vi.sample(1).blocks[0]!.swapFactor).toBeCloseTo(0.4);
+    expect(vi.sample(0.5).blocks[0]!.swapFactor).toBeCloseTo(0.3);
   });
 
   it('carries current-tick fields (x, y, phase) through unblended', () => {

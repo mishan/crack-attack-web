@@ -79,6 +79,10 @@ export class BoardView {
   // A tumble axis for the pop animation, and the colour it flashes toward.
   private readonly spinAxis = new Vector3(0.35, 1, 0.15).normalize();
   private readonly flash = new Color(0xffffff);
+  // Scratch for the revolving-door swap: the Y pivot axis and the block's offset
+  // from the shared edge it swings around.
+  private readonly yAxis = new Vector3(0, 1, 0);
+  private readonly swapOffset = new Vector3();
   // Garbage lightmap uniform, shared with the patched garbage shader. Starts as
   // a 1×1 white texture (no modulation) and is swapped for the real mottled map
   // once it loads. Kept as a stable object so updating `.value` reaches the
@@ -281,6 +285,21 @@ export class BoardView {
         this.scl.setScalar(Math.max(0.02, 1 - 0.92 * b.deathProgress));
         this.rot.setFromAxisAngle(this.spinAxis, b.deathProgress * Math.PI * 1.5);
         this.color.lerp(this.flash, 0.6 * b.deathProgress);
+      } else if (b.phase === 'swapping') {
+        // Revolving door: the block swings a semicircle around the vertical edge
+        // it shares with its swap partner (faithful to the swap_factor transform
+        // in DrawBlocks.cxx). `dir` is +1 moving right, -1 left; the pivot is that
+        // shared edge and the block starts half a cell to its origin side. Both
+        // partners spin the *same* direction (θ 0→180°) so they pass on opposite
+        // sides of the edge (one bulges toward the camera, the other away) instead
+        // of overlapping at the midpoint.
+        const dir = b.swapRight ? 1 : -1;
+        const theta = Math.PI * b.swapFactor;
+        this.scl.setScalar(1);
+        this.rot.setFromAxisAngle(this.yAxis, theta);
+        this.place(b.x + dir * 0.5, b.renderY); // pivot on the shared edge
+        this.swapOffset.set(-dir * 0.5, 0, 0).applyAxisAngle(this.yAxis, theta);
+        this.pos.add(this.swapOffset);
       } else {
         this.scl.setScalar(1);
         this.rot.identity();

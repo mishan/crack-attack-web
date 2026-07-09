@@ -4,6 +4,7 @@ import {
   BS_DYING,
   CC_ADVANCE,
   CC_RIGHT,
+  CC_SWAP,
   GC_DYING_DELAY,
   GC_PLAY_HEIGHT,
   GC_PLAY_WIDTH,
@@ -90,6 +91,38 @@ describe('deriveViewModel', () => {
     const before = deriveViewModel(sim).cursor.x;
     sim.step(new ActionState(CC_RIGHT));
     expect(deriveViewModel(sim).cursor.x).toBe(before + 1);
+  });
+
+  it('exposes swapping blocks with a rising swapFactor and a move direction', () => {
+    const sim = new GameSim(1);
+    // The cursor starts over two filled cells; a swap animates them over
+    // GC_SWAP_DELAY ticks.
+    sim.step(new ActionState(CC_SWAP));
+
+    let swapping = deriveViewModel(sim).blocks.filter((b) => b.phase === 'swapping');
+    expect(swapping.length).toBeGreaterThan(0);
+    // Each swapping block carries a boolean move direction (right-mover has the
+    // BS_SWAP_DIRECTION_MASK set); the left cell of a pair moves right.
+    for (const b of swapping) expect(typeof b.swapRight).toBe('boolean');
+    // It begins at the start of the swap (factor ~0).
+    const startFactor = Math.max(...swapping.map((b) => b.swapFactor));
+    expect(startFactor).toBeLessThan(0.2);
+
+    // A couple ticks later the swap has progressed.
+    sim.step(noActions());
+    sim.step(noActions());
+    swapping = deriveViewModel(sim).blocks.filter((b) => b.phase === 'swapping');
+    const laterFactor = Math.max(...swapping.map((b) => b.swapFactor));
+    expect(laterFactor).toBeGreaterThan(startFactor);
+    expect(laterFactor).toBeLessThanOrEqual(1);
+  });
+
+  it('reports swapFactor 0 and swapRight false for non-swapping blocks', () => {
+    const vm = deriveViewModel(new GameSim(1));
+    for (const b of vm.blocks) {
+      expect(b.swapFactor).toBe(0);
+      expect(b.swapRight).toBe(false);
+    }
   });
 
   it('surfaces HUD counters and a clamped danger fraction', () => {
