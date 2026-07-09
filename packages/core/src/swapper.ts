@@ -38,6 +38,7 @@ import { flavorMatch } from './flavors.js';
 import { GR_BLOCK, GR_EMPTY, GR_FALLING, GR_HANGING, GR_IMMUTABLE } from './grid.js';
 import type { ComboTabulator } from './combo.js';
 import type { GridSimContext } from './grid.js';
+import { HASH_NONE, type StateHasher } from './digest.js';
 
 // --- Swapper states (Swapper.h:32-39) --------------------------------------
 
@@ -74,6 +75,22 @@ export class Swapper {
   private button_down_swap = false;
   private queued_move = 0;
   private queued_swap = false;
+
+  /** Feed every gameplay field into the sim digest (digest.ts). Pure. */
+  hashState(h: StateHasher): void {
+    h.add(this.x);
+    h.add(this.y);
+    h.add(this.state);
+    h.add(this.move_pause_alarm);
+    h.add(this.swap_alarm);
+    h.add(this.swap);
+    h.add(this.left_block ? this.left_block.id : HASH_NONE);
+    h.add(this.right_block ? this.right_block.id : HASH_NONE);
+    h.add(this.button_down_move);
+    h.addBool(this.button_down_swap);
+    h.add(this.queued_move);
+    h.addBool(this.queued_swap);
+  }
 
   /** Reset for a new game. Mirrors `Swapper::gameStart` (Swapper.cxx:52). */
   gameStart(): void {

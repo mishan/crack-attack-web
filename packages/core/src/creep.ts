@@ -32,6 +32,7 @@ import {
 } from './constants.js';
 import type { ActionState } from './controller.js';
 import type { GridSimContext } from './grid.js';
+import type { StateHasher } from './digest.js';
 
 /**
  * The per-tick environment Creep needs, on top of {@link GridSimContext}
@@ -77,6 +78,17 @@ export class Creep {
   private increase_velocity_alarm = 0;
   /** Manual-advance latch: once advancing, keep advancing until the row lands. `Creep.h:43` */
   private advance = false;
+
+  /** Feed every gameplay field into the sim digest (digest.ts). Pure. */
+  hashState(h: StateHasher): void {
+    h.add(this.creep);
+    h.add(this.loss_alarm);
+    h.addBool(this.creep_freeze);
+    h.add(this.creep_timer_step);
+    h.add(this.creep_timer);
+    h.add(this.increase_velocity_alarm);
+    h.addBool(this.advance);
+  }
 
   /**
    * Reset for a new game and spawn the first creep row. Mirrors

@@ -20,6 +20,7 @@ import type { Clock } from './clock.js';
 import { ComboTabulator } from './combo.js';
 import type { GarbageGenerator } from './garbageGenerator.js';
 import { isBaseFlavor, mapSpecialFlavorToCode } from './flavors.js';
+import type { StateHasher } from './digest.js';
 
 export class ComboManager {
   private readonly tabulatorStore: ComboTabulator[];
@@ -52,6 +53,15 @@ export class ComboManager {
   /** Number of live combos (inspection/test helper). */
   get comboCount(): number {
     return this.combo_count;
+  }
+
+  /** Feed the store occupancy and every live combo into the sim digest. Pure. */
+  hashState(h: StateHasher): void {
+    h.add(this.combo_count);
+    for (let n = 0; n < GC_COMBO_TABULATOR_STORE_SIZE; n++) {
+      h.addBool(this.storeMap[n]!);
+      if (this.storeMap[n]) this.tabulatorStore[n]!.hashState(h);
+    }
   }
 
   /**

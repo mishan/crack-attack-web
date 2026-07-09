@@ -8,6 +8,7 @@
  */
 
 export * from './constants.js';
+export * from './digest.js';
 export * from './rng.js';
 export * from './clock.js';
 export * from './flavors.js';

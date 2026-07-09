@@ -30,6 +30,7 @@ import { ComboManager } from './comboManager.js';
 import { Creep, type CreepSimContext } from './creep.js';
 import type { ComboTabulator } from './combo.js';
 import type { ActionState } from './controller.js';
+import { StateHasher } from './digest.js';
 import type { Garbage } from './garbage.js';
 import { GarbageManager } from './garbage.js';
 import { GarbageGenerator } from './garbageGenerator.js';
@@ -168,6 +169,31 @@ export class GameSim implements CreepSimContext, SignSink {
     this.garbageGenerator.timeStep();
 
     // Game.cxx:453-459 — Clock/Score/LoseBar: display-layer, omitted from core.
+  }
+
+  /**
+   * Deterministic uint32 digest of the full gameplay state (see digest.ts).
+   * Pure — draws no RNG, mutates nothing — so it can be computed at any cadence
+   * (per tick for the replay harness, every DIGEST_PERIOD for netplay desync
+   * detection) without perturbing the sim. Two sims with the same seed and the
+   * same input history digest identically at the same tick; cosmetic state
+   * (signs, death axes, cosmeticRng) is deliberately excluded.
+   */
+  digest(): number {
+    const h = new StateHasher();
+    h.add(this.clock.time_step);
+    h.add(this.rng.state);
+    h.add(this.awaking_count);
+    h.add(this.dying_count);
+    h.addBool(this.lost);
+    this.grid.hashState(h);
+    this.blocks.hashState(h);
+    this.garbageStore.hashState(h);
+    this.combos.hashState(h);
+    this.garbageGenerator.hashState(h);
+    this.swapper.hashState(h);
+    this.creep.hashState(h);
+    return h.value;
   }
 
   /**
