@@ -80,14 +80,14 @@ export interface RenderTuning {
 // facets stays high-contrast), a gray specular (`GL_SPECULAR` 0.5 → 128), and a
 // broad `GL_SHININESS` 10. The key light is the "headlight" a bit above the view.
 export const DEFAULT_RENDER_TUNING: RenderTuning = {
-  ambient: 0.14,
-  keyIntensity: 1.35,
-  keyAzimuthDeg: 14,
-  keyElevationDeg: 30,
-  fillIntensity: 0.22,
+  ambient: 0.9,
+  keyIntensity: 1.15,
+  keyAzimuthDeg: 45,
+  keyElevationDeg: 22,
+  fillIntensity: 0,
   shininess: 10,
-  specular: 128,
-  garbageRoughness: 0.5,
+  specular: 185,
+  garbageRoughness: 0.4,
   flatShading: false,
 };
 
