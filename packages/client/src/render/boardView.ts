@@ -15,9 +15,11 @@ import {
   BoxGeometry,
   type BufferGeometry,
   Color,
+  DataTexture,
   DirectionalLight,
   EdgesGeometry,
   Fog,
+  type IUniform,
   InstancedMesh,
   LineBasicMaterial,
   LineSegments,
@@ -27,7 +29,10 @@ import {
   PerspectiveCamera,
   PlaneGeometry,
   Quaternion,
+  RepeatWrapping,
   Scene,
+  type Texture,
+  TextureLoader,
   Vector3,
   WebGLRenderer,
 } from 'three';
@@ -64,6 +69,11 @@ export class BoardView {
   // A tumble axis for the pop animation, and the colour it flashes toward.
   private readonly spinAxis = new Vector3(0.35, 1, 0.15).normalize();
   private readonly flash = new Color(0xffffff);
+  // Garbage lightmap uniform, shared with the patched garbage shader. Starts as
+  // a 1×1 white texture (no modulation) and is swapped for the real mottled map
+  // once it loads. Kept as a stable object so updating `.value` reaches the
+  // already-compiled program without a recompile.
+  private readonly lightmap: IUniform<Texture>;
 
   constructor(container: HTMLElement, width: number, visibleHeight: number) {
     this.halfW = (width - 1) / 2;
@@ -104,9 +114,14 @@ export class BoardView {
     // Garbage shares the block's cube shape but reads a little rougher/darker.
     // One instance per garbage cell (not per slab); the loaded glTF geometry is
     // swapped into both meshes together.
+    const white = new DataTexture(new Uint8Array([255, 255, 255, 255]), 1, 1);
+    white.needsUpdate = true;
+    this.lightmap = { value: white };
+    const garbageMaterial = new MeshStandardMaterial({ roughness: 0.8, metalness: 0.0 });
+    this.patchGarbageLightmap(garbageMaterial);
     this.garbage = new InstancedMesh(
       new BoxGeometry(BLOCK_SIZE, BLOCK_SIZE, BLOCK_SIZE),
-      new MeshStandardMaterial({ roughness: 0.8, metalness: 0.0 }),
+      garbageMaterial,
       GARBAGE_CELL_CAP,
     );
     this.garbage.count = 0;
@@ -125,6 +140,8 @@ export class BoardView {
     // model (converted by tools/obj2gltf). Async; blocks render as boxes until it
     // arrives, and stay boxes if the fetch fails.
     void this.loadBlockModel();
+    // Load the mottled garbage lightmap; garbage stays flat-tinted until it lands.
+    void this.loadGarbageLightmap();
   }
 
   /**
@@ -166,6 +183,56 @@ export class BoardView {
       oldGarbage.dispose();
     } catch {
       // Keep the box fallback; the model is a visual upgrade, not required.
+    }
+  }
+
+  /**
+   * Patch the garbage material to modulate its albedo by a world-position-tied
+   * lightmap, reproducing `DrawGarbage.cxx`: the mottled luminance map is sampled
+   * at `worldXY * conv + 0.5` (one tile spans the board width), so the sheen flows
+   * continuously across every cell of a slab — and across slabs sharing a column —
+   * rather than tiling per cube. The map is pre-remapped to [0.85, 1.0] luminance
+   * when baked, so the shader just multiplies. Blocks are left untouched (only
+   * *special* blocks are lightmapped in the original, via a separate 1-D map).
+   */
+  private patchGarbageLightmap(material: MeshStandardMaterial): void {
+    const conv = -1 / GC_PLAY_WIDTH; // DC_GARBAGE_LIGHTMAP_COORD_CONVERTER in cell units
+    material.onBeforeCompile = (shader) => {
+      shader.uniforms.uLightmap = this.lightmap;
+      shader.uniforms.uLmConv = { value: conv };
+      shader.vertexShader =
+        'varying vec2 vLmUv;\nuniform float uLmConv;\n' +
+        shader.vertexShader.replace(
+          '#include <project_vertex>',
+          '#include <project_vertex>\n' +
+            '  vec4 lmWorld = modelMatrix * instanceMatrix * vec4(transformed, 1.0);\n' +
+            '  vLmUv = lmWorld.xy * uLmConv + 0.5;',
+        );
+      shader.fragmentShader =
+        'varying vec2 vLmUv;\nuniform sampler2D uLightmap;\n' +
+        shader.fragmentShader.replace(
+          '#include <color_fragment>',
+          '#include <color_fragment>\n  diffuseColor.rgb *= texture2D(uLightmap, vLmUv).r;',
+        );
+    };
+  }
+
+  /**
+   * Fetch the baked garbage lightmap and hand it to the patched shader by swapping
+   * the shared uniform's `.value` (no material recompile). Tiles (RepeatWrapping)
+   * for boards taller/wider than one map. Stays the white no-op texture on failure.
+   */
+  private async loadGarbageLightmap(): Promise<void> {
+    try {
+      const url = new URL('textures/garbage_lightmap.png', document.baseURI).href;
+      const tex = await new TextureLoader().loadAsync(url);
+      tex.wrapS = RepeatWrapping;
+      tex.wrapT = RepeatWrapping;
+      const previous = this.lightmap.value;
+      this.lightmap.value = tex;
+      previous.dispose();
+    } catch {
+      // Keep the flat white lightmap; the sheen is a visual upgrade, not required.
     }
   }
 
