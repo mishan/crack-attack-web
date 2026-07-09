@@ -139,3 +139,40 @@ describe('GameSim.step', () => {
     }
   });
 });
+
+describe('GameSim reward-sign sink', () => {
+  it('wires the garbage generator to deliver signs to the sim buffer', () => {
+    const sim = new GameSim(1);
+    expect(sim.garbageGenerator.signSink).toBe(sim);
+    expect(sim.signSink).toBe(sim);
+  });
+
+  it('drains emitted signs once, then reports empty', () => {
+    const sim = new GameSim(1);
+    sim.createSign(2, 5, 'magnitude', 1);
+    sim.createSign(3, 6, 'multiplier', 0);
+    const drained = sim.drainSignEvents();
+    expect(drained).toEqual([
+      { gridX: 2, gridY: 5, kind: 'magnitude', level: 1 },
+      { gridX: 3, gridY: 6, kind: 'multiplier', level: 0 },
+    ]);
+    expect(sim.drainSignEvents()).toEqual([]);
+  });
+
+  it('clears undrained signs on restart', () => {
+    const sim = new GameSim(1);
+    sim.createSign(1, 1, 'special', 0);
+    sim.gameStart();
+    expect(sim.drainSignEvents()).toEqual([]);
+  });
+
+  it('caps the buffer for a never-drained run, keeping the newest', () => {
+    const sim = new GameSim(1);
+    for (let i = 0; i < 1000; i++) sim.createSign(i % GC_PLAY_WIDTH, 1, 'magnitude', i);
+    const drained = sim.drainSignEvents();
+    expect(drained.length).toBe(256);
+    // the newest event (level 999) survived; the oldest were dropped
+    expect(drained[drained.length - 1]!.level).toBe(999);
+    expect(drained[0]!.level).toBe(1000 - 256);
+  });
+});

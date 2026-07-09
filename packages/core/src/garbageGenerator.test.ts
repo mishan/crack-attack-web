@@ -16,6 +16,7 @@ import { GarbageManager } from './garbage.js';
 import { GarbageGenerator, type GarbageOutSink } from './garbageGenerator.js';
 import { GR_GARBAGE, Grid } from './grid.js';
 import { Rng } from './rng.js';
+import type { SignEvent, SignKind, SignSink } from './signs.js';
 
 class RecordingSink implements GarbageOutSink {
   normal: Array<[number, number, number]> = [];
@@ -202,6 +203,66 @@ describe('GarbageGenerator solo dealing + drop', () => {
   it('addToQueue throws on an unknown special flavor', () => {
     const { gg } = newRig();
     expect(() => gg.addToQueue(1, 1, 999, 0)).toThrow(RangeError);
+  });
+});
+
+describe('GarbageGenerator.comboElimination — reward signs', () => {
+  class RecordingSignSink implements SignSink {
+    events: SignEvent[] = [];
+    createSign(gridX: number, gridY: number, kind: SignKind, level: number): void {
+      this.events.push({ gridX, gridY, kind, level });
+    }
+  }
+
+  const signsFor = (fields: Partial<ComboTabulator>): SignEvent[] => {
+    const { gg } = newRig();
+    const signs = new RecordingSignSink();
+    gg.signSink = signs;
+    gg.comboElimination(comboWith({ x: 2, y: 5, ...fields }));
+    return signs.events;
+  };
+
+  it('emits a magnitude sign (level = magnitude - 4) for a big combo', () => {
+    // magnitude 4 -> level 0 at the kernel cell
+    expect(signsFor({ magnitude: 4 })).toEqual([
+      { gridX: 2, gridY: 5, kind: 'magnitude', level: 0 },
+    ]);
+    expect(signsFor({ magnitude: 7 })).toContainEqual({
+      gridX: 2,
+      gridY: 5,
+      kind: 'magnitude',
+      level: 3,
+    });
+  });
+
+  it('emits no magnitude sign at or below the minimum pattern length', () => {
+    expect(signsFor({ magnitude: 3 })).toEqual([]);
+  });
+
+  it('emits a per-special sign for a tallied special flavor', () => {
+    const { gg } = newRig();
+    const signs = new RecordingSignSink();
+    gg.signSink = signs;
+    const c = comboWith({ x: 2, y: 5 });
+    c.special[mapSpecialFlavorToCode(BF_BLACK)] = 2;
+    gg.comboElimination(c);
+    expect(signs.events).toContainEqual({
+      gridX: 2,
+      gridY: 5,
+      kind: 'special',
+      level: mapSpecialFlavorToCode(BF_BLACK) + 1,
+    });
+  });
+
+  it('emits a generic bonus sign (level 0) for gray-only special magnitude', () => {
+    expect(signsFor({ special_magnitude: 5 })).toEqual([
+      { gridX: 2, gridY: 5, kind: 'special', level: 0 },
+    ]);
+  });
+
+  it('does not require a sink (headless run is a no-op)', () => {
+    const { gg } = newRig(); // no signSink set
+    expect(() => gg.comboElimination(comboWith({ magnitude: 7 }))).not.toThrow();
   });
 });
 

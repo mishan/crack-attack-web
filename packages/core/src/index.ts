@@ -21,4 +21,5 @@ export * from './garbageGenerator.js';
 export * from './controller.js';
 export * from './swapper.js';
 export * from './creep.js';
+export * from './signs.js';
 export * from './gameSim.js';

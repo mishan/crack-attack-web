@@ -11,15 +11,19 @@
  * platform glue (and stays out of `packages/core`, which must not touch the DOM).
  */
 
-import { GameSim } from '@crack-attack/core';
+import { GameSim, GC_STEPS_PER_SECOND } from '@crack-attack/core';
 import { KeyboardInput } from './input/keyboard.js';
 import { BoardView } from './render/boardView.js';
 import { HudView } from './render/hudView.js';
+import { SignsView } from './render/signsView.js';
 import { FixedTimestep } from './sim/fixedTimestep.js';
 import { deriveViewModel } from './view/boardViewModel.js';
 import { ViewInterpolator } from './view/viewInterpolator.js';
 
 const SEED = 0x1a2b3c4d;
+const MS_PER_TICK = 1000 / GC_STEPS_PER_SECOND;
+/** Cap sign advance per frame so a long stall (tab refocus) doesn't warp them away. */
+const MAX_SIGN_DT_TICKS = 10;
 
 function boot(): void {
   const app = document.getElementById('app');
@@ -34,6 +38,7 @@ function boot(): void {
   const initial = deriveViewModel(sim);
   interp.push(initial);
   const view = new BoardView(app, initial.width, initial.visibleHeight);
+  const signs = new SignsView(view.scene, (initial.width - 1) / 2, (initial.visibleHeight - 1) / 2);
   const hud = hudEl ? new HudView(hudEl) : null;
 
   const fitToWindow = (): void => view.resize(globalThis.innerWidth, globalThis.innerHeight);
@@ -47,6 +52,7 @@ function boot(): void {
       clock.reset();
       interp.reset();
       interp.push(deriveViewModel(sim));
+      signs.clear();
       input.clear();
       return;
     }
@@ -60,6 +66,7 @@ function boot(): void {
   globalThis.addEventListener('blur', () => input.clear());
 
   // --- loop ----------------------------------------------------------------
+  let lastMs = performance.now();
   const frame = (nowMs: number): void => {
     const steps = clock.sample(nowMs);
     for (let s = 0; s < steps; s++) {
@@ -68,6 +75,14 @@ function boot(): void {
       // skip the expensive grid-walk for the intermediate ticks that get discarded.
       if (s >= steps - 2) interp.push(deriveViewModel(sim));
     }
+
+    // Spawn reward signs for the combos that fired across this frame's ticks.
+    for (const ev of sim.drainSignEvents()) signs.spawn(ev.gridX, ev.gridY, ev.kind, ev.level);
+
+    // Signs float on wall-clock time so they stay smooth between sim ticks.
+    const dtTicks = Math.min(MAX_SIGN_DT_TICKS, (nowMs - lastMs) / MS_PER_TICK);
+    lastMs = nowMs;
+    signs.update(dtTicks);
 
     const vm = interp.sample(clock.alpha); // blend the last two ticks
     view.update(vm);

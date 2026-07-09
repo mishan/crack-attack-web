@@ -35,10 +35,18 @@ import { GarbageManager } from './garbage.js';
 import { GarbageGenerator } from './garbageGenerator.js';
 import { GR_BLOCK, GR_EMPTY, Grid } from './grid.js';
 import { Rng } from './rng.js';
+import type { SignEvent, SignKind, SignSink } from './signs.js';
 import { Swapper } from './swapper.js';
 import { GC_PLAY_HEIGHT, GC_PLAY_WIDTH } from './constants.js';
 
-export class GameSim implements CreepSimContext {
+/**
+ * Cap on undrained reward signs. Signs are cosmetic and normally drained every
+ * frame; the cap just bounds memory for a headless run (tests, server, replay
+ * harness) that never drains, keeping the newest events.
+ */
+const SIGN_BUFFER_CAP = 256;
+
+export class GameSim implements CreepSimContext, SignSink {
   /** Shared tick counter (mirrors `Game::time_step`). */
   readonly clock = new Clock();
   /** The seed this sim was created with; `gameStart` reseeds from it. */
@@ -73,6 +81,9 @@ export class GameSim implements CreepSimContext {
   /** Count of blocks currently dying. Mirrors `Game::dying_count`. */
   dying_count = 0;
 
+  /** Cosmetic reward signs emitted since the last {@link drainSignEvents}. */
+  private readonly signBuffer: SignEvent[] = [];
+
   constructor(seed: number) {
     this.seed = seed >>> 0;
     this.rng = new Rng(this.seed);
@@ -80,6 +91,7 @@ export class GameSim implements CreepSimContext {
     this.blocks = new BlockManager(this.grid, this.rng);
     this.garbageStore = new GarbageManager(this.grid, this.rng);
     this.garbageGenerator = new GarbageGenerator(this.clock, this.rng, this.garbageStore);
+    this.garbageGenerator.signSink = this;
     this.combos = new ComboManager(this.clock, this.garbageGenerator);
     this.gameStart();
   }
@@ -98,6 +110,7 @@ export class GameSim implements CreepSimContext {
     this.awaking_count = 0;
     this.dying_count = 0;
     this.lost = false;
+    this.signBuffer.length = 0;
 
     // Reseed both RNGs so a restart is fully deterministic and does not depend
     // on draws made during the previous game.
@@ -155,6 +168,32 @@ export class GameSim implements CreepSimContext {
     this.garbageGenerator.timeStep();
 
     // Game.cxx:453-459 — Clock/Score/LoseBar: display-layer, omitted from core.
+  }
+
+  /**
+   * {@link SignSink}: record a cosmetic reward sign for the display layer. Called
+   * by the combo/garbage code at the exact points `SignManager::createSign` fires
+   * in the C++. Draws no gameplay RNG, so it never perturbs determinism; the
+   * buffer is capped so an undrained headless run stays bounded (keeps the newest).
+   */
+  createSign(gridX: number, gridY: number, kind: SignKind, level: number): void {
+    if (this.signBuffer.length >= SIGN_BUFFER_CAP) this.signBuffer.shift();
+    this.signBuffer.push({ gridX, gridY, kind, level });
+  }
+
+  /** This sim as the cosmetic sign destination (`GridSimContext.signSink`). */
+  get signSink(): SignSink {
+    return this;
+  }
+
+  /**
+   * Remove and return the reward signs emitted since the last drain. The display
+   * layer calls this each frame to spawn floating sprites; a headless run can
+   * ignore it (the buffer self-caps, and `gameStart` clears it).
+   */
+  drainSignEvents(): SignEvent[] {
+    if (this.signBuffer.length === 0) return [];
+    return this.signBuffer.splice(0, this.signBuffer.length);
   }
 
   /**

@@ -31,6 +31,7 @@ import {
 import type { Clock } from './clock.js';
 import type { ComboTabulator } from './combo.js';
 import type { GarbageManager } from './garbage.js';
+import type { SignSink } from './signs.js';
 import {
   GF_BLACK,
   GF_COLOR_1,
@@ -73,6 +74,13 @@ export class GarbageGenerator {
   /** Optional outbound destination; null ⇒ solo (deal to own board). */
   outSink: GarbageOutSink | null = null;
 
+  /**
+   * Optional cosmetic sign destination for magnitude/special reward signs.
+   * Emitting a sign draws no gameplay RNG, so leaving it null (a headless run)
+   * has no effect on the simulation.
+   */
+  signSink: SignSink | null = null;
+
   constructor(
     private readonly clock: Clock,
     private readonly rng: Rng,
@@ -106,9 +114,15 @@ export class GarbageGenerator {
     combo.latest_magnitude = combo.special_magnitude + combo.magnitude + combo.multiplier - 1;
 
     // --- special garbage (per tallied special flavor) ---
+    // Track whether any per-flavor special sign was shown, so the gray branch
+    // below only adds a generic bonus sign when none was (GarbageGenerator.cxx:62-84).
+    let shownSpecialSign = false;
     for (let n = BF_NUMBER_SPECIAL; n--;) {
       let count = combo.special[n]!;
       if (count) {
+        shownSpecialSign = true;
+        // Cosmetic per-special reward sign (GarbageGenerator.cxx:67).
+        this.signSink?.createSign(combo.x, combo.y, 'special', n + 1);
         if (isColorlessCode(n)) combo.special_magnitude -= count;
         while (count--) {
           this.sendSpecialGarbage(mapBlockCodeToGarbageFlavor(n));
@@ -119,6 +133,8 @@ export class GarbageGenerator {
 
     // --- gray garbage (from leftover special magnitude) ---
     if (combo.special_magnitude >= GC_MIN_PATTERN_LENGTH) {
+      // Generic bonus sign only if no per-special sign was shown (GarbageGenerator.cxx:82).
+      if (!shownSpecialSign) this.signSink?.createSign(combo.x, combo.y, 'special', 0);
       combo.special_magnitude -= GC_MIN_PATTERN_LENGTH - 2;
       while (--combo.special_magnitude) {
         this.sendSpecialGarbage(GF_GRAY);
@@ -129,6 +145,9 @@ export class GarbageGenerator {
 
     // --- normal garbage (dimensioned by magnitude) ---
     if (combo.magnitude > GC_MIN_PATTERN_LENGTH) {
+      // Cosmetic combo-magnitude reward sign (GarbageGenerator.cxx:99).
+      // `magnitude - 4` so a 4-combo is level 0.
+      this.signSink?.createSign(combo.x, combo.y, 'magnitude', combo.magnitude - 4);
       if (combo.magnitude <= GC_PLAY_WIDTH) {
         this.sendGarbage(1, combo.magnitude - 1, GF_NORMAL);
       } else if (combo.magnitude < 2 * GC_PLAY_WIDTH - 1) {
