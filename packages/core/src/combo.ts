@@ -23,6 +23,7 @@
 import { BF_NUMBER_SPECIAL } from './constants.js';
 import { isColorlessFlavor } from './flavors.js';
 import type { Block } from './block.js';
+import type { SignSink } from './signs.js';
 
 export class ComboTabulator {
   /** Free-store id. `ComboTabulator.h:46` */
@@ -86,9 +87,16 @@ export class ComboTabulator {
    * Mirrors `ComboTabulator::reportElimination` (ComboTabulator.cxx:53). A
    * match that lands on a later tick than creation raises the multiplier (a
    * chain). Colorless (gray/black/white) kernels feed the special magnitude;
-   * everything else feeds the normal magnitude.
+   * everything else feeds the normal magnitude. `signSink`, when supplied, is
+   * notified of the multiplier reward sign; it's cosmetic and optional (the
+   * emission draws no gameplay RNG, so it can't affect determinism).
    */
-  reportElimination(magnitudeDelta: number, kernel: Block, timeStep: number): void {
+  reportElimination(
+    magnitudeDelta: number,
+    kernel: Block,
+    timeStep: number,
+    signSink?: SignSink,
+  ): void {
     this.x = kernel.x;
     this.y = kernel.y;
 
@@ -98,7 +106,9 @@ export class ComboTabulator {
     if (timeStep !== this.creation_time_stamp) {
       this.multiplier++;
       this.n_multipliers_this_step++;
-      // Cosmetic: SignManager multiplier sign + SparkleManager reward mote — deferred.
+      // Cosmetic multiplier sign (ComboTabulator.cxx:67); SparkleManager reward
+      // mote is still deferred. `multiplier - 2` so the first chain (×2) is level 0.
+      signSink?.createSign(this.x, this.y, 'multiplier', this.multiplier - 2);
     }
 
     if (isColorlessFlavor(kernel.flavor)) {

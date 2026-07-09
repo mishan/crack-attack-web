@@ -33,6 +33,7 @@ import type { Block, BlockSimContext } from './block.js';
 import type { ComboManager } from './comboManager.js';
 import type { Garbage, GarbageManager } from './garbage.js';
 import type { ComboTabulator } from './combo.js';
+import type { SignSink } from './signs.js';
 import { GF_BLACK, flavorMatch, isColorlessFlavor } from './flavors.js';
 
 // --- Grid element states (Grid.h:37-43) ------------------------------------
@@ -96,6 +97,8 @@ export interface GridSimContext extends BlockSimContext {
   readonly combos: ComboManager;
   /** Garbage store — the elimination detector shatters touching garbage into it. */
   readonly garbageStore: GarbageManager;
+  /** Optional cosmetic sign destination (chain-multiplier reward signs). */
+  readonly signSink?: SignSink;
 }
 
 /**
@@ -535,7 +538,7 @@ export class Grid implements BlockGridSink, GarbageGridSink {
       }
     }
 
-    activeCombo.reportElimination(magnitude, block, ctx.clock.time_step);
+    activeCombo.reportElimination(magnitude, block, ctx.clock.time_step, ctx.signSink);
   }
 
   /**
