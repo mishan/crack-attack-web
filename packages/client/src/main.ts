@@ -13,6 +13,7 @@
 
 import { GameSim, GC_STEPS_PER_SECOND } from '@crack-attack/core';
 import { KeyboardInput } from './input/keyboard.js';
+import { mountTouchControls } from './input/touchControls.js';
 import { BoardView } from './render/boardView.js';
 import { GarbageDecalView } from './render/garbageDecalView.js';
 import { HudView } from './render/hudView.js';
@@ -50,15 +51,19 @@ function boot(): void {
   globalThis.addEventListener('resize', fitToWindow);
 
   // --- input ---------------------------------------------------------------
+  const restart = (): void => {
+    sim = new GameSim(SEED); // fresh deterministic game
+    clock.reset();
+    interp.reset();
+    interp.push(deriveViewModel(sim));
+    signs.clear();
+    decals.clear();
+    input.clear();
+  };
+
   globalThis.addEventListener('keydown', (e: KeyboardEvent) => {
     if (e.code === 'KeyR') {
-      sim = new GameSim(SEED); // fresh deterministic game
-      clock.reset();
-      interp.reset();
-      interp.push(deriveViewModel(sim));
-      signs.clear();
-      decals.clear();
-      input.clear();
+      restart();
       return;
     }
     if (input.handles(e.code)) {
@@ -69,6 +74,18 @@ function boot(): void {
   globalThis.addEventListener('keyup', (e: KeyboardEvent) => input.release(e.code));
   // Don't let inputs stick if focus leaves the tab mid-press.
   globalThis.addEventListener('blur', () => input.clear());
+
+  // On-screen controls for touch devices; they feed the same KeyboardInput.
+  const touch = mountTouchControls({
+    press: (code) => input.press(code),
+    release: (code) => input.release(code),
+    restart,
+  });
+  // The keyboard hint is useless on a phone — hide it when touch controls mount.
+  if (touch) {
+    const help = document.getElementById('help');
+    if (help) help.style.display = 'none';
+  }
 
   // --- loop ----------------------------------------------------------------
   let lastMs = performance.now();

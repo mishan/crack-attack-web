@@ -175,8 +175,10 @@ just use `pnpm` directly.
   split so the sim-facing ones stay DOM-free and unit-tested — `FixedTimestep`
   (50 Hz wall-clock accumulator + interpolation alpha), `KeyboardInput`
   (rebindable `code`→`CC_*` map; normalizes combined directions to a single
-  move, since the Swapper faithfully ignores multi-direction masks), and
-  `deriveViewModel` (sim state → render sprites), and `ViewInterpolator`
+  move, since the Swapper faithfully ignores multi-direction masks; on touch /
+  coarse-pointer devices `input/touchControls.ts` mounts an on-screen D-pad +
+  swap/raise/restart overlay that feeds the same `KeyboardInput` via those key
+  codes), and `deriveViewModel` (sim state → render sprites), and `ViewInterpolator`
   (blends the last two ticks by the render `alpha`, matching sprites by pool
   `(id, generation)`, so motion is smooth above 50 Hz). `BoardView` (Three.js
   instanced meshes) and `main.ts` (RAF loop, input listeners, restart) are the
