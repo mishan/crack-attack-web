@@ -9,6 +9,7 @@ function model(
   cursorRenderY: number,
   generation = 1,
   swapFactor = 0,
+  awakeProgress = 1,
 ): BoardViewModel {
   return {
     width: 6,
@@ -21,11 +22,14 @@ function model(
         y: Math.floor(blockRenderY),
         renderY: blockRenderY,
         flavor: 0,
-        phase: swapFactor > 0 ? 'swapping' : 'falling',
+        phase: swapFactor > 0 ? 'swapping' : awakeProgress < 1 ? 'awaking' : 'falling',
         preview: false,
         deathProgress: 0,
         swapFactor,
         swapRight: true,
+        awakeProgress,
+        popColor: 0,
+        popDirection: 0,
       },
     ],
     garbage: [],
@@ -108,6 +112,15 @@ describe('ViewInterpolator', () => {
     expect(vi.sample(0).blocks[0]!.swapFactor).toBeCloseTo(0.2);
     expect(vi.sample(1).blocks[0]!.swapFactor).toBeCloseTo(0.4);
     expect(vi.sample(0.5).blocks[0]!.swapFactor).toBeCloseTo(0.3);
+  });
+
+  it('lerps a matched sprite awakeProgress between the two frames', () => {
+    const vi = new ViewInterpolator();
+    vi.push(model(1, 5, 4, 1, 0, 0.3)); // prev: awaking, 30% popped
+    vi.push(model(1, 5, 4, 1, 0, 0.5)); // curr: 50% popped
+    expect(vi.sample(0).blocks[0]!.awakeProgress).toBeCloseTo(0.3); // → previous
+    expect(vi.sample(1).blocks[0]!.awakeProgress).toBeCloseTo(0.5); // → current
+    expect(vi.sample(0.5).blocks[0]!.awakeProgress).toBeCloseTo(0.4); // eased forward
   });
 
   it('carries current-tick fields (x, y, phase) through unblended', () => {

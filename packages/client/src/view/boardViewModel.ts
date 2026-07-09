@@ -23,6 +23,7 @@ import {
   GC_PLAY_WIDTH,
   GC_DYING_DELAY,
   GC_SAFE_HEIGHT,
+  GC_INTERNAL_POP_DELAY,
   GC_STEPS_PER_GRID,
   GC_STEPS_PER_SECOND,
   GC_SWAP_DELAY,
@@ -35,6 +36,28 @@ import {
 
 /** Coarse render phase for a block, derived from its BS_* state. */
 export type BlockPhase = 'resting' | 'falling' | 'swapping' | 'dying' | 'awaking';
+
+/**
+ * Ticks over which an awaking block "pops" into a full block (`DC_POP_ROTATE_TIME`
+ * in Displayer.h: `4 * GC_INTERNAL_POP_DELAY / 5`). Before this window the block
+ * sits dormant as a small garbage-coloured cube; across it, it grows, tumbles and
+ * shifts to its block colour.
+ */
+export const POP_ROTATE_TIME = Math.trunc((4 * GC_INTERNAL_POP_DELAY) / 5);
+
+/**
+ * How far an awaking block is through its pop-in, from its `pop_alarm` and the
+ * current tick: 0 while dormant (a small garbage cube), rising to 1 as it pops
+ * into a full block. `pop_alarm === 0` means it has already popped (full block).
+ * Faithful to the `p = (pop_alarm - time_step) / DC_POP_ROTATE_TIME` mapping in
+ * DrawBlocks.cxx (here inverted so 0→1 reads as "appearing").
+ */
+export function computeAwakeProgress(popAlarm: number, now: number): number {
+  if (popAlarm === 0) return 1; // already popped
+  const remaining = popAlarm - now;
+  if (remaining >= POP_ROTATE_TIME) return 0; // still dormant
+  return Math.max(0, Math.min(1, 1 - remaining / POP_ROTATE_TIME));
+}
 
 export interface BlockSprite {
   /**
@@ -76,6 +99,17 @@ export interface BlockSprite {
    * is to the right) or left. Selects which shared edge the swap pivots around.
    */
   readonly swapRight: boolean;
+  /**
+   * For an `awaking` block (minted when garbage shatters), how far through its
+   * staggered pop-in it is: 0 = dormant (small garbage cube), 1 = fully popped
+   * (a normal block). 1 for every non-awaking block. Drives the grow/tumble/
+   * colour-shift appearance animation.
+   */
+  readonly awakeProgress: number;
+  /** Garbage flavor the awaking block pops *from* (its pre-pop colour). */
+  readonly popColor: number;
+  /** Pop tumble variant (a `BR_DIRECTION_*` mask) — varies the pop-in rotation. */
+  readonly popDirection: number;
 }
 
 export interface GarbageSprite {
@@ -177,6 +211,7 @@ export function deriveViewModel(sim: GameSim): BoardViewModel {
             ? Math.max(0, Math.min(1, (GC_DYING_DELAY - b.alarm) / (GC_DYING_DELAY - 1)))
             : 0;
         const swapping = phase === 'swapping';
+        const awaking = phase === 'awaking';
         blocks.push({
           id: b.id,
           generation: b.generation,
@@ -189,6 +224,9 @@ export function deriveViewModel(sim: GameSim): BoardViewModel {
           deathProgress,
           swapFactor: swapping ? swapFactor : 0,
           swapRight: swapping && (b.state & BS_SWAP_DIRECTION_MASK) !== 0,
+          awakeProgress: awaking ? computeAwakeProgress(b.pop_alarm, now) : 1,
+          popColor: awaking ? b.pop_color : 0,
+          popDirection: awaking ? b.pop_direction : 0,
         });
       } else if (rt & GR_GARBAGE) {
         const g = grid.garbageAt(x, y);
