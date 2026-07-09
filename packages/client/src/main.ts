@@ -18,6 +18,7 @@ import { BoardView, DEFAULT_RENDER_TUNING } from './render/boardView.js';
 import { GarbageDecalView } from './render/garbageDecalView.js';
 import { HudView } from './render/hudView.js';
 import { mountRenderTuner } from './render/renderTuner.js';
+import { LevelLightsView } from './render/levelLightsView.js';
 import { SignsView } from './render/signsView.js';
 import { FixedTimestep } from './sim/fixedTimestep.js';
 import { deriveViewModel } from './view/boardViewModel.js';
@@ -45,6 +46,7 @@ function boot(): void {
   const halfH = (initial.visibleHeight - 1) / 2;
   const signs = new SignsView(view.scene, halfW, halfH);
   const decals = new GarbageDecalView(view.scene, halfW, halfH);
+  const levelLights = new LevelLightsView(view.scene, halfW, halfH);
   const hud = hudEl ? new HudView(hudEl) : null;
 
   // Temporary lighting/material tuner — open with `?tune` in the URL.
@@ -123,6 +125,7 @@ function boot(): void {
     const vm = interp.sample(sim.lost ? 1 : clock.alpha);
     view.update(vm);
     decals.update(vm.garbage);
+    levelLights.update(vm.hud.topEffectiveRow);
     view.render();
     hud?.update(vm.hud);
 

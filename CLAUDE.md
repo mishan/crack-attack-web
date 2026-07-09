@@ -226,7 +226,12 @@ just use `pnpm` directly.
   of four images (`public/textures/garbage/garbage_flavor_00N.png`) on a single
   slab at a time (≥4×4 cells, ~7-in-8 chance), riding it until it leaves the board;
   the eligibility/anchor/pick logic is the pure, tested `view/garbageDecal.ts`.
-  `pnpm --filter @crack-attack/client dev`. Still to come: audio.
+  A column of `LevelLights` danger arrows runs down each side
+  (`render/levelLightsView.ts`): one beveled 3-facet arrow per playable row,
+  pointing outward, red for rows at/below the stack's `top_effective_row` and blue
+  above (both sides mirror the local set, as in solo). The reference emits the
+  colour; we drive the arrow's diffuse instead (lit by the headlight) for
+  robustness. The red/blue rule is the pure, tested `view/levelLights.ts`. `pnpm --filter @crack-attack/client dev`. Still to come: audio.
 - [ ] Phase 3 AI, Phase 4 multiplayer, Phase 5 lobby
 
 See `BROWSER_PORT_PLAN.md` for the full phase breakdown and suggested order of work.
