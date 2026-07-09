@@ -201,8 +201,12 @@ just use `pnpm` directly.
   — and `GameSim` buffers them for `drainSignEvents()`; `render/signsView.ts`
   spawns camera-facing sprites from the converted sign art
   (`public/textures/signs/sign_*.png`), animating the hold→fade→inflate→float life
-  from the pure `view/signs.ts`. `pnpm --filter @crack-attack/client dev`. Still to
-  come: per-flavor garbage face decals (`garbage_flavor_*.png`) and audio.
+  from the pure `view/signs.ts`. Large garbage slabs wear a decorative flavor
+  decal: faithful to `GarbageFlavorImage`, `render/garbageDecalView.ts` shows one
+  of four images (`public/textures/garbage/garbage_flavor_00N.png`) on a single
+  slab at a time (≥4×4 cells, ~7-in-8 chance), riding it until it leaves the board;
+  the eligibility/anchor/pick logic is the pure, tested `view/garbageDecal.ts`.
+  `pnpm --filter @crack-attack/client dev`. Still to come: audio.
 - [ ] Phase 3 AI, Phase 4 multiplayer, Phase 5 lobby
 
 See `BROWSER_PORT_PLAN.md` for the full phase breakdown and suggested order of work.
