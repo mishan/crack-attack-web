@@ -52,6 +52,37 @@ import { blockColor, garbageColor } from './palette.js';
 
 const CELL = 1;
 const BLOCK_SIZE = 0.92;
+/** Radius the key light orbits the board at (only its *direction* matters). */
+const KEY_LIGHT_RADIUS = 16;
+
+/**
+ * Live-tunable render parameters, driven by the temporary render tuner overlay
+ * (`render/renderTuner.ts`). The key light is described as an angle — azimuth
+ * (0 = along the view axis, + = to the right) and elevation (0 = horizon,
+ * 90 = straight overhead) — which is far easier to dial than a raw xyz.
+ */
+export interface RenderTuning {
+  ambient: number;
+  keyIntensity: number;
+  keyAzimuthDeg: number;
+  keyElevationDeg: number;
+  fillIntensity: number;
+  shininess: number;
+  /** Block specular level, 0–255 gray. */
+  specular: number;
+  garbageRoughness: number;
+}
+
+export const DEFAULT_RENDER_TUNING: RenderTuning = {
+  ambient: 0.5,
+  keyIntensity: 1.2,
+  keyAzimuthDeg: 17,
+  keyElevationDeg: 46,
+  fillIntensity: 0.35,
+  shininess: 18,
+  specular: 128,
+  garbageRoughness: 0.5,
+};
 
 export class BoardView {
   readonly scene = new Scene();
@@ -61,6 +92,14 @@ export class BoardView {
   private readonly blocks: InstancedMesh;
   private readonly garbage: InstancedMesh;
   private readonly cursor: LineSegments;
+
+  // Lights + tunable materials, kept as fields so the temporary render tuner can
+  // adjust them live (see `applyRenderTuning`).
+  private readonly ambientLight: AmbientLight;
+  private readonly keyLight: DirectionalLight;
+  private readonly fillLight: DirectionalLight;
+  private readonly blockMaterial: MeshPhongMaterial;
+  private readonly garbageMaterial: MeshStandardMaterial;
 
   private readonly halfW: number;
   private readonly halfH: number;
@@ -118,13 +157,14 @@ export class BoardView {
     // specular gleam sits toward the top of each block — the original's angled
     // look, rather than a symmetric head-on hotspot. A dim opposite fill keeps
     // the shadowed sides from going flat, and ambient lifts the darks.
-    this.scene.add(new AmbientLight(0xffffff, 0.5));
-    const key = new DirectionalLight(0xffffff, 1.2);
-    key.position.set(3, 11, 10); // ~48° up-and-right of the view axis
-    this.scene.add(key);
-    const fill = new DirectionalLight(0xffffff, 0.35);
-    fill.position.set(-6, 2, 6);
-    this.scene.add(fill);
+    this.ambientLight = new AmbientLight(0xffffff, 0.5);
+    this.scene.add(this.ambientLight);
+    this.keyLight = new DirectionalLight(0xffffff, 1.2);
+    this.keyLight.position.set(3, 11, 10); // ~48° up-and-right of the view axis
+    this.scene.add(this.keyLight);
+    this.fillLight = new DirectionalLight(0xffffff, 0.35);
+    this.fillLight.position.set(-6, 2, 6);
+    this.scene.add(this.fillLight);
 
     // A subtle back wall behind the play area for depth.
     const wall = new Mesh(
@@ -142,13 +182,14 @@ export class BoardView {
     // specular highlight (`GL_SPECULAR` 0.5) with a soft, broad falloff
     // (`GL_SHININESS` 10 → a higher Blinn-Phong exponent here). instanceColor
     // drives the diffuse colour.
+    this.blockMaterial = new MeshPhongMaterial({
+      specular: new Color(0x808080),
+      shininess: 18, // broad, soft gleam (spreads across facets, not a hotspot)
+      clippingPlanes: [this.floorPlane],
+    });
     this.blocks = new InstancedMesh(
       new BoxGeometry(BLOCK_SIZE, BLOCK_SIZE, BLOCK_SIZE),
-      new MeshPhongMaterial({
-        specular: new Color(0x808080),
-        shininess: 18, // broad, soft gleam (spreads across facets, not a hotspot)
-        clippingPlanes: [this.floorPlane],
-      }),
+      this.blockMaterial,
       GC_BLOCK_STORE_SIZE,
     );
     this.blocks.count = 0;
@@ -160,11 +201,12 @@ export class BoardView {
     const white = new DataTexture(new Uint8Array([255, 255, 255, 255]), 1, 1);
     white.needsUpdate = true;
     this.lightmap = { value: white };
-    const garbageMaterial = new MeshStandardMaterial({
+    this.garbageMaterial = new MeshStandardMaterial({
       roughness: 0.5, // a little sheen so slabs catch the headlight like the blocks
       metalness: 0.0,
       clippingPlanes: [this.floorPlane],
     });
+    const garbageMaterial = this.garbageMaterial;
     this.patchGarbageLightmap(garbageMaterial);
     // Garbage is a single solid slab per piece (a unit cube scaled to the slab's
     // width × height), not one cube per cell — the original draws it as a smooth
@@ -195,6 +237,32 @@ export class BoardView {
     void this.loadBlockModel();
     // Load the mottled garbage lightmap; garbage stays flat-tinted until it lands.
     void this.loadGarbageLightmap();
+
+    // Establish the lighting/material defaults from one source of truth so the
+    // render tuner's sliders and the live scene start in agreement.
+    this.applyRenderTuning(DEFAULT_RENDER_TUNING);
+  }
+
+  /**
+   * Apply live render tuning (lights + block/garbage material). Temporary — used
+   * by the render tuner overlay to dial in the look; the winning values get
+   * baked back into the defaults above.
+   */
+  applyRenderTuning(t: RenderTuning): void {
+    this.ambientLight.intensity = t.ambient;
+    this.keyLight.intensity = t.keyIntensity;
+    const az = (t.keyAzimuthDeg * Math.PI) / 180;
+    const el = (t.keyElevationDeg * Math.PI) / 180;
+    this.keyLight.position.set(
+      KEY_LIGHT_RADIUS * Math.sin(az) * Math.cos(el),
+      KEY_LIGHT_RADIUS * Math.sin(el),
+      KEY_LIGHT_RADIUS * Math.cos(az) * Math.cos(el),
+    );
+    this.fillLight.intensity = t.fillIntensity;
+    this.blockMaterial.shininess = t.shininess;
+    const g = Math.max(0, Math.min(1, t.specular / 255));
+    this.blockMaterial.specular.setRGB(g, g, g);
+    this.garbageMaterial.roughness = t.garbageRoughness;
   }
 
   /**
