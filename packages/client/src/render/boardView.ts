@@ -25,6 +25,7 @@ import {
   LineSegments,
   Matrix4,
   Mesh,
+  MeshPhongMaterial,
   MeshStandardMaterial,
   PerspectiveCamera,
   Plane,
@@ -112,10 +113,18 @@ export class BoardView {
     this.camera.position.set(0, 0.5, Math.max(14, visibleHeight * 1.5));
     this.camera.lookAt(0, 0, 0);
 
-    this.scene.add(new AmbientLight(0xffffff, 0.65));
-    const key = new DirectionalLight(0xffffff, 1.1);
-    key.position.set(4, 8, 10);
+    // Key light comes from clearly *above and to the side* (not along the view
+    // axis) so the block's beveled facets shade directionally and the glossy
+    // specular gleam sits toward the top of each block — the original's angled
+    // look, rather than a symmetric head-on hotspot. A dim opposite fill keeps
+    // the shadowed sides from going flat, and ambient lifts the darks.
+    this.scene.add(new AmbientLight(0xffffff, 0.5));
+    const key = new DirectionalLight(0xffffff, 1.2);
+    key.position.set(3, 11, 10); // ~48° up-and-right of the view axis
     this.scene.add(key);
+    const fill = new DirectionalLight(0xffffff, 0.35);
+    fill.position.set(-6, 2, 6);
+    this.scene.add(fill);
 
     // A subtle back wall behind the play area for depth.
     const wall = new Mesh(
@@ -129,11 +138,15 @@ export class BoardView {
     // Three enables the `USE_INSTANCING_COLOR` shader path automatically when an
     // instanceColor attribute is present — no `vertexColors: true` needed (that
     // flag is for per-*vertex* colours, a different attribute).
+    // Glossy plastic look, faithful to the reference block material: a gray
+    // specular highlight (`GL_SPECULAR` 0.5) with a soft, broad falloff
+    // (`GL_SHININESS` 10 → a higher Blinn-Phong exponent here). instanceColor
+    // drives the diffuse colour.
     this.blocks = new InstancedMesh(
       new BoxGeometry(BLOCK_SIZE, BLOCK_SIZE, BLOCK_SIZE),
-      new MeshStandardMaterial({
-        roughness: 0.45,
-        metalness: 0.05,
+      new MeshPhongMaterial({
+        specular: new Color(0x808080),
+        shininess: 18, // broad, soft gleam (spreads across facets, not a hotspot)
         clippingPlanes: [this.floorPlane],
       }),
       GC_BLOCK_STORE_SIZE,
@@ -148,7 +161,7 @@ export class BoardView {
     white.needsUpdate = true;
     this.lightmap = { value: white };
     const garbageMaterial = new MeshStandardMaterial({
-      roughness: 0.8,
+      roughness: 0.5, // a little sheen so slabs catch the headlight like the blocks
       metalness: 0.0,
       clippingPlanes: [this.floorPlane],
     });
