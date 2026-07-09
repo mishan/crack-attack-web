@@ -1,0 +1,58 @@
+name: CI
+
+# Pre-merge gauntlet: run on every PR into main and on pushes to main so the
+# default branch stays releasable. Mirrors the local `pnpm` scripts.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Cancel superseded runs (e.g. a new push to the same PR) to save minutes.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  gauntlet:
+    name: format · lint · typecheck · test · build
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      # Exercise both supported Node majors (see root package.json `engines`).
+      matrix:
+        node-version: ['20.19', '22']
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Reads the pnpm version from the `packageManager` field in package.json.
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Set up Node ${{ matrix.node-version }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Prettier (format check)
+        run: pnpm run format:check
+
+      - name: ESLint
+        run: pnpm run lint
+
+      - name: Typecheck (tsc -b, all packages)
+        run: pnpm run typecheck
+
+      - name: Unit tests (vitest)
+        run: pnpm run test
+
+      - name: Client production build (Vite)
+        run: pnpm --filter @crack-attack/client run build
