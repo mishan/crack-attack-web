@@ -232,6 +232,22 @@ just use `pnpm` directly.
   above (both sides mirror the local set, as in solo). The reference emits the
   colour; we drive the arrow's diffuse instead (lit by the headlight) for
   robustness. The red/blue rule is the pure, tested `view/levelLights.ts`. `pnpm --filter @crack-attack/client dev`. Still to come: audio.
-- [ ] Phase 3 AI, Phase 4 multiplayer, Phase 5 lobby
+- [~] Phase 4 (started) — **protocol messages landed** (`packages/protocol`):
+  the wire surface for **input-relay lockstep**, a deliberate upgrade from the
+  C++ `Communicator`'s event exchange. Both clients run *both* sims (`GameSim`
+  is instanced for exactly this) from a shared seed, advancing a tick only when
+  both players' inputs for it are known; local input is scheduled `inputDelay`
+  ticks ahead to hide latency. Consequences: garbage events never cross the
+  wire (each client cross-wires the two sims' garbage-out ports locally), the
+  status word disappears (level lights/losses are computed from the opponent's
+  sim, retiring the hidden server-wins-ties quirk), and the wire carries only
+  room flow (5-char room codes → Phase 5 lobby), per-tick `CC_*` input frames,
+  periodic per-sim digests every `DIGEST_PERIOD` (server-compared desync
+  detection), and lifecycle events the sims can't decide (concede/disconnect).
+  `messages.ts` (typed union + constants), `codec.ts` (JSON now, binary later;
+  strict shape/range-validating decode — semantic rules like version match and
+  batch contiguity stay in server/client logic). Still to come: relay server,
+  core digest function, client netplay integration.
+- [ ] Phase 3 AI, Phase 4 remainder (relay server + client netplay), Phase 5 lobby
 
 See `BROWSER_PORT_PLAN.md` for the full phase breakdown and suggested order of work.

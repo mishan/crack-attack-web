@@ -8,6 +8,6 @@
 
 import { PROTOCOL_VERSION } from '@crack-attack/protocol';
 
-export function serverInfo(): { protocol: string; status: 'not-implemented' } {
+export function serverInfo(): { protocol: number; status: 'not-implemented' } {
   return { protocol: PROTOCOL_VERSION, status: 'not-implemented' };
 }
