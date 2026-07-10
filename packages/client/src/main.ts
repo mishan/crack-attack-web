@@ -25,8 +25,10 @@ import { HudView } from './render/hudView.js';
 import { mountRenderTuner } from './render/renderTuner.js';
 import { LevelLightsView } from './render/levelLightsView.js';
 import { SignsView } from './render/signsView.js';
+import { MessageOverlay } from './render/messageOverlay.js';
 import { FixedTimestep } from './sim/fixedTimestep.js';
 import { deriveViewModel } from './view/boardViewModel.js';
+import { COUNTDOWN_GATE_TICKS, countdownMessage } from './view/messages.js';
 import { Spring } from './view/spring.js';
 import { ViewInterpolator } from './view/viewInterpolator.js';
 
@@ -106,9 +108,12 @@ function bootSolo(
   const decals = new GarbageDecalView(view.scene, halfW, halfH);
   const levelLights = new LevelLightsView(view.scene, halfW, halfH);
   const spring = new Spring();
+  const overlay = new MessageOverlay(app);
   const hud = hudEl ? new HudView(hudEl) : null;
   let disposed = false;
   let rafId = 0;
+  /** Ticks since game start, counting the held countdown gate. */
+  let metaTicks = 0;
   levelLights.reset(initial.hud.topEffectiveRow);
 
   // Temporary lighting/material tuner — open with `?tune` in the URL.
@@ -141,6 +146,7 @@ function bootSolo(
     spring.gameStart();
     view.setShake(0);
     levelLights.reset(fresh.hud.topEffectiveRow);
+    metaTicks = 0;
   };
 
   const onKeyDown = (e: KeyboardEvent): void => {
@@ -183,8 +189,15 @@ function bootSolo(
     if (!sim.lost) {
       const steps = clock.sample(nowMs);
       for (let s = 0; s < steps; s++) {
+        // Countdown gate: the whole gameplay step is held for the first
+        // GC_START_PAUSE_DELAY ticks (Game.cxx:399-408) while 3-2-1 shows.
+        if (metaTicks < COUNTDOWN_GATE_TICKS) {
+          metaTicks++;
+          continue;
+        }
         sim.step(input.actionState());
         stepped++;
+        metaTicks++;
         // Interpolation only needs the last two ticks, so under catch-up (steps > 1)
         // skip the expensive grid-walk for the intermediate ticks that get
         // discarded — but always capture the tick a loss lands on.
@@ -209,6 +222,10 @@ function bootSolo(
 
     // After a loss show the frozen final tick (alpha 1) rather than interpolating
     // toward a state the sim will never reach.
+    // Big overlay: GAME OVER once lost, else the countdown / GO sequence.
+    overlay.show(sim.lost ? 'message_game_over' : countdownMessage(metaTicks));
+    overlay.update(dtTicks);
+
     const vm = interp.sample(sim.lost ? 1 : clock.alpha);
     view.update(vm);
     decals.update(vm.garbage);
@@ -231,6 +248,7 @@ function bootSolo(
       globalThis.removeEventListener('blur', onBlur);
       touch?.remove();
       onlineBtn.remove();
+      overlay.dispose();
       view.dispose(); // release the WebGL context (browsers cap them)
     },
   };

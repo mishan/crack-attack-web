@@ -29,8 +29,15 @@ import { GarbageDecalView } from './render/garbageDecalView.js';
 import { HudView } from './render/hudView.js';
 import { LevelLightsView } from './render/levelLightsView.js';
 import { SignsView } from './render/signsView.js';
+import { MessageOverlay } from './render/messageOverlay.js';
 import { FixedTimestep } from './sim/fixedTimestep.js';
 import { deriveViewModel } from './view/boardViewModel.js';
+import {
+  COUNTDOWN_GATE_TICKS,
+  GO_DISPLAY_TICKS,
+  countdownMessage,
+  type MessageKind,
+} from './view/messages.js';
 import { Spring } from './view/spring.js';
 import { ViewInterpolator } from './view/viewInterpolator.js';
 import { LockstepSession } from './net/lockstep.js';
@@ -171,10 +178,21 @@ export function bootNetplay(
   let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   let disposed = false;
   let rafId = 0;
+  /** Ticks since game start, counting the held countdown gate. */
+  let metaTicks = 0;
+  /** Big result image once the game is decided (winner/loser/draw). */
+  let resultKind: MessageKind | null = null;
 
   const clock = new FixedTimestep();
   const input = new KeyboardInput();
+  const bigMessage = new MessageOverlay(app);
   const hud = hudEl ? new HudView(hudEl) : null;
+
+  /** Clear the big-message state (leaving a match, back to lobby/room). */
+  function clearOverlay(): void {
+    resultKind = null;
+    bigMessage.show(null);
+  }
 
   function connect(): void {
     if (disposed) return;
@@ -232,6 +250,7 @@ export function bootNetplay(
     readyBtn.hidden = true;
     titleEl.style.display = 'none';
     showRoster([]);
+    clearOverlay();
     setStatus('disconnected — retrying…');
     reconnectTimer = setTimeout(connect, RECONNECT_INTERVAL_MS);
   }
@@ -313,6 +332,7 @@ export function bootNetplay(
         titleEl.style.display = 'none';
         showRoster([]);
         showBanner('');
+        clearOverlay();
         setStatus('the room you were watching closed');
         break;
       case 'peer_inputs':
@@ -397,6 +417,12 @@ export function bootNetplay(
   function onMatchEnd(reason: string, winner: number | null): void {
     if (phase !== 'playing' && phase !== 'ended') return;
     phase = 'ended';
+    resultKind ??=
+      winner === null
+        ? 'message_game_over'
+        : winner === localIndex
+          ? 'message_winner'
+          : 'message_loser';
     // The relay has ended the match (concede/disconnect/desync may arrive
     // before the sims decide anything locally): freeze the session so the
     // loop stops stepping/sending and KeyR-rematch (gated on outcome) works.
@@ -423,6 +449,7 @@ export function bootNetplay(
     session = null;
     overlay.style.display = 'flex';
     showBanner(bannerText);
+    clearOverlay();
   }
 
   // --- boards -------------------------------------------------------------------
@@ -462,7 +489,11 @@ export function bootNetplay(
   }
   globalThis.addEventListener('resize', fitToWindow);
 
-  function enterMatch(newSession: LockstepSession, players: [string, string]): void {
+  function enterMatch(
+    newSession: LockstepSession,
+    players: [string, string],
+    resume: boolean,
+  ): void {
     session = newSession;
     spectator = null;
     titleEl.style.display = 'none';
@@ -471,6 +502,9 @@ export function bootNetplay(
     phase = 'playing';
     resultSent = false;
     reconnectUntil = 0;
+    // Fresh games run the 3-2-1-GO gate; a resume rejoins live play.
+    metaTicks = resume ? COUNTDOWN_GATE_TICKS + GO_DISPLAY_TICKS : 0;
+    clearOverlay();
     overlay.style.display = 'none';
     readyBtn.textContent = 'Ready';
     showBanner('');
@@ -504,7 +538,7 @@ export function bootNetplay(
   }
 
   function startMatch(msg: MatchStartMessage): void {
-    enterMatch(new LockstepSession(msg.seed, msg.playerIndex, msg.inputDelay), msg.players);
+    enterMatch(new LockstepSession(msg.seed, msg.playerIndex, msg.inputDelay), msg.players, false);
   }
 
   /** Enter (or re-enter, on a rematch) the watcher view for a live game. */
@@ -513,8 +547,12 @@ export function bootNetplay(
     session = null;
     names = msg.players;
     phase = 'spectating';
+    // From-the-start watches see the players' countdown; mid-match joins skip it.
+    const midMatch = msg.frames[0].length > 0 || msg.frames[1].length > 0;
+    metaTicks = midMatch ? COUNTDOWN_GATE_TICKS + GO_DISPLAY_TICKS : 0;
+    clearOverlay();
     overlay.style.display = 'none';
-    showBanner(msg.frames[0].length > 0 ? 'catching up…' : '');
+    showBanner(midMatch ? 'catching up…' : '');
     titleEl.textContent = `${msg.players[0]} vs ${msg.players[1]}`;
     titleEl.style.display = 'block';
     clock.reset();
@@ -531,6 +569,7 @@ export function bootNetplay(
     enterMatch(
       LockstepSession.resume(msg.seed, msg.playerIndex, msg.inputDelay, msg.frames),
       msg.players,
+      true,
     );
     showBanner('reconnected — catching up…');
   }
@@ -549,10 +588,14 @@ export function bootNetplay(
       titleEl.style.display = 'none';
       showRoster([]);
       showBanner('');
+      clearOverlay();
       setStatus('stopped watching');
       return;
     }
     if (e.code === 'Escape' && phase === 'playing' && !session?.outcome) {
+      // Concession is blocked during the countdown, as in the C++
+      // (Game::concession returns early while the gate runs, Game.cxx:186).
+      if (metaTicks < COUNTDOWN_GATE_TICKS) return;
       net?.send({ type: 'concede' });
       return;
     }
@@ -579,6 +622,9 @@ export function bootNetplay(
       let steppedTicks = 0;
       if (!w.outcome) {
         const due = clock.sample(nowMs);
+        // Display-only countdown mirror: the players are gated for the same
+        // wall time, so no frames arrive while 3-2-1 shows here.
+        if (metaTicks < COUNTDOWN_GATE_TICKS + GO_DISPLAY_TICKS) metaTicks += due;
         const backlog = w.bufferedTicks;
         const budget = backlog > 25 ? Math.min(backlog, CATCH_UP_STEPS_PER_FRAME) : due;
         steppedTicks = w.advance(budget, () => {
@@ -587,6 +633,7 @@ export function bootNetplay(
         });
         if (w.outcome) {
           const { winner } = w.outcome;
+          resultKind = 'message_game_over';
           showBanner(winner === null ? 'Draw — both topped out.' : `${names[winner]} wins!`);
         } else if (backlog <= 25 && banner.textContent === 'catching up…') {
           showBanner('');
@@ -597,8 +644,11 @@ export function bootNetplay(
           }
         }
       }
+      bigMessage.show(resultKind ?? countdownMessage(metaTicks));
+
       const impacts = [w.sims[0]!.drainImpactEvents(), w.sims[1]!.drainImpactEvents()];
       const dtTicks = Math.min(MAX_SIGN_DT_TICKS, (nowMs - lastMs) / MS_PER_TICK);
+      bigMessage.update(dtTicks);
       const alpha = w.outcome ? 1 : clock.alpha;
       boards.forEach((b, i) => {
         b.signs.update(dtTicks);
@@ -621,14 +671,28 @@ export function bootNetplay(
       const localSim = s.sims[localIndex]!;
       const remoteSim = s.sims[1 - localIndex]!;
       let steppedTicks = 0;
+      let wantWaiting = false;
 
       if (!s.outcome) {
-        const due = clock.sample(nowMs);
+        let due = clock.sample(nowMs);
+        // Countdown gate (Game.cxx:399-408): the sim is held — and nothing is
+        // sent — for the first COUNTDOWN_GATE_TICKS while 3-2-1 shows. Both
+        // clients gate identically; lockstep buffering absorbs the skew.
+        if (metaTicks < COUNTDOWN_GATE_TICKS) {
+          const burn = Math.min(due, COUNTDOWN_GATE_TICKS - metaTicks);
+          metaTicks += burn;
+          due -= burn;
+        }
+        const gateActive = metaTicks < COUNTDOWN_GATE_TICKS;
         // Catch-up: after a resume the remote buffer runs deep; burn it down
         // in large chunks so reconnection takes moments, not match-time.
         const backlog = s.bufferedRemoteTicks;
-        const budget = backlog > 25 ? Math.min(backlog, CATCH_UP_STEPS_PER_FRAME) : due;
-        const catchingUp = backlog > 25;
+        const budget = gateActive
+          ? 0
+          : backlog > 25
+            ? Math.min(backlog, CATCH_UP_STEPS_PER_FRAME)
+            : due;
+        const catchingUp = !gateActive && backlog > 25;
 
         const stepped = s.advance(
           budget,
@@ -639,20 +703,24 @@ export function bootNetplay(
           },
         );
         steppedTicks = stepped;
+        metaTicks += stepped; // times the GO tail of the countdown
 
-        for (const batch of s.takeOutgoing()) {
-          net?.send({ type: 'inputs', startTick: batch.startTick, frames: batch.frames });
-        }
-        for (const d of s.takeDigests()) {
-          net?.send({ type: 'digest', tick: d.tick, digests: d.digests });
+        if (!gateActive) {
+          for (const batch of s.takeOutgoing()) {
+            net?.send({ type: 'inputs', startTick: batch.startTick, frames: batch.frames });
+          }
+          for (const d of s.takeDigests()) {
+            net?.send({ type: 'digest', tick: d.tick, digests: d.digests });
+          }
         }
 
         if (catchingUp) {
           showBanner('catching up…');
           waitingSince = null;
-        } else if (stepped === 0 && due > 0 && s.waitingForRemote && net) {
+        } else if (!gateActive && stepped === 0 && due > 0 && s.waitingForRemote && net) {
           waitingSince ??= nowMs;
-          if (nowMs - waitingSince > 250) showBanner(`waiting for ${names[1 - localIndex]}…`);
+          // The reference's MS_WAITING message, in place of a text banner.
+          if (nowMs - waitingSince > 250) wantWaiting = true;
         } else if (
           waitingSince !== null ||
           banner.textContent === 'catching up…' ||
@@ -664,13 +732,13 @@ export function bootNetplay(
 
         if (s.outcome) {
           const { winner } = s.outcome;
-          showBanner(
+          resultKind =
             winner === null
-              ? 'Draw — you topped out together. R for rematch.'
+              ? 'message_game_over'
               : winner === localIndex
-                ? 'You win! R for rematch.'
-                : 'You lose. R for rematch.',
-          );
+                ? 'message_winner'
+                : 'message_loser';
+          showBanner(winner === null ? 'Draw — R for rematch.' : 'R for rematch.');
           if (!resultSent) {
             resultSent = true;
             net?.send({ type: 'result', winner });
@@ -688,8 +756,14 @@ export function bootNetplay(
         }
       }
 
+      // Big overlay: result image > countdown / GO > lockstep-stall WAITING.
+      bigMessage.show(
+        resultKind ?? countdownMessage(metaTicks) ?? (wantWaiting ? 'message_waiting' : null),
+      );
+
       const impacts = [localSim.drainImpactEvents(), remoteSim.drainImpactEvents()];
       const dtTicks = Math.min(MAX_SIGN_DT_TICKS, (nowMs - lastMs) / MS_PER_TICK);
+      bigMessage.update(dtTicks);
       const alpha = s.outcome ? 1 : clock.alpha;
       boards.forEach((b, i) => {
         b.signs.update(dtTicks);
@@ -742,6 +816,7 @@ export function bootNetplay(
       banner.remove();
       rosterEl.remove();
       titleEl.remove();
+      bigMessage.dispose();
       if (hudEl) hudEl.textContent = '';
     },
   };
