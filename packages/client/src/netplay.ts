@@ -21,6 +21,7 @@ import {
   type MatchStartMessage,
   type RoomSummary,
   type ServerMessage,
+  type SpectateStartMessage,
 } from '@crack-attack/protocol';
 import { KeyboardInput } from './input/keyboard.js';
 import { BoardView } from './render/boardView.js';
@@ -33,6 +34,7 @@ import { deriveViewModel } from './view/boardViewModel.js';
 import { ViewInterpolator } from './view/viewInterpolator.js';
 import { LockstepSession } from './net/lockstep.js';
 import { NetClient } from './net/session.js';
+import { SpectatorSession } from './net/spectator.js';
 
 const MS_PER_TICK = 1000 / GC_STEPS_PER_SECOND;
 const MAX_SIGN_DT_TICKS = 10;
@@ -46,6 +48,7 @@ const STORAGE_NAME = 'crack-attack.name';
 
 /** Everything one rendered board needs, bundled per player. */
 interface BoardBundle {
+  container: HTMLDivElement;
   view: BoardView;
   interp: ViewInterpolator;
   signs: SignsView;
@@ -53,9 +56,19 @@ interface BoardBundle {
   levelLights: LevelLightsView;
 }
 
-type Phase = 'connecting' | 'lobby' | 'room' | 'playing' | 'ended';
+type Phase = 'connecting' | 'lobby' | 'room' | 'playing' | 'ended' | 'spectating';
 
-export function bootNetplay(app: HTMLElement, hudEl: HTMLElement | null, relayUrl: string): void {
+/** A running netplay mode; `dispose` tears everything down (mode switch). */
+export interface NetplayHandle {
+  dispose(): void;
+}
+
+export function bootNetplay(
+  app: HTMLElement,
+  hudEl: HTMLElement | null,
+  relayUrl: string,
+  onExit: () => void,
+): NetplayHandle {
   // --- overlay UI ------------------------------------------------------------
   const overlay = document.createElement('div');
   overlay.style.cssText =
@@ -77,7 +90,8 @@ export function bootNetplay(app: HTMLElement, hudEl: HTMLElement | null, relayUr
     </div>
     <div id="net-rooms" style="display:flex;flex-direction:column;gap:4px"></div>
     <button id="net-ready" hidden>Ready</button>
-    <div id="net-status" style="min-height:2.5em;opacity:.8"></div>`;
+    <div id="net-status" style="min-height:2.5em;opacity:.8"></div>
+    <button id="net-solo" style="opacity:.8">Back to solo play</button>`;
   overlay.appendChild(panel);
   document.body.appendChild(overlay);
 
@@ -111,15 +125,40 @@ export function bootNetplay(app: HTMLElement, hudEl: HTMLElement | null, relayUr
 
   // --- persistent identity ------------------------------------------------------
   nameInput.value = localStorage.getItem(STORAGE_NAME) ?? 'player';
+  let record = { wins: 0, losses: 0 };
+  const showSelf = (name: string): void => {
+    selfEl.textContent = `${name} — ${record.wins}W / ${record.losses}L`;
+  };
   nameInput.onchange = (): void => {
-    localStorage.setItem(STORAGE_NAME, nameInput.value.trim() || 'player');
-    setStatus('name change applies on the next connection');
+    const name = nameInput.value.trim() || 'player';
+    nameInput.value = name;
+    localStorage.setItem(STORAGE_NAME, name);
+    // Live rename: takes effect immediately, no reconnect needed. (Names shown
+    // inside a running match refresh at the next game.)
+    net?.send({ type: 'rename', name });
+    showSelf(name);
+    setStatus(net ? 'name updated' : 'name saved — applies when connected');
+  };
+
+  // Small fixed chrome for the watcher roster + spectated-match title.
+  const rosterEl = document.createElement('div');
+  rosterEl.style.cssText =
+    'position:fixed;bottom:12px;right:12px;z-index:5;font-size:12px;opacity:.7;display:none';
+  document.body.appendChild(rosterEl);
+  const titleEl = document.createElement('div');
+  titleEl.style.cssText =
+    'position:fixed;top:12px;right:12px;z-index:5;font-size:13px;opacity:.85;display:none';
+  document.body.appendChild(titleEl);
+  const showRoster = (names: string[]): void => {
+    rosterEl.textContent = names.length ? `watching: ${names.join(', ')}` : '';
+    rosterEl.style.display = names.length ? 'block' : 'none';
   };
 
   // --- net + game state -----------------------------------------------------------
   let phase: Phase = 'connecting';
   let net: NetClient | null = null;
   let session: LockstepSession | null = null;
+  let spectator: SpectatorSession | null = null;
   let boards: [BoardBundle, BoardBundle] | null = null;
   let names: [string, string] = ['', ''];
   let localIndex = 0;
@@ -128,12 +167,15 @@ export function bootNetplay(app: HTMLElement, hudEl: HTMLElement | null, relayUr
   let graceMs = DEFAULT_RECONNECT_GRACE_MS;
   let reconnectUntil = 0;
   let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  let disposed = false;
+  let rafId = 0;
 
   const clock = new FixedTimestep();
   const input = new KeyboardInput();
   const hud = hudEl ? new HudView(hudEl) : null;
 
   function connect(): void {
+    if (disposed) return;
     if (reconnectTimer !== null) {
       clearTimeout(reconnectTimer);
       reconnectTimer = null;
@@ -164,6 +206,7 @@ export function bootNetplay(app: HTMLElement, hudEl: HTMLElement | null, relayUr
   /** Reconnect with backoff while a match seat may still be held for us. */
   function onConnectionLost(): void {
     net = null;
+    if (disposed) return; // mode switched away; stay quiet
     // connect() can fail twice for one attempt (promise rejection AND the
     // socket's close event); never stack reconnect timers.
     if (reconnectTimer !== null) {
@@ -179,10 +222,14 @@ export function bootNetplay(app: HTMLElement, hudEl: HTMLElement | null, relayUr
       return;
     }
     // Lobby-phase drop (or grace exhausted): plain retry into the lobby.
+    // Spectators reattach by simply re-watching — no grace to burn.
     phase = 'connecting';
     session = null;
+    spectator = null;
     overlay.style.display = 'flex';
     readyBtn.hidden = true;
+    titleEl.style.display = 'none';
+    showRoster([]);
     setStatus('disconnected — retrying…');
     reconnectTimer = setTimeout(connect, RECONNECT_INTERVAL_MS);
   }
@@ -191,7 +238,8 @@ export function bootNetplay(app: HTMLElement, hudEl: HTMLElement | null, relayUr
     switch (msg.type) {
       case 'welcome':
         localStorage.setItem(STORAGE_TOKEN, msg.token);
-        selfEl.textContent = `${msg.name} — ${msg.record.wins}W / ${msg.record.losses}L`;
+        record = msg.record;
+        showSelf(msg.name);
         if (phase === 'connecting') {
           phase = 'lobby';
           setStatus('connected');
@@ -239,8 +287,36 @@ export function bootNetplay(app: HTMLElement, hudEl: HTMLElement | null, relayUr
       case 'match_resume':
         resumeMatch(msg);
         break;
+      case 'spectate_joined':
+        phase = 'spectating';
+        roomCode = msg.code;
+        readyBtn.hidden = true;
+        showRoster(msg.spectators);
+        setStatus(
+          msg.players.length === 2
+            ? `watching room ${msg.code} — ${msg.players.join(' vs ')}`
+            : `watching room ${msg.code} — waiting for players…`,
+        );
+        break;
+      case 'spectate_start':
+        startSpectating(msg);
+        break;
+      case 'spectators':
+        showRoster(msg.names);
+        break;
+      case 'room_closed':
+        spectator = null;
+        phase = 'lobby';
+        overlay.style.display = 'flex';
+        titleEl.style.display = 'none';
+        showRoster([]);
+        showBanner('');
+        setStatus('the room you were watching closed');
+        break;
       case 'peer_inputs':
-        if (session && msg.playerIndex !== localIndex) {
+        if (spectator) {
+          spectator.addFrames(msg.playerIndex, msg.startTick, msg.frames);
+        } else if (session && msg.playerIndex !== localIndex) {
           session.addRemoteFrames(msg.startTick, msg.frames);
         }
         break;
@@ -248,6 +324,15 @@ export function bootNetplay(app: HTMLElement, hudEl: HTMLElement | null, relayUr
         showBanner(`Desync detected at tick ${msg.tick} — match void.`);
         break;
       case 'match_end':
+        if (phase === 'spectating') {
+          if (spectator && !spectator.outcome) {
+            spectator.outcome = { winner: msg.winner, tick: spectator.currentTick };
+          }
+          showBanner(
+            msg.winner === null ? 'Match void.' : `${names[msg.winner]} wins (${msg.reason}).`,
+          );
+          break;
+        }
         onMatchEnd(msg.reason, msg.winner);
         break;
       case 'error':
@@ -273,7 +358,8 @@ export function bootNetplay(app: HTMLElement, hudEl: HTMLElement | null, relayUr
         .map((p) => `${p.name} (${p.record.wins}W/${p.record.losses}L)`)
         .join(' vs ');
       const label = document.createElement('span');
-      label.textContent = `${room.code} · ${who || 'empty'}`;
+      const watchers = room.spectators.length ? ` · 👁${room.spectators.length}` : '';
+      label.textContent = `${room.code} · ${who || 'empty'}${watchers}`;
       const state = document.createElement('span');
       state.style.opacity = '.6';
       const joinable = room.state === 'waiting' && room.players.length < 2;
@@ -281,7 +367,18 @@ export function bootNetplay(app: HTMLElement, hudEl: HTMLElement | null, relayUr
       row.append(label, state);
       row.disabled = !joinable || phase !== 'lobby';
       row.onclick = (): void => net?.send({ type: 'join_room', code: room.code });
-      roomsEl.appendChild(row);
+
+      const watchBtn = document.createElement('button');
+      watchBtn.textContent = 'watch';
+      watchBtn.style.cssText = 'padding:6px 10px';
+      watchBtn.disabled = phase !== 'lobby';
+      watchBtn.onclick = (): void => net?.send({ type: 'spectate', code: room.code });
+
+      const line = document.createElement('div');
+      line.style.cssText = 'display:flex;gap:4px';
+      row.style.flex = '1';
+      line.append(row, watchBtn);
+      roomsEl.appendChild(line);
     }
   }
 
@@ -339,6 +436,7 @@ export function bootNetplay(app: HTMLElement, hudEl: HTMLElement | null, relayUr
       const halfW = (vm.width - 1) / 2;
       const halfH = (vm.visibleHeight - 1) / 2;
       return {
+        container,
         view,
         interp,
         signs: new SignsView(view.scene, halfW, halfH),
@@ -361,6 +459,8 @@ export function bootNetplay(app: HTMLElement, hudEl: HTMLElement | null, relayUr
 
   function enterMatch(newSession: LockstepSession, players: [string, string]): void {
     session = newSession;
+    spectator = null;
+    titleEl.style.display = 'none';
     localIndex = newSession.localIndex;
     names = players;
     phase = 'playing';
@@ -392,6 +492,32 @@ export function bootNetplay(app: HTMLElement, hudEl: HTMLElement | null, relayUr
     enterMatch(new LockstepSession(msg.seed, msg.playerIndex, msg.inputDelay), msg.players);
   }
 
+  /** Enter (or re-enter, on a rematch) the watcher view for a live game. */
+  function startSpectating(msg: SpectateStartMessage): void {
+    spectator = new SpectatorSession(msg.seed, msg.frames);
+    session = null;
+    names = msg.players;
+    phase = 'spectating';
+    overlay.style.display = 'none';
+    showBanner(msg.frames[0].length > 0 ? 'catching up…' : '');
+    titleEl.textContent = `${msg.players[0]} vs ${msg.players[1]}`;
+    titleEl.style.display = 'block';
+    clock.reset();
+
+    if (!boards) {
+      boards = makeBoards(spectator.sims[0]!, spectator.sims[1]!);
+      fitToWindow();
+    } else {
+      for (const b of boards) {
+        b.interp.reset();
+        b.signs.clear();
+        b.decals.clear();
+      }
+      boards[0].interp.push(deriveViewModel(spectator.sims[0]!));
+      boards[1].interp.push(deriveViewModel(spectator.sims[1]!));
+    }
+  }
+
   function resumeMatch(msg: MatchResumeMessage): void {
     enterMatch(
       LockstepSession.resume(msg.seed, msg.playerIndex, msg.inputDelay, msg.frames),
@@ -401,9 +527,20 @@ export function bootNetplay(app: HTMLElement, hudEl: HTMLElement | null, relayUr
   }
 
   // --- input ---------------------------------------------------------------------
-  globalThis.addEventListener('keydown', (e: KeyboardEvent) => {
+  const onKeyDown = (e: KeyboardEvent): void => {
     if (e.code === 'KeyR' && session?.outcome && (phase === 'playing' || phase === 'ended')) {
       sendReady();
+      return;
+    }
+    if (e.code === 'Escape' && phase === 'spectating') {
+      net?.send({ type: 'leave_room' });
+      spectator = null;
+      phase = 'lobby';
+      overlay.style.display = 'flex';
+      titleEl.style.display = 'none';
+      showRoster([]);
+      showBanner('');
+      setStatus('stopped watching');
       return;
     }
     if (e.code === 'Escape' && phase === 'playing' && !session?.outcome) {
@@ -414,15 +551,57 @@ export function bootNetplay(app: HTMLElement, hudEl: HTMLElement | null, relayUr
       input.press(e.code);
       e.preventDefault();
     }
-  });
-  globalThis.addEventListener('keyup', (e: KeyboardEvent) => input.release(e.code));
-  globalThis.addEventListener('blur', () => input.clear());
+  };
+  const onKeyUp = (e: KeyboardEvent): void => input.release(e.code);
+  const onBlur = (): void => input.clear();
+  globalThis.addEventListener('keydown', onKeyDown);
+  globalThis.addEventListener('keyup', onKeyUp);
+  globalThis.addEventListener('blur', onBlur);
 
   // --- loop ------------------------------------------------------------------------
   let lastMs = performance.now();
   let waitingSince: number | null = null;
 
   const frame = (nowMs: number): void => {
+    if (disposed) return;
+    // --- watcher branch: no input, no sending; just consume and render.
+    if (spectator && boards && phase === 'spectating') {
+      const w = spectator;
+      if (!w.outcome) {
+        const due = clock.sample(nowMs);
+        const backlog = w.bufferedTicks;
+        const budget = backlog > 25 ? Math.min(backlog, CATCH_UP_STEPS_PER_FRAME) : due;
+        w.advance(budget, () => {
+          boards![0].interp.push(deriveViewModel(w.sims[0]!));
+          boards![1].interp.push(deriveViewModel(w.sims[1]!));
+        });
+        if (w.outcome) {
+          const { winner } = w.outcome;
+          showBanner(winner === null ? 'Draw — both topped out.' : `${names[winner]} wins!`);
+        } else if (backlog <= 25 && banner.textContent === 'catching up…') {
+          showBanner('');
+        }
+        for (let i = 0; i < 2; i++) {
+          for (const ev of w.sims[i]!.drainSignEvents()) {
+            boards[i]!.signs.spawn(ev.gridX, ev.gridY, ev.kind, ev.level);
+          }
+        }
+      }
+      const dtTicks = Math.min(MAX_SIGN_DT_TICKS, (nowMs - lastMs) / MS_PER_TICK);
+      const alpha = w.outcome ? 1 : clock.alpha;
+      boards.forEach((b) => {
+        b.signs.update(dtTicks);
+        const vm = b.interp.sample(alpha);
+        b.view.update(vm);
+        b.decals.update(vm.garbage);
+        b.levelLights.update(vm.hud.topEffectiveRow);
+        b.view.render();
+      });
+      lastMs = nowMs;
+      rafId = globalThis.requestAnimationFrame(frame);
+      return;
+    }
+
     const s = session;
     if (s && boards && (phase === 'playing' || phase === 'ended')) {
       const localSim = s.sims[localIndex]!;
@@ -506,10 +685,44 @@ export function bootNetplay(app: HTMLElement, hudEl: HTMLElement | null, relayUr
       });
     }
     lastMs = nowMs;
-    globalThis.requestAnimationFrame(frame);
+    rafId = globalThis.requestAnimationFrame(frame);
   };
-  globalThis.requestAnimationFrame(frame);
+  rafId = globalThis.requestAnimationFrame(frame);
+
+  // Mode switch back to solo: tear down and hand control to the caller.
+  const soloBtn = $<HTMLButtonElement>('net-solo');
+  soloBtn.onclick = (): void => onExit();
 
   // Kick everything off.
   connect();
+
+  return {
+    dispose(): void {
+      if (disposed) return;
+      disposed = true;
+      if (reconnectTimer !== null) {
+        clearTimeout(reconnectTimer);
+        reconnectTimer = null;
+      }
+      net?.close('mode switch');
+      net = null;
+      cancelAnimationFrame(rafId);
+      globalThis.removeEventListener('keydown', onKeyDown);
+      globalThis.removeEventListener('keyup', onKeyUp);
+      globalThis.removeEventListener('blur', onBlur);
+      globalThis.removeEventListener('resize', fitToWindow);
+      if (boards) {
+        for (const b of boards) {
+          b.view.dispose(); // release the WebGL contexts (browsers cap them)
+          b.container.remove();
+        }
+        boards = null;
+      }
+      overlay.remove();
+      banner.remove();
+      rosterEl.remove();
+      titleEl.remove();
+      if (hudEl) hudEl.textContent = '';
+    },
+  };
 }

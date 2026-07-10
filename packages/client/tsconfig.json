@@ -4,7 +4,7 @@
     "rootDir": "./src",
     "outDir": "./dist",
     "lib": ["ES2022", "DOM", "DOM.Iterable"],
-    "types": []
+    "types": ["vite/client"]
   },
   "references": [{ "path": "../core" }, { "path": "../protocol" }],
   "include": ["src/**/*.ts"]

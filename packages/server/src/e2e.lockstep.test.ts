@@ -20,12 +20,14 @@ import {
   type ServerMessage,
 } from '@crack-attack/protocol';
 import { LockstepSession } from '../../client/src/net/lockstep.js';
+import { SpectatorSession } from '../../client/src/net/spectator.js';
 import { RelayServer, type ClientConnection } from './relay.js';
 
 /** A headless netplay client: relay connection + lockstep session + input script. */
 class HeadlessPlayer {
   readonly conn: ClientConnection & { deliver: (text: string) => void };
   session: LockstepSession | null = null;
+  watcher: SpectatorSession | null = null;
   desyncAt: number | null = null;
   roomCode = '';
   token = '';
@@ -81,8 +83,11 @@ class HeadlessPlayer {
       this.session = new LockstepSession(msg.seed, msg.playerIndex, msg.inputDelay);
     } else if (msg.type === 'match_resume') {
       this.session = LockstepSession.resume(msg.seed, msg.playerIndex, msg.inputDelay, msg.frames);
-    } else if (msg.type === 'peer_inputs' && this.session) {
-      this.session.addRemoteFrames(msg.startTick, msg.frames);
+    } else if (msg.type === 'spectate_start') {
+      this.watcher = new SpectatorSession(msg.seed, msg.frames);
+    } else if (msg.type === 'peer_inputs') {
+      if (this.watcher) this.watcher.addFrames(msg.playerIndex, msg.startTick, msg.frames);
+      else if (this.session) this.session.addRemoteFrames(msg.startTick, msg.frames);
     } else if (msg.type === 'desync') {
       this.desyncAt = msg.tick;
     }
@@ -219,6 +224,58 @@ describe('end-to-end lockstep through the relay', () => {
       expect(bob.desyncAt).toBeNull();
 
       relay.shutdown();
+    },
+  );
+
+  it(
+    'a mid-match spectator catches up and observes the identical outcome',
+    { timeout: E2E_TIMEOUT_MS },
+    async () => {
+      const relay = new RelayServer({ inputDelay: 3 });
+      const alice = new HeadlessPlayer(relay, 101);
+      const bob = new HeadlessPlayer(relay, 202);
+      await alice.join('alice');
+      await bob.join('bob');
+      await alice.say({ type: 'create_room' });
+      await bob.say({ type: 'join_room', code: alice.roomCode });
+      await alice.say({ type: 'ready' });
+      await bob.say({ type: 'ready' });
+
+      // Play partway before anyone is watching.
+      for (let i = 0; i < 100; i++) {
+        await alice.pump(2);
+        await bob.pump(2);
+      }
+      expect(alice.session!.outcome).toBeNull();
+
+      // Carol starts watching mid-match: ledgers + both live streams.
+      const carol = new HeadlessPlayer(relay, 303);
+      await carol.join('carol');
+      await carol.say({ type: 'spectate', code: alice.roomCode });
+      expect(carol.watcher).not.toBeNull();
+      carol.watcher!.advance(1000000); // burn down the ledgers
+
+      // Play to completion; carol consumes the fan-out as it arrives.
+      for (let i = 0; i < 100000 && !alice.session!.outcome; i++) {
+        await alice.pump(3);
+        await bob.pump(3);
+        carol.watcher!.advance(1000);
+      }
+      for (let i = 0; i < 10; i++) {
+        await alice.pump(500);
+        await bob.pump(500);
+      }
+      carol.watcher!.advance(1000000);
+
+      expect(alice.session!.outcome).not.toBeNull();
+      expect(bob.session!.outcome).toEqual(alice.session!.outcome);
+      expect(carol.watcher!.outcome).toEqual(alice.session!.outcome);
+      expect(carol.watcher!.currentTick).toBe(alice.session!.currentTick);
+      // The watcher's sims are bit-identical to the players' shared state.
+      expect([carol.watcher!.sims[0]!.digest(), carol.watcher!.sims[1]!.digest()]).toEqual([
+        alice.session!.sims[0]!.digest(),
+        alice.session!.sims[1]!.digest(),
+      ]);
     },
   );
 });

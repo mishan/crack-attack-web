@@ -40,8 +40,14 @@ import { CC_MOVE_MASK, CC_SWAP, CC_ADVANCE } from '@crack-attack/core';
  * v2: Phase 5 lobby — session tokens + W-L records on `hello`/`welcome`,
  * `room_list` pushes, client-reported `result`, and the reconnect flow
  * (`peer_dropped`/`peer_rejoined`/`match_resume`).
+ *
+ * v3: spectators — `spectate`, `spectate_joined`/`spectate_start` (the
+ * ledger mechanism from `match_resume` doubles as mid-match late-join),
+ * `spectators` roster pushes, `room_closed`, and watcher names in
+ * `RoomSummary`. A spectator is a third sim pair fed both players' input
+ * streams; nothing new crosses the wire per tick.
  */
-export const PROTOCOL_VERSION = 2;
+export const PROTOCOL_VERSION = 3;
 
 /**
  * How often (in ticks) each client submits state digests. 32 is a nod to the
@@ -97,6 +103,8 @@ export interface RoomSummary {
   code: string;
   state: 'waiting' | 'playing';
   players: { name: string; record: PlayerRecord }[];
+  /** Names of everyone watching (spectators are visible by design). */
+  spectators: string[];
 }
 
 // --- Client → Server --------------------------------------------------------
@@ -123,6 +131,16 @@ export interface CreateRoomMessage {
 /** Join an existing room by code; the server replies `room_joined` or `error`. */
 export interface JoinRoomMessage {
   type: 'join_room';
+  code: string;
+}
+
+/**
+ * Watch a room by code (waiting or playing); the server replies
+ * `spectate_joined` (plus `spectate_start` if a game is in progress).
+ * Spectators leave with `leave_room`.
+ */
+export interface SpectateMessage {
+  type: 'spectate';
   code: string;
 }
 
@@ -165,6 +183,18 @@ export interface ResultMessage {
   winner: number | null;
 }
 
+/**
+ * Change display name mid-session. Takes effect immediately: the stored
+ * identity, any seat, and the lobby/room rosters update, visible to everyone
+ * via the ensuing `room_list`/`spectators` pushes. Names inside a running
+ * match (`match_start.players`) refresh at the next game.
+ */
+export interface RenameMessage {
+  type: 'rename';
+  /** New display name, 1..{@link MAX_PLAYER_NAME_LENGTH} chars. */
+  name: string;
+}
+
 /** Concede the current match. The server broadcasts `match_end`. */
 export interface ConcedeMessage {
   type: 'concede';
@@ -179,10 +209,12 @@ export type ClientMessage =
   | HelloMessage
   | CreateRoomMessage
   | JoinRoomMessage
+  | SpectateMessage
   | ReadyMessage
   | InputsMessage
   | DigestMessage
   | ResultMessage
+  | RenameMessage
   | ConcedeMessage
   | LeaveRoomMessage;
 
@@ -256,6 +288,41 @@ export interface PeerInputsMessage {
   frames: number[];
 }
 
+/** Confirmation of `spectate`: the watcher is attached to the room. */
+export interface SpectateJoinedMessage {
+  type: 'spectate_joined';
+  code: string;
+  /** Seated players' names (0..2, in seat order). */
+  players: string[];
+  /** Everyone watching, including the recipient. */
+  spectators: string[];
+}
+
+/**
+ * A game is watchable: sent to each spectator at `match_start` (empty
+ * ledgers) and on mid-match join (both ledgers so far — the same late-join
+ * mechanism as `match_resume`). The spectator runs a third sim pair and is
+ * fed both players' `peer_inputs` streams from here on.
+ */
+export interface SpectateStartMessage {
+  type: 'spectate_start';
+  seed: number;
+  inputDelay: number;
+  players: [string, string];
+  frames: [number[], number[]];
+}
+
+/** The room's watcher roster changed (sent to players and spectators). */
+export interface SpectatorsMessage {
+  type: 'spectators';
+  names: string[];
+}
+
+/** The room evaporated under a spectator (all players left). */
+export interface RoomClosedMessage {
+  type: 'room_closed';
+}
+
 /** Digest comparison failed at `tick`: the sims have diverged. */
 export interface DesyncMessage {
   type: 'desync';
@@ -327,6 +394,10 @@ export type ServerMessage =
   | PeerDroppedMessage
   | PeerRejoinedMessage
   | MatchResumeMessage
+  | SpectateJoinedMessage
+  | SpectateStartMessage
+  | SpectatorsMessage
+  | RoomClosedMessage
   | RoomCreatedMessage
   | RoomJoinedMessage
   | PeerJoinedMessage

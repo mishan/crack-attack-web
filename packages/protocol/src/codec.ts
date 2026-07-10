@@ -193,8 +193,17 @@ function roomSummaries(m: Record<string, unknown>, field: string): RoomSummary[]
         const pr = p as Record<string, unknown>;
         return { name: playerName(pr, 'name'), record: playerRecord(pr, 'record') };
       }),
+      spectators: nameList(r, 'spectators'),
     };
   });
+}
+
+/** A list of display names (spectator rosters, partial player lists). */
+function nameList(m: Record<string, unknown>, field: string): string[] {
+  const v = m[field];
+  if (!Array.isArray(v) || !v.every(isName))
+    throw new ProtocolError(`${field} must be an array of names`);
+  return v as string[];
 }
 
 function namePair(m: Record<string, unknown>, field: string): [string, string] {
@@ -226,10 +235,12 @@ const CLIENT_TYPES: ReadonlySet<string> = new Set([
   'hello',
   'create_room',
   'join_room',
+  'spectate',
   'ready',
   'inputs',
   'digest',
   'result',
+  'rename',
   'concede',
   'leave_room',
 ]);
@@ -239,6 +250,10 @@ const SERVER_TYPES: ReadonlySet<string> = new Set([
   'room_list',
   'room_created',
   'room_joined',
+  'spectate_joined',
+  'spectate_start',
+  'spectators',
+  'room_closed',
   'peer_joined',
   'peer_left',
   'peer_dropped',
@@ -270,11 +285,14 @@ function decodeAny(m: Record<string, unknown>): Message {
     case 'leave_room':
       return { type };
     case 'join_room':
+    case 'spectate':
       return { type, code: roomCode(m, 'code') };
     case 'inputs':
       return { type, startTick: uint32(m, 'startTick'), frames: inputFrames(m, 'frames') };
     case 'digest':
       return { type, tick: uint32(m, 'tick'), digests: digestPair(m, 'digests') };
+    case 'rename':
+      return { type, name: playerName(m, 'name') };
     case 'result': {
       const w = m['winner'];
       if (w !== null && (typeof w !== 'number' || !Number.isInteger(w) || w < 0 || w > 1))
@@ -309,6 +327,33 @@ function decodeAny(m: Record<string, unknown>): Message {
         frames: [matchFrames(frames[0], 'frames[0]'), matchFrames(frames[1], 'frames[1]')],
       };
     }
+    case 'spectate_joined': {
+      const players = m['players'];
+      if (!Array.isArray(players) || players.length > 2 || !players.every(isName))
+        throw new ProtocolError('players must be an array of 0..2 names');
+      return {
+        type,
+        code: roomCode(m, 'code'),
+        players: players as string[],
+        spectators: nameList(m, 'spectators'),
+      };
+    }
+    case 'spectate_start': {
+      const frames = m['frames'];
+      if (!Array.isArray(frames) || frames.length !== 2)
+        throw new ProtocolError('frames must be a pair of histories');
+      return {
+        type,
+        seed: uint32(m, 'seed'),
+        inputDelay: uint32(m, 'inputDelay'),
+        players: namePair(m, 'players'),
+        frames: [matchFrames(frames[0], 'frames[0]'), matchFrames(frames[1], 'frames[1]')],
+      };
+    }
+    case 'spectators':
+      return { type, names: nameList(m, 'names') };
+    case 'room_closed':
+      return { type };
     case 'room_created':
       return { type, code: roomCode(m, 'code') };
     case 'room_joined': {
