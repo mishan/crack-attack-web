@@ -80,11 +80,17 @@ function boot(): void {
   const audio = new AudioManager();
   const audioUi = mountAudioControls(audio);
   audio.playPrelude(); // menu music; starts once the first gesture unlocks audio
-  const onFirstGesture = (): void => audio.unlock();
+  // Unlock on the first gesture, then stop listening (unlock is a one-time thing).
+  const onFirstGesture = (): void => {
+    audio.unlock();
+    globalThis.removeEventListener('pointerdown', onFirstGesture);
+    globalThis.removeEventListener('keydown', onFirstGesture);
+  };
   globalThis.addEventListener('pointerdown', onFirstGesture);
   globalThis.addEventListener('keydown', onFirstGesture);
   globalThis.addEventListener('keydown', (e) => {
-    if (e.code === 'KeyM') {
+    // Ignore auto-repeat so holding M is a single toggle, not a rapid flap.
+    if (e.code === 'KeyM' && !e.repeat) {
       audio.toggleMuted();
       audioUi.syncMuted();
     }

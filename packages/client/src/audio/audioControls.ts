@@ -1,10 +1,10 @@
 /**
  * audioControls.ts — a small mute + volume overlay bound to an AudioManager.
  *
- * A speaker button toggles mute; clicking it also reveals two sliders (music,
- * SFX). Purely presentational glue — all the audio behavior and persistence
- * lives in {@link AudioManager}. The `M` key shortcut is wired by the caller so
- * it composes with each driver's key handling.
+ * A speaker button toggles mute; two always-visible sliders set the music and
+ * SFX volumes. Purely presentational glue — all the audio behavior and
+ * persistence lives in {@link AudioManager}. The `M` key shortcut is wired by
+ * the caller so it composes with each driver's key handling.
  */
 
 import type { AudioManager } from './audioManager.js';
@@ -19,13 +19,17 @@ export function mountAudioControls(audio: AudioManager): AudioControlsHandle {
   const settings = audio.getSettings();
 
   const wrap = document.createElement('div');
+  // z-index above the netplay lobby overlay (z-index 10) so the control is
+  // reachable there too — the lobby plays the prelude, so it needs a mute.
   wrap.style.cssText =
-    'position:fixed;top:12px;right:120px;z-index:6;display:flex;align-items:center;gap:8px;' +
+    'position:fixed;top:12px;right:120px;z-index:20;display:flex;align-items:center;gap:8px;' +
     'font:12px system-ui,sans-serif;color:#d7dce5;';
 
   const btn = document.createElement('button');
+  btn.type = 'button'; // avoid implicit form-submit semantics
   btn.style.cssText = 'padding:6px 10px;opacity:.85;cursor:pointer;min-width:34px';
   btn.title = 'Mute (M)';
+  btn.setAttribute('aria-label', 'Mute audio');
 
   const panel = document.createElement('div');
   panel.style.cssText =
@@ -51,7 +55,11 @@ export function mountAudioControls(audio: AudioManager): AudioControlsHandle {
   panel.appendChild(slider('▸', settings.sfx, (v) => audio.setSfxVolume(v)));
 
   const syncMuted = (): void => {
-    btn.textContent = audio.getSettings().muted ? '🔇' : '🔊';
+    const muted = audio.getSettings().muted;
+    btn.textContent = muted ? '🔇' : '🔊';
+    // Announce current state to assistive tech (toggle button semantics).
+    btn.setAttribute('aria-pressed', String(muted));
+    btn.setAttribute('aria-label', muted ? 'Unmute audio' : 'Mute audio');
   };
   syncMuted();
 

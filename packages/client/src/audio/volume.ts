@@ -17,8 +17,13 @@ export const SOUND_VOLUME_MAX = 10;
 /** Faithful music level: a quarter of full (Music.cxx `MIX_MAX_VOLUME / 4`). */
 export const MUSIC_BASE_GAIN = 0.25;
 
-/** Clamp a number into [lo, hi]. */
+/**
+ * Clamp a number into [lo, hi]. Non-finite input (NaN/±Infinity, e.g. from
+ * corrupted localStorage settings) collapses to `lo` so gain math never yields
+ * NaN — WebAudio gain and `HTMLAudioElement.volume` throw or misbehave on NaN.
+ */
 export function clamp(x: number, lo: number, hi: number): number {
+  if (!Number.isFinite(x)) return lo;
   return x < lo ? lo : x > hi ? hi : x;
 }
 

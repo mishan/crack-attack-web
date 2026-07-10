@@ -35,4 +35,18 @@ describe('clamp', () => {
     expect(clamp(2, 0, 1)).toBe(1);
     expect(clamp(0.4, 0, 1)).toBe(0.4);
   });
+
+  it('collapses non-finite input to the low bound (never NaN)', () => {
+    expect(clamp(NaN, 0, 1)).toBe(0);
+    expect(clamp(Infinity, 0, 1)).toBe(0);
+    expect(clamp(-Infinity, 0, 1)).toBe(0);
+  });
+});
+
+describe('gain math is NaN-proof', () => {
+  it('yields finite gains for corrupted (NaN) settings', () => {
+    expect(sfxGain(NaN, 1, false)).toBe(0);
+    expect(sfxGain(10, NaN, false)).toBe(0);
+    expect(musicGain(NaN, false)).toBe(0);
+  });
 });
