@@ -81,6 +81,11 @@ interface Seat {
 interface Room {
   code: string;
   seats: Seat[];
+  /**
+   * Watchers: live sessions running a third sim pair off both players' input
+   * streams. Connection-bound (no reconnect grace — re-spectating is cheap).
+   */
+  spectators: Session[];
   state: 'waiting' | 'playing';
   /** Seed of the current match (kept for `match_resume`). */
   seed: number;
@@ -94,12 +99,14 @@ interface Room {
   grace_timer: ReturnType<typeof setTimeout> | null;
 }
 
-/** A live, helloed connection: identity plus (optionally) a seat. */
+/** A live, helloed connection: identity plus (optionally) a seat or a watch. */
 interface Session {
   conn: ClientConnection;
   identity: StoredPlayer;
   room: Room | null;
   seat: Seat | null;
+  /** Room this session is spectating (mutually exclusive with a seat). */
+  watching: Room | null;
 }
 
 /** Uniform uint32 from an injectable float source (defaults to Math.random). */
@@ -156,7 +163,13 @@ export class RelayServer {
   disconnect(conn: ClientConnection): void {
     const session = this.sessions.get(conn);
     this.sessions.delete(conn);
-    if (!session?.room || !session.seat) return;
+    if (!session) return;
+
+    if (session.watching) {
+      this.stopSpectating(session);
+      return;
+    }
+    if (!session.room || !session.seat) return;
 
     if (session.room.state === 'playing') {
       this.dropSeat(session.room, session.seat);
@@ -197,6 +210,9 @@ export class RelayServer {
       case 'join_room':
         this.handleJoinRoom(session, msg.code);
         return;
+      case 'spectate':
+        this.handleSpectate(session, msg.code);
+        return;
       case 'ready':
         this.handleReady(session);
         return;
@@ -234,7 +250,7 @@ export class RelayServer {
     }
 
     const identity = await this.resolveIdentity(msg);
-    const session: Session = { conn, identity, room: null, seat: null };
+    const session: Session = { conn, identity, room: null, seat: null, watching: null };
     this.sessions.set(conn, session);
     this.send(conn, {
       type: 'welcome',
@@ -266,10 +282,14 @@ export class RelayServer {
   private dropSeat(room: Room, seat: Seat): void {
     seat.conn = null;
     this.dropped.set(seat.token, room);
+    const dropped: ServerMessage = {
+      type: 'peer_dropped',
+      name: seat.name,
+      graceMs: this.graceMs,
+    };
     const peer = room.seats.find((s) => s !== seat);
-    if (peer?.conn) {
-      this.send(peer.conn, { type: 'peer_dropped', name: seat.name, graceMs: this.graceMs });
-    }
+    if (peer?.conn) this.send(peer.conn, dropped);
+    for (const w of room.spectators) this.send(w.conn, dropped);
     if (room.grace_timer !== null) clearTimeout(room.grace_timer);
     room.grace_timer = setTimeout(() => {
       room.grace_timer = null;
@@ -284,13 +304,14 @@ export class RelayServer {
 
     const peer = room.seats[0];
     if (!peer) {
-      this.rooms.delete(room.code);
+      this.closeRoom(room);
       this.broadcastRoomList();
       return;
     }
     await this.recordDecisive(peer, seat);
     this.endMatch(room, 'disconnect', peer.match_index);
     if (peer.conn) this.send(peer.conn, { type: 'peer_left', name: seat.name });
+    for (const w of room.spectators) this.send(w.conn, { type: 'peer_left', name: seat.name });
     this.broadcastRoomList();
   }
 
@@ -328,6 +349,7 @@ export class RelayServer {
     });
     const peer = room.seats.find((s) => s !== seat);
     if (peer?.conn) this.send(peer.conn, { type: 'peer_rejoined', name: seat.name });
+    for (const w of room.spectators) this.send(w.conn, { type: 'peer_rejoined', name: seat.name });
   }
 
   // --- Room flow ---------------------------------------------------------------
@@ -347,7 +369,7 @@ export class RelayServer {
   }
 
   private handleCreateRoom(session: Session): void {
-    if (session.room) {
+    if (session.room || session.watching) {
       this.error(session.conn, 'bad_message', 'already in a room');
       return;
     }
@@ -356,6 +378,7 @@ export class RelayServer {
     const room: Room = {
       code,
       seats: [seat],
+      spectators: [],
       state: 'waiting',
       seed: 0,
       digest_floor: -1,
@@ -369,7 +392,7 @@ export class RelayServer {
   }
 
   private handleJoinRoom(session: Session, code: string): void {
-    if (session.room) {
+    if (session.room || session.watching) {
       this.error(session.conn, 'bad_message', 'already in a room');
       return;
     }
@@ -394,6 +417,70 @@ export class RelayServer {
     const host = room.seats[0]!;
     if (host.conn) this.send(host.conn, { type: 'peer_joined', name: seat.name });
     this.broadcastRoomList();
+  }
+
+  /** Attach a watcher to a room; a playing room also ships the ledgers. */
+  private handleSpectate(session: Session, code: string): void {
+    if (session.room || session.watching) {
+      this.error(session.conn, 'bad_message', 'already in a room');
+      return;
+    }
+    const room = this.rooms.get(code);
+    if (!room) {
+      this.error(session.conn, 'room_not_found', `no room ${code}`);
+      return;
+    }
+    room.spectators.push(session);
+    session.watching = room;
+    this.send(session.conn, {
+      type: 'spectate_joined',
+      code,
+      players: room.seats.map((s) => s.name),
+      spectators: room.spectators.map((s) => s.identity.name),
+    });
+    if (room.state === 'playing') {
+      // Mid-match late-join: the same ledger mechanism as match_resume.
+      this.send(session.conn, {
+        type: 'spectate_start',
+        seed: room.seed,
+        inputDelay: this.inputDelay,
+        players: this.matchNames(room),
+        frames: this.ledgers(room),
+      });
+    }
+    this.broadcastSpectators(room);
+    this.broadcastRoomList();
+  }
+
+  /** A spectator detaches (leave_room or disconnect). */
+  private stopSpectating(session: Session): void {
+    const room = session.watching;
+    if (!room) return;
+    room.spectators.splice(room.spectators.indexOf(session), 1);
+    session.watching = null;
+    this.broadcastSpectators(room);
+    this.broadcastRoomList();
+  }
+
+  /** Push the watcher roster to everyone in the room (players + watchers). */
+  private broadcastSpectators(room: Room): void {
+    const msg: ServerMessage = {
+      type: 'spectators',
+      names: room.spectators.map((s) => s.identity.name),
+    };
+    const text = encodeMessage(msg);
+    for (const s of room.seats) s.conn?.send(text);
+    for (const w of room.spectators) w.conn.send(text);
+  }
+
+  /** Delete a room, telling any watchers it evaporated. */
+  private closeRoom(room: Room): void {
+    for (const w of room.spectators) {
+      w.watching = null;
+      this.send(w.conn, { type: 'room_closed' });
+    }
+    room.spectators.length = 0;
+    this.rooms.delete(room.code);
   }
 
   /**
@@ -439,6 +526,16 @@ export class RelayServer {
         });
       }
     }
+    // Watchers start their third sim pair alongside (empty ledgers).
+    for (const w of room.spectators) {
+      this.send(w.conn, {
+        type: 'spectate_start',
+        seed: room.seed,
+        inputDelay: this.inputDelay,
+        players: names,
+        frames: [[], []],
+      });
+    }
     this.broadcastRoomList();
   }
 
@@ -464,15 +561,17 @@ export class RelayServer {
       return;
     }
     for (const f of frames) seat.frames.push(f);
+    const relayed: ServerMessage = {
+      type: 'peer_inputs',
+      playerIndex: seat.match_index,
+      startTick,
+      frames,
+    };
+    const text = encodeMessage(relayed);
     const peer = room.seats.find((s) => s !== seat);
-    if (peer?.conn) {
-      this.send(peer.conn, {
-        type: 'peer_inputs',
-        playerIndex: seat.match_index,
-        startTick,
-        frames,
-      });
-    }
+    peer?.conn?.send(text);
+    // Spectators consume both players' streams.
+    for (const w of room.spectators) w.conn.send(text);
   }
 
   private handleDigest(session: Session, tick: number, digests: [number, number]): void {
@@ -503,6 +602,7 @@ export class RelayServer {
       // The sims have diverged: void the match. This is the improvement over
       // the original, which had no detection and let boards silently drift.
       for (const s of room.seats) if (s.conn) this.send(s.conn, { type: 'desync', tick });
+      for (const w of room.spectators) this.send(w.conn, { type: 'desync', tick });
       this.endMatch(room, 'desync', null);
       this.broadcastRoomList();
     }
@@ -554,6 +654,10 @@ export class RelayServer {
   }
 
   private handleLeave(session: Session): void {
+    if (session.watching) {
+      this.stopSpectating(session);
+      return;
+    }
     if (!session.room) {
       this.error(session.conn, 'not_in_room', 'leave_room outside a room');
       return;
@@ -604,7 +708,11 @@ export class RelayServer {
       this.send(conn, { type: 'match_end', reason, winner });
       for (const gone of orphaned) this.send(conn, { type: 'peer_left', name: gone.name });
     }
-    if (room.seats.length === 0) this.rooms.delete(room.code);
+    for (const w of room.spectators) {
+      this.send(w.conn, { type: 'match_end', reason, winner });
+      for (const gone of orphaned) this.send(w.conn, { type: 'peer_left', name: gone.name });
+    }
+    if (room.seats.length === 0) this.closeRoom(room);
   }
 
   /**
@@ -621,7 +729,7 @@ export class RelayServer {
 
     const peer = room.seats[0];
     if (!peer) {
-      this.rooms.delete(room.code);
+      this.closeRoom(room);
       return;
     }
     if (room.state === 'playing') {
@@ -631,6 +739,7 @@ export class RelayServer {
       this.endMatch(room, 'disconnect', peer.match_index);
     }
     if (peer.conn) this.send(peer.conn, { type: 'peer_left', name: seat.name });
+    for (const w of room.spectators) this.send(w.conn, { type: 'peer_left', name: seat.name });
   }
 
   // --- Room list -------------------------------------------------------------------
@@ -642,6 +751,7 @@ export class RelayServer {
         code: room.code,
         state: room.state,
         players: room.seats.map((s) => ({ name: s.name, record: { ...s.record } })),
+        spectators: room.spectators.map((w) => w.identity.name),
       });
     }
     return rooms;

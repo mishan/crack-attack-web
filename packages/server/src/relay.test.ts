@@ -162,7 +162,12 @@ describe('room flow + lobby list', () => {
     const code = await createRoom(relay, a);
     expect(isRoomCode(code)).toBe(true);
     expect(spectator.lastOf('room_list').rooms).toEqual([
-      { code, state: 'waiting', players: [{ name: 'alice', record: { wins: 0, losses: 0 } }] },
+      {
+        code,
+        state: 'waiting',
+        players: [{ name: 'alice', record: { wins: 0, losses: 0 } }],
+        spectators: [],
+      },
     ]);
 
     await say(relay, b, { type: 'join_room', code });
@@ -353,6 +358,104 @@ describe('results + records', () => {
     // A later session with alice's token sees the recorded win.
     const a2 = await client(relay, 'alice', tokenA);
     expect(a2.lastOf('welcome').record).toEqual({ wins: 1, losses: 0 });
+  });
+});
+
+describe('spectators', () => {
+  it('attaches to a waiting room and gets spectate_start at match start', async () => {
+    const relay = new RelayServer();
+    const a = await client(relay, 'alice');
+    const b = await client(relay, 'bob');
+    const carol = await client(relay, 'carol');
+    const code = await createRoom(relay, a);
+    await say(relay, b, { type: 'join_room', code });
+
+    await say(relay, carol, { type: 'spectate', code });
+    expect(carol.lastOf('spectate_joined')).toEqual({
+      type: 'spectate_joined',
+      code,
+      players: ['alice', 'bob'],
+      spectators: ['carol'],
+    });
+    expect(a.lastOf('spectators').names).toEqual(['carol']);
+    expect(carol.allOf('spectate_start')).toHaveLength(0); // nothing playing yet
+    expect(a.lastOf('room_list').rooms[0]!.spectators).toEqual(['carol']);
+
+    await say(relay, a, { type: 'ready' });
+    await say(relay, b, { type: 'ready' });
+    const start = carol.lastOf('spectate_start');
+    expect(start.players).toEqual(['alice', 'bob']);
+    expect(start.frames).toEqual([[], []]);
+    expect(start.seed).toBe(a.lastOf('match_start').seed);
+  });
+
+  it('joins mid-match with both ledgers and receives both live streams', async () => {
+    const relay = new RelayServer();
+    const [a, b, code] = await startedMatch(relay);
+    await say(relay, a, { type: 'inputs', startTick: 0, frames: [0, 16] });
+    await say(relay, b, { type: 'inputs', startTick: 0, frames: [4] });
+
+    const carol = await client(relay, 'carol');
+    await say(relay, carol, { type: 'spectate', code });
+    const start = carol.lastOf('spectate_start');
+    expect(start.frames).toEqual([[0, 16], [4]]);
+
+    await say(relay, a, { type: 'inputs', startTick: 2, frames: [2] });
+    await say(relay, b, { type: 'inputs', startTick: 1, frames: [1] });
+    const relayed = carol.allOf('peer_inputs');
+    expect(relayed).toEqual([
+      { type: 'peer_inputs', playerIndex: 0, startTick: 2, frames: [2] },
+      { type: 'peer_inputs', playerIndex: 1, startTick: 1, frames: [1] },
+    ]);
+    // Players still get each other's stream, not their own echoed back.
+    expect(b.lastOf('peer_inputs').playerIndex).toBe(0);
+  });
+
+  it('cannot spectate and sit at once, and leave_room detaches the watch', async () => {
+    const relay = new RelayServer();
+    const [, , code] = await startedMatch(relay);
+    const carol = await client(relay, 'carol');
+    await say(relay, carol, { type: 'spectate', code });
+    await say(relay, carol, { type: 'create_room' });
+    expect(carol.lastOf('error').code).toBe('bad_message');
+
+    await say(relay, carol, { type: 'leave_room' });
+    expect(relay.roomCount).toBe(1);
+    await say(relay, carol, { type: 'create_room' });
+    expect(carol.lastOf('room_created')).toBeTruthy();
+  });
+
+  it('spectators get match lifecycle and room_closed when players leave', async () => {
+    const relay = new RelayServer();
+    const [a, b, code] = await startedMatch(relay);
+    const carol = await client(relay, 'carol');
+    await say(relay, carol, { type: 'spectate', code });
+
+    await say(relay, b, { type: 'concede' });
+    expect(carol.lastOf('match_end')).toEqual({
+      type: 'match_end',
+      reason: 'concession',
+      winner: 0,
+    });
+
+    await say(relay, a, { type: 'leave_room' });
+    expect(carol.lastOf('peer_left').name).toBe('alice');
+    await say(relay, b, { type: 'leave_room' });
+    expect(carol.lastOf('room_closed')).toEqual({ type: 'room_closed' });
+    expect(relay.roomCount).toBe(0);
+    // Detached: carol can host her own room now.
+    await say(relay, carol, { type: 'create_room' });
+    expect(carol.lastOf('room_created')).toBeTruthy();
+  });
+
+  it('a disconnecting spectator leaves the roster', async () => {
+    const relay = new RelayServer();
+    const [a, , code] = await startedMatch(relay);
+    const carol = await client(relay, 'carol');
+    await say(relay, carol, { type: 'spectate', code });
+    expect(a.lastOf('spectators').names).toEqual(['carol']);
+    relay.disconnect(carol);
+    expect(a.lastOf('spectators').names).toEqual([]);
   });
 });
 
