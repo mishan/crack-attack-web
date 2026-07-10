@@ -10,7 +10,6 @@
  * Original work Copyright (C) 2000 Daniel Nelson. GPL-2.0-or-later.
  */
 
-import { randomBytes } from 'node:crypto';
 import { WebSocketServer, type WebSocket } from 'ws';
 import { RelayServer, type ClientConnection, type RelayServerOptions } from './relay.js';
 
@@ -30,15 +29,11 @@ export interface RelayWsServer {
 /** Default port, matching the original (CO_DEFAULT_PORT, Communicator.h:35). */
 export const DEFAULT_PORT = 8080;
 
-/** CSPRNG-backed float source for seeds, room codes, and session tokens. */
-export function cryptoEntropy(): number {
-  return randomBytes(4).readUInt32BE(0) / 0x100000000;
-}
-
 /** Start a relay on a WebSocket server. Resolves once listening. */
 export function startRelayWsServer(options: RelayWsServerOptions = {}): Promise<RelayWsServer> {
+  // Entropy defaults to a CSPRNG inside RelayServer itself.
   const relay = new RelayServer({
-    entropy: options.entropy ?? cryptoEntropy,
+    entropy: options.entropy,
     inputDelay: options.inputDelay,
     store: options.store,
     graceMs: options.graceMs,
@@ -69,10 +64,20 @@ export function startRelayWsServer(options: RelayWsServerOptions = {}): Promise<
         : Buffer.isBuffer(data)
           ? data.toString('utf8')
           : Buffer.from(data).toString('utf8');
-      pipeline = pipeline.then(() => relay.message(conn, text)).catch(() => undefined);
+      pipeline = pipeline
+        .then(() => relay.message(conn, text))
+        .catch((err: unknown) => {
+          // An unexpected relay failure (e.g. the store erroring during hello
+          // or result) must not leave the client hanging silently: log it and
+          // close so the client fails fast and reconnects.
+          console.error('relay: message handling failed, closing connection:', err);
+          ws.close(1011, 'internal error');
+        });
     });
     ws.on('close', () => {
-      pipeline = pipeline.then(() => relay.disconnect(conn)).catch(() => undefined);
+      pipeline = pipeline
+        .then(() => relay.disconnect(conn))
+        .catch((err: unknown) => console.error('relay: disconnect handling failed:', err));
     });
     // On a socket error, ws emits 'close' afterwards; nothing extra to do.
     ws.on('error', () => undefined);

@@ -34,6 +34,7 @@ import {
   type RoomSummary,
   type ServerMessage,
 } from '@crack-attack/protocol';
+import { randomBytes } from 'node:crypto';
 import { MemoryStore, type LobbyStore, type StoredPlayer } from './store.js';
 
 /** Transport surface the relay needs from a connection. */
@@ -109,12 +110,34 @@ interface Session {
   watching: Room | null;
 }
 
-/** Uniform uint32 from an injectable float source (defaults to Math.random). */
+/**
+ * CSPRNG-backed float source, the default entropy. Session tokens are the
+ * identity key (they reclaim records and in-progress matches), so guessable
+ * tokens are an account-takeover primitive — the default must be secure even
+ * when RelayServer is constructed directly. Tests inject deterministic
+ * entropy via {@link RelayServerOptions.entropy}.
+ */
+export function cryptoEntropy(): number {
+  return randomBytes(4).readUInt32BE(0) / 0x100000000;
+}
+
+/** Uniform uint32 from an injectable float source. */
 function randomUint32(entropy: () => number): number {
   return (entropy() * 0x100000000) >>> 0;
 }
 
+/**
+ * Remove `item` from `arr` if present. Never `splice(indexOf(...), 1)`
+ * directly: indexOf's -1 on a missing item would silently remove the *last*
+ * element (e.g. corrupting a roster on a double-detach).
+ */
+function removeItem<T>(arr: T[], item: T): void {
+  const i = arr.indexOf(item);
+  if (i >= 0) arr.splice(i, 1);
+}
+
 export interface RelayServerOptions {
+  /** Float source in [0, 1); defaults to a CSPRNG. Inject only for tests. */
   entropy?: (() => number) | undefined;
   inputDelay?: number | undefined;
   /** Persistence backend; defaults to an in-memory store. */
@@ -134,7 +157,7 @@ export class RelayServer {
   private readonly graceMs: number;
 
   constructor(options: RelayServerOptions = {}) {
-    this.entropy = options.entropy ?? Math.random;
+    this.entropy = options.entropy ?? cryptoEntropy;
     this.inputDelay = options.inputDelay ?? DEFAULT_INPUT_DELAY_TICKS;
     this.store = options.store ?? new MemoryStore();
     this.graceMs = options.graceMs ?? DEFAULT_RECONNECT_GRACE_MS;
@@ -303,7 +326,7 @@ export class RelayServer {
   /** Grace ran out: the dropped seat forfeits and leaves the room. */
   private async expireGrace(room: Room, seat: Seat): Promise<void> {
     this.dropped.delete(seat.token);
-    room.seats.splice(room.seats.indexOf(seat), 1);
+    removeItem(room.seats, seat);
 
     const peer = room.seats[0];
     if (!peer) {
@@ -459,7 +482,7 @@ export class RelayServer {
   private stopSpectating(session: Session): void {
     const room = session.watching;
     if (!room) return;
-    room.spectators.splice(room.spectators.indexOf(session), 1);
+    removeItem(room.spectators, session);
     session.watching = null;
     this.broadcastSpectators(room);
     this.broadcastRoomList();
@@ -718,7 +741,7 @@ export class RelayServer {
     const orphaned = room.seats.filter((s) => s.conn === null);
     for (const s of orphaned) {
       this.dropped.delete(s.token);
-      room.seats.splice(room.seats.indexOf(s), 1);
+      removeItem(room.seats, s);
     }
 
     for (const s of room.seats) {
@@ -746,7 +769,7 @@ export class RelayServer {
     const room = session.room;
     const seat = session.seat;
     if (!room || !seat) return;
-    room.seats.splice(room.seats.indexOf(seat), 1);
+    removeItem(room.seats, seat);
     session.room = null;
     session.seat = null;
 

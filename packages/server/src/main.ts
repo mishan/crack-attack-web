@@ -8,12 +8,16 @@
 import { SqliteStore } from './sqliteStore.js';
 import { DEFAULT_PORT, startRelayWsServer } from './wsServer.js';
 
-/** Parse PORT strictly: an integer in [0, 65535] (0 = ephemeral), else exit. */
+/**
+ * Parse PORT strictly: base-10 digits only, in [0, 65535] (0 = ephemeral),
+ * else exit. Plain `Number(raw)` would admit ops-surprising forms like
+ * "1e3" or "0x10".
+ */
 function parsePort(raw: string | undefined): number {
   if (raw === undefined || raw === '') return DEFAULT_PORT;
-  const port = Number(raw);
-  if (!Number.isInteger(port) || port < 0 || port > 65535) {
-    console.error(`invalid PORT ${JSON.stringify(raw)}: expected an integer 0..65535`);
+  const port = /^\d+$/.test(raw) ? Number(raw) : NaN;
+  if (!Number.isInteger(port) || port > 65535) {
+    console.error(`invalid PORT ${JSON.stringify(raw)}: expected a base-10 integer 0..65535`);
     process.exit(1);
   }
   return port;
