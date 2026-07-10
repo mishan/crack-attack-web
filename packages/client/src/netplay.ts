@@ -1,19 +1,25 @@
 /**
- * netplay.ts — the head-to-head mode (Phase 4 milestone).
+ * netplay.ts — the head-to-head mode (Phase 4) + lobby (Phase 5).
  *
  * Wires the relay connection ({@link NetClient}), the lockstep driver
- * ({@link LockstepSession}), and two board renderers into a playable match:
- * a minimal room overlay (name → create/join by code → ready), then both
- * players' boards side by side — yours left, the opponent's right — stepping
- * in lockstep. R readies (and re-readies for a rematch), Escape concedes.
+ * ({@link LockstepSession}), and two board renderers into a playable match.
+ * The lobby screen shows a live room list with W-L records (create, click to
+ * join, or join by code); identity persists in localStorage as a session
+ * token, so records follow the player and a dropped connection can reclaim
+ * its in-progress match: the client auto-reconnects with its token, receives
+ * `match_resume`, rebuilds the session from the input ledgers, and fast-
+ * forwards to the live frontier.
  *
  * Everything deterministic lives in the session; this file is DOM/WebGL glue.
  */
 
 import { GameSim, GC_STEPS_PER_SECOND } from '@crack-attack/core';
 import {
+  DEFAULT_RECONNECT_GRACE_MS,
   PROTOCOL_VERSION,
+  type MatchResumeMessage,
   type MatchStartMessage,
+  type RoomSummary,
   type ServerMessage,
 } from '@crack-attack/protocol';
 import { KeyboardInput } from './input/keyboard.js';
@@ -30,10 +36,16 @@ import { NetClient } from './net/session.js';
 
 const MS_PER_TICK = 1000 / GC_STEPS_PER_SECOND;
 const MAX_SIGN_DT_TICKS = 10;
+/** Extra ticks per frame while catching up after a resume (~10 s of sim/s). */
+const CATCH_UP_STEPS_PER_FRAME = 500;
+/** Reconnect attempt spacing while a match seat may still be held. */
+const RECONNECT_INTERVAL_MS = 2000;
+
+const STORAGE_TOKEN = 'crack-attack.token';
+const STORAGE_NAME = 'crack-attack.name';
 
 /** Everything one rendered board needs, bundled per player. */
 interface BoardBundle {
-  container: HTMLDivElement;
   view: BoardView;
   interp: ViewInterpolator;
   signs: SignsView;
@@ -41,7 +53,7 @@ interface BoardBundle {
   levelLights: LevelLightsView;
 }
 
-type Phase = 'lobby' | 'room' | 'playing' | 'ended';
+type Phase = 'connecting' | 'lobby' | 'room' | 'playing' | 'ended';
 
 export function bootNetplay(app: HTMLElement, hudEl: HTMLElement | null, relayUrl: string): void {
   // --- overlay UI ------------------------------------------------------------
@@ -51,17 +63,19 @@ export function bootNetplay(app: HTMLElement, hudEl: HTMLElement | null, relayUr
     'background:rgba(11,13,18,.85);z-index:10;font-size:14px';
   const panel = document.createElement('div');
   panel.style.cssText =
-    'display:flex;flex-direction:column;gap:10px;min-width:280px;padding:24px;' +
-    'background:#161a22;border:1px solid #2a3140;border-radius:8px';
+    'display:flex;flex-direction:column;gap:10px;width:360px;max-height:80vh;padding:24px;' +
+    'background:#161a22;border:1px solid #2a3140;border-radius:8px;overflow-y:auto';
   panel.innerHTML = `
-    <strong style="font-size:16px">Head-to-head</strong>
-    <label>Name <input id="net-name" maxlength="32" value="player" style="width:100%"></label>
-    <button id="net-create">Create room</button>
+    <strong style="font-size:16px">Crack Attack! lobby</strong>
+    <div id="net-self" style="opacity:.8"></div>
+    <label>Name <input id="net-name" maxlength="32" style="width:100%"></label>
     <div style="display:flex;gap:6px">
-      <input id="net-code" placeholder="room code" maxlength="5"
-             style="flex:1;text-transform:uppercase">
+      <button id="net-create" style="flex:1">Create room</button>
+      <input id="net-code" placeholder="code" maxlength="5"
+             style="width:5.5em;text-transform:uppercase">
       <button id="net-join">Join</button>
     </div>
+    <div id="net-rooms" style="display:flex;flex-direction:column;gap:4px"></div>
     <button id="net-ready" hidden>Ready</button>
     <div id="net-status" style="min-height:2.5em;opacity:.8"></div>`;
   overlay.appendChild(panel);
@@ -72,10 +86,12 @@ export function bootNetplay(app: HTMLElement, hudEl: HTMLElement | null, relayUr
     if (!el) throw new Error(`missing overlay element #${id}`);
     return el;
   };
+  const selfEl = $<HTMLDivElement>('net-self');
   const nameInput = $<HTMLInputElement>('net-name');
   const createBtn = $<HTMLButtonElement>('net-create');
   const codeInput = $<HTMLInputElement>('net-code');
   const joinBtn = $<HTMLButtonElement>('net-join');
+  const roomsEl = $<HTMLDivElement>('net-rooms');
   const readyBtn = $<HTMLButtonElement>('net-ready');
   const statusEl = $<HTMLDivElement>('net-status');
 
@@ -89,79 +105,100 @@ export function bootNetplay(app: HTMLElement, hudEl: HTMLElement | null, relayUr
     banner.textContent = text;
     banner.style.display = text ? 'block' : 'none';
   };
-
   const setStatus = (text: string): void => {
     statusEl.textContent = text;
   };
 
-  // --- net + game state --------------------------------------------------------
-  let phase: Phase = 'lobby';
-  let connected = false;
-  let pendingAction: (() => void) | null = null;
+  // --- persistent identity ------------------------------------------------------
+  nameInput.value = localStorage.getItem(STORAGE_NAME) ?? 'player';
+  nameInput.onchange = (): void => {
+    localStorage.setItem(STORAGE_NAME, nameInput.value.trim() || 'player');
+    setStatus('name change applies on the next connection');
+  };
+
+  // --- net + game state -----------------------------------------------------------
+  let phase: Phase = 'connecting';
+  let net: NetClient | null = null;
   let session: LockstepSession | null = null;
   let boards: [BoardBundle, BoardBundle] | null = null;
   let names: [string, string] = ['', ''];
   let localIndex = 0;
   let roomCode = '';
+  let resultSent = false;
+  let graceMs = DEFAULT_RECONNECT_GRACE_MS;
+  let reconnectUntil = 0;
+  let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 
   const clock = new FixedTimestep();
   const input = new KeyboardInput();
   const hud = hudEl ? new HudView(hudEl) : null;
 
-  const net = new NetClient({
-    onMessage: (msg) => handleMessage(msg),
-    onClose: (reason) => {
-      connected = false;
-      phase = 'lobby';
-      overlay.style.display = 'flex';
-      setStatus(`disconnected: ${reason}`);
-    },
-  });
-
-  /** Connect + hello lazily on the first room action. */
-  const withConnection = (action: () => void): void => {
-    if (connected) {
-      action();
-      return;
+  function connect(): void {
+    if (reconnectTimer !== null) {
+      clearTimeout(reconnectTimer);
+      reconnectTimer = null;
     }
-    pendingAction = action;
+    const client: NetClient = new NetClient({
+      onMessage: (msg) => handleMessage(msg),
+      onClose: () => onConnectionLost(),
+    });
+    net = client;
     setStatus(`connecting to ${relayUrl}…`);
-    net.connect(relayUrl).then(
+    client.connect(relayUrl).then(
       () => {
-        net.send({
+        const token = localStorage.getItem(STORAGE_TOKEN);
+        client.send({
           type: 'hello',
           protocolVersion: PROTOCOL_VERSION,
           name: nameInput.value.trim() || 'player',
+          ...(token ? { token } : {}),
         });
       },
-      (err: unknown) => setStatus(err instanceof Error ? err.message : 'connection failed'),
+      (err: unknown) => {
+        setStatus(err instanceof Error ? err.message : 'connection failed');
+        onConnectionLost();
+      },
     );
-  };
+  }
 
-  createBtn.onclick = (): void => withConnection(() => net.send({ type: 'create_room' }));
-  joinBtn.onclick = (): void =>
-    withConnection(() =>
-      net.send({ type: 'join_room', code: codeInput.value.trim().toUpperCase() }),
-    );
-  const sendReady = (): void => {
-    net.send({ type: 'ready' });
-    readyBtn.disabled = true;
-    setStatus('ready — waiting for the opponent…');
-  };
-  readyBtn.onclick = sendReady;
+  /** Reconnect with backoff while a match seat may still be held for us. */
+  function onConnectionLost(): void {
+    net = null;
+    const midMatch = (phase === 'playing' || phase === 'ended') && session !== null;
+    if (midMatch && reconnectUntil === 0) reconnectUntil = performance.now() + graceMs;
+
+    if (midMatch && performance.now() < reconnectUntil) {
+      showBanner('connection lost — reconnecting…');
+      reconnectTimer = setTimeout(connect, RECONNECT_INTERVAL_MS);
+      return;
+    }
+    // Lobby-phase drop (or grace exhausted): plain retry into the lobby.
+    phase = 'connecting';
+    session = null;
+    overlay.style.display = 'flex';
+    readyBtn.hidden = true;
+    setStatus('disconnected — retrying…');
+    reconnectTimer = setTimeout(connect, RECONNECT_INTERVAL_MS);
+  }
 
   function handleMessage(msg: ServerMessage): void {
     switch (msg.type) {
       case 'welcome':
-        connected = true;
-        setStatus('connected');
-        pendingAction?.();
-        pendingAction = null;
+        localStorage.setItem(STORAGE_TOKEN, msg.token);
+        selfEl.textContent = `${msg.name} — ${msg.record.wins}W / ${msg.record.losses}L`;
+        if (phase === 'connecting') {
+          phase = 'lobby';
+          setStatus('connected');
+        }
+        break;
+      case 'room_list':
+        renderRoomList(msg.rooms);
         break;
       case 'room_created':
         phase = 'room';
         roomCode = msg.code;
-        setStatus(`room ${msg.code} — share this code, waiting for an opponent…`);
+        readyBtn.hidden = true;
+        setStatus(`room ${msg.code} — share this code or wait for a lobby join…`);
         break;
       case 'room_joined':
         phase = 'room';
@@ -176,15 +213,25 @@ export function bootNetplay(app: HTMLElement, hudEl: HTMLElement | null, relayUr
         setStatus(`${msg.name} joined room ${roomCode}. Press Ready.`);
         break;
       case 'peer_left':
-        phase = 'room';
-        session = null;
-        overlay.style.display = 'flex';
+        if (phase === 'playing' || phase === 'ended') endToRoom('');
         readyBtn.hidden = true;
-        showBanner('');
         setStatus(`${msg.name} left. Waiting in room ${roomCode}…`);
+        break;
+      case 'peer_dropped':
+        graceMs = msg.graceMs;
+        showBanner(
+          `${msg.name} disconnected — holding the match ${Math.round(msg.graceMs / 1000)}s for a reconnect…`,
+        );
+        break;
+      case 'peer_rejoined':
+        showBanner('');
+        setStatus(`${msg.name} reconnected`);
         break;
       case 'match_start':
         startMatch(msg);
+        break;
+      case 'match_resume':
+        resumeMatch(msg);
         break;
       case 'peer_inputs':
         if (session && msg.playerIndex !== localIndex) {
@@ -203,6 +250,45 @@ export function bootNetplay(app: HTMLElement, hudEl: HTMLElement | null, relayUr
     }
   }
 
+  function renderRoomList(rooms: RoomSummary[]): void {
+    roomsEl.replaceChildren();
+    if (rooms.length === 0) {
+      const empty = document.createElement('div');
+      empty.style.cssText = 'opacity:.5;font-size:13px';
+      empty.textContent = 'no open rooms — create one';
+      roomsEl.appendChild(empty);
+      return;
+    }
+    for (const room of rooms) {
+      const row = document.createElement('button');
+      row.style.cssText =
+        'display:flex;justify-content:space-between;gap:8px;padding:6px 10px;text-align:left';
+      const who = room.players
+        .map((p) => `${p.name} (${p.record.wins}W/${p.record.losses}L)`)
+        .join(' vs ');
+      const label = document.createElement('span');
+      label.textContent = `${room.code} · ${who || 'empty'}`;
+      const state = document.createElement('span');
+      state.style.opacity = '.6';
+      const joinable = room.state === 'waiting' && room.players.length < 2;
+      state.textContent = room.state === 'playing' ? 'playing' : joinable ? 'join' : 'full';
+      row.append(label, state);
+      row.disabled = !joinable || phase !== 'lobby';
+      row.onclick = (): void => net?.send({ type: 'join_room', code: room.code });
+      roomsEl.appendChild(row);
+    }
+  }
+
+  const sendReady = (): void => {
+    net?.send({ type: 'ready' });
+    readyBtn.disabled = true;
+    setStatus('ready — waiting for the opponent…');
+  };
+  readyBtn.onclick = sendReady;
+  createBtn.onclick = (): void => net?.send({ type: 'create_room' });
+  joinBtn.onclick = (): void =>
+    net?.send({ type: 'join_room', code: codeInput.value.trim().toUpperCase() });
+
   function onMatchEnd(reason: string, winner: number | null): void {
     if (phase !== 'playing' && phase !== 'ended') return;
     phase = 'ended';
@@ -213,13 +299,22 @@ export function bootNetplay(app: HTMLElement, hudEl: HTMLElement | null, relayUr
           : 'You forfeited the match.',
       );
     }
+    // 'result' confirms the outcome banner already on screen.
     readyBtn.hidden = false;
     readyBtn.disabled = false;
     readyBtn.textContent = 'Rematch';
   }
 
+  /** Return from a dead match to the room/lobby overlay. */
+  function endToRoom(bannerText: string): void {
+    phase = 'room';
+    session = null;
+    overlay.style.display = 'flex';
+    showBanner(bannerText);
+  }
+
   // --- boards -------------------------------------------------------------------
-  function makeBoards(initialSim: GameSim, opponentSim: GameSim): [BoardBundle, BoardBundle] {
+  function makeBoards(localSim: GameSim, remoteSim: GameSim): [BoardBundle, BoardBundle] {
     const make = (sim: GameSim, side: 0 | 1): BoardBundle => {
       const container = document.createElement('div');
       container.style.cssText = `position:absolute;top:0;bottom:0;width:50%;${side === 0 ? 'left:0' : 'right:0'}`;
@@ -231,7 +326,6 @@ export function bootNetplay(app: HTMLElement, hudEl: HTMLElement | null, relayUr
       const halfW = (vm.width - 1) / 2;
       const halfH = (vm.visibleHeight - 1) / 2;
       return {
-        container,
         view,
         interp,
         signs: new SignsView(view.scene, halfW, halfH),
@@ -240,7 +334,7 @@ export function bootNetplay(app: HTMLElement, hudEl: HTMLElement | null, relayUr
       };
     };
     // Local board left, opponent right, regardless of player index.
-    return [make(initialSim, 0), make(opponentSim, 1)];
+    return [make(localSim, 0), make(remoteSim, 1)];
   }
 
   function fitToWindow(): void {
@@ -252,19 +346,21 @@ export function bootNetplay(app: HTMLElement, hudEl: HTMLElement | null, relayUr
   }
   globalThis.addEventListener('resize', fitToWindow);
 
-  function startMatch(msg: MatchStartMessage): void {
-    localIndex = msg.playerIndex;
-    names = msg.players;
-    session = new LockstepSession(msg.seed, localIndex, msg.inputDelay);
+  function enterMatch(newSession: LockstepSession, players: [string, string]): void {
+    session = newSession;
+    localIndex = newSession.localIndex;
+    names = players;
     phase = 'playing';
+    resultSent = false;
+    reconnectUntil = 0;
     overlay.style.display = 'none';
     readyBtn.textContent = 'Ready';
     showBanner('');
     input.clear();
     clock.reset();
 
-    const localSim = session.sims[localIndex]!;
-    const remoteSim = session.sims[1 - localIndex]!;
+    const localSim = newSession.sims[localIndex]!;
+    const remoteSim = newSession.sims[1 - localIndex]!;
     if (!boards) {
       boards = makeBoards(localSim, remoteSim);
       fitToWindow();
@@ -279,14 +375,26 @@ export function bootNetplay(app: HTMLElement, hudEl: HTMLElement | null, relayUr
     }
   }
 
+  function startMatch(msg: MatchStartMessage): void {
+    enterMatch(new LockstepSession(msg.seed, msg.playerIndex, msg.inputDelay), msg.players);
+  }
+
+  function resumeMatch(msg: MatchResumeMessage): void {
+    enterMatch(
+      LockstepSession.resume(msg.seed, msg.playerIndex, msg.inputDelay, msg.frames),
+      msg.players,
+    );
+    showBanner('reconnected — catching up…');
+  }
+
   // --- input ---------------------------------------------------------------------
   globalThis.addEventListener('keydown', (e: KeyboardEvent) => {
-    if (e.code === 'KeyR' && session?.outcome && phase !== 'lobby') {
+    if (e.code === 'KeyR' && session?.outcome && (phase === 'playing' || phase === 'ended')) {
       sendReady();
       return;
     }
-    if (e.code === 'Escape' && phase === 'playing') {
-      net.send({ type: 'concede' });
+    if (e.code === 'Escape' && phase === 'playing' && !session?.outcome) {
+      net?.send({ type: 'concede' });
       return;
     }
     if (phase === 'playing' && input.handles(e.code)) {
@@ -309,8 +417,14 @@ export function bootNetplay(app: HTMLElement, hudEl: HTMLElement | null, relayUr
 
       if (!s.outcome) {
         const due = clock.sample(nowMs);
+        // Catch-up: after a resume the remote buffer runs deep; burn it down
+        // in large chunks so reconnection takes moments, not match-time.
+        const backlog = s.bufferedRemoteTicks;
+        const budget = backlog > 25 ? Math.min(backlog, CATCH_UP_STEPS_PER_FRAME) : due;
+        const catchingUp = backlog > 25;
+
         const stepped = s.advance(
-          due,
+          budget,
           () => input.actionState().state,
           () => {
             boards![0].interp.push(deriveViewModel(localSim));
@@ -318,19 +432,24 @@ export function bootNetplay(app: HTMLElement, hudEl: HTMLElement | null, relayUr
           },
         );
 
-        // Ship this frame's input batches and any due digest snapshots.
         for (const batch of s.takeOutgoing()) {
-          net.send({ type: 'inputs', startTick: batch.startTick, frames: batch.frames });
+          net?.send({ type: 'inputs', startTick: batch.startTick, frames: batch.frames });
         }
         for (const d of s.takeDigests()) {
-          net.send({ type: 'digest', tick: d.tick, digests: d.digests });
+          net?.send({ type: 'digest', tick: d.tick, digests: d.digests });
         }
 
-        // Waiting indicator when lockstep is starved of opponent input.
-        if (stepped === 0 && due > 0 && s.waitingForRemote) {
+        if (catchingUp) {
+          showBanner('catching up…');
+          waitingSince = null;
+        } else if (stepped === 0 && due > 0 && s.waitingForRemote && net) {
           waitingSince ??= nowMs;
           if (nowMs - waitingSince > 250) showBanner(`waiting for ${names[1 - localIndex]}…`);
-        } else if (waitingSince !== null) {
+        } else if (
+          waitingSince !== null ||
+          banner.textContent === 'catching up…' ||
+          banner.textContent === 'reconnected — catching up…'
+        ) {
           waitingSince = null;
           showBanner('');
         }
@@ -344,6 +463,10 @@ export function bootNetplay(app: HTMLElement, hudEl: HTMLElement | null, relayUr
                 ? 'You win! R for rematch.'
                 : 'You lose. R for rematch.',
           );
+          if (!resultSent) {
+            resultSent = true;
+            net?.send({ type: 'result', winner });
+          }
           readyBtn.hidden = false;
           readyBtn.disabled = false;
           readyBtn.textContent = 'Rematch';
@@ -373,4 +496,7 @@ export function bootNetplay(app: HTMLElement, hudEl: HTMLElement | null, relayUr
     globalThis.requestAnimationFrame(frame);
   };
   globalThis.requestAnimationFrame(frame);
+
+  // Kick everything off.
+  connect();
 }
