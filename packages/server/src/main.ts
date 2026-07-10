@@ -8,7 +8,18 @@
 import { SqliteStore } from './sqliteStore.js';
 import { DEFAULT_PORT, startRelayWsServer } from './wsServer.js';
 
-const port = process.env['PORT'] ? Number(process.env['PORT']) : DEFAULT_PORT;
+/** Parse PORT strictly: an integer in [0, 65535] (0 = ephemeral), else exit. */
+function parsePort(raw: string | undefined): number {
+  if (raw === undefined || raw === '') return DEFAULT_PORT;
+  const port = Number(raw);
+  if (!Number.isInteger(port) || port < 0 || port > 65535) {
+    console.error(`invalid PORT ${JSON.stringify(raw)}: expected an integer 0..65535`);
+    process.exit(1);
+  }
+  return port;
+}
+
+const port = parsePort(process.env['PORT']);
 const host = process.env['HOST'];
 const dbPath = process.env['DB'] ?? './crack-attack.db';
 

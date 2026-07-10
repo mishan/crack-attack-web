@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { CC_DOWN, CC_LEFT, CC_RIGHT, CC_SWAP, CC_UP, Rng } from '@crack-attack/core';
+import { CC_ADVANCE, CC_DOWN, CC_LEFT, CC_RIGHT, CC_SWAP, CC_UP, Rng } from '@crack-attack/core';
 import { DIGEST_PERIOD, MAX_INPUT_FRAMES_PER_MESSAGE } from '@crack-attack/protocol';
 import { LockstepSession } from './lockstep.js';
 
@@ -235,7 +235,7 @@ describe('LockstepSession', () => {
     const b = new LockstepSession(SEED, 1, DELAY);
     // Player 0 raises constantly; player 1 idles. Identical boards -> player 0
     // tops out first on both machines.
-    const inA = (): number => 32; // CC_ADVANCE
+    const inA = (): number => CC_ADVANCE;
     const inB = (): number => 0;
     for (let i = 0; i < 5000 && !a.outcome; i++) {
       exchange(a, b);

@@ -292,6 +292,13 @@ export function bootNetplay(app: HTMLElement, hudEl: HTMLElement | null, relayUr
   function onMatchEnd(reason: string, winner: number | null): void {
     if (phase !== 'playing' && phase !== 'ended') return;
     phase = 'ended';
+    // The relay has ended the match (concede/disconnect/desync may arrive
+    // before the sims decide anything locally): freeze the session so the
+    // loop stops stepping/sending and KeyR-rematch (gated on outcome) works.
+    if (session && !session.outcome) {
+      session.outcome = { winner, tick: session.currentTick };
+      resultSent = true; // nothing to report; the relay already settled it
+    }
     if (reason === 'concession' || reason === 'disconnect') {
       showBanner(
         winner === localIndex

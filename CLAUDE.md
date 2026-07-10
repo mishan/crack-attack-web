@@ -270,7 +270,25 @@ just use `pnpm` directly.
       room overlay, waiting indicator, and result banner (R = ready/rematch, Esc =
       concede). `?net` on the client URL enters netplay (`?relay=` overrides the
       relay URL; `pnpm --filter @crack-attack/server start` runs the relay).
-- [ ] Phase 3 AI, Phase 5 lobby (rooms → named lobby, records, reconnect),
-      Phase 4 stretch: binary codec if measurements demand it
+- [x] Phase 5 — **lobby landed** (protocol v2): session-token identity
+      (server-minted, localStorage on the client; hello with a token reclaims the
+      record and any in-progress match), live `room_list` pushes with per-player
+      W-L records, a full lobby screen (create / click-to-join / code fallback),
+      and **reconnect grace**: a seat survives its connection — the relay keeps
+      both players' full input ledgers, a mid-match drop starts a grace timer
+      (`peer_dropped`, default 30 s per `CO_SERVER_TIME_OUT`), and a rejoining
+      token gets `match_resume` with both histories; `LockstepSession.resume`
+      replays them deterministically (no live input sampling, digests suppressed
+      at/below the frontier — the server also floors replayed digests) and the
+      client burns down the backlog in 500-tick chunks. Game outcomes are
+      client-reported (`result`) and cross-checked; agreement records W-L through
+      the abstract async `LobbyStore` (`store.ts` memory impl + `sqliteStore.ts`
+      better-sqlite3; Redis-swappable — the relay only sees the interface), as do
+      concessions and expired grace. `main.ts` wires SQLite via the `DB` env var
+      (default `./crack-attack.db`). e2e: mid-match drop → rejoin by token →
+      resume → identical deterministic outcome, zero desyncs. Deferred: best-of-3
+      (`GC_GAMES_PER_MATCH`), richer rankings.
+- [ ] Phase 3 AI, Phase 6 stretch (X-mode, replays, spectators, WebRTC, binary
+      codec if measurements demand it)
 
 See `BROWSER_PORT_PLAN.md` for the full phase breakdown and suggested order of work.

@@ -58,8 +58,17 @@ export function startRelayWsServer(options: RelayWsServerOptions = {}): Promise<
     relay.connect(conn);
     // Chain async handling so a connection's messages process in order.
     let pipeline = Promise.resolve();
-    ws.on('message', (data) => {
-      const text = typeof data === 'string' ? data : data.toString();
+    ws.on('message', (data, isBinary) => {
+      // The protocol is text-only JSON; drop binary frames outright rather
+      // than mis-decoding them.
+      if (isBinary) return;
+      // ws RawData is Buffer | ArrayBuffer | Buffer[]; a naive toString() on
+      // an ArrayBuffer yields "[object ArrayBuffer]". Normalize to UTF-8.
+      const text = Array.isArray(data)
+        ? Buffer.concat(data).toString('utf8')
+        : Buffer.isBuffer(data)
+          ? data.toString('utf8')
+          : Buffer.from(data).toString('utf8');
       pipeline = pipeline.then(() => relay.message(conn, text)).catch(() => undefined);
     });
     ws.on('close', () => {
