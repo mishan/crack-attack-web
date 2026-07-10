@@ -40,7 +40,10 @@ function boot(): void {
 
   const params = new URLSearchParams(globalThis.location.search);
   if (params.has('net')) {
-    const relayUrl = params.get('relay') ?? `ws://${globalThis.location.hostname}:8080`;
+    // Match the page's security context: an https page can only open wss
+    // sockets (mixed-content rules), so default the scheme accordingly.
+    const scheme = globalThis.location.protocol === 'https:' ? 'wss' : 'ws';
+    const relayUrl = params.get('relay') ?? `${scheme}://${globalThis.location.hostname}:8080`;
     const help = document.getElementById('help');
     if (help) {
       help.textContent = '←→↑↓ move · Z / Space swap · X raise · R ready/rematch · Esc concede';

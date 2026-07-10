@@ -124,8 +124,8 @@ describe('relay over WebSocket', () => {
     bob.close();
   });
 
-  it('forfeits to the survivor when a socket drops mid-match', async () => {
-    server = await startRelayWsServer({ port: 0 });
+  it('holds a grace window on a socket drop, then forfeits to the survivor', async () => {
+    server = await startRelayWsServer({ port: 0, graceMs: 150 });
     const alice = new TestClient(server.port);
     const bob = new TestClient(server.port);
     await alice.open();
@@ -143,9 +143,53 @@ describe('relay over WebSocket', () => {
     await bob.next('match_start');
 
     alice.close();
+    const dropped = await bob.next('peer_dropped');
+    expect(dropped).toEqual({ type: 'peer_dropped', name: 'alice', graceMs: 150 });
     const end = await bob.next('match_end');
     expect(end).toEqual({ type: 'match_end', reason: 'disconnect', winner: 1 });
 
+    bob.close();
+  });
+
+  it('resumes a match when the dropped player reconnects with their token', async () => {
+    server = await startRelayWsServer({ port: 0, graceMs: 5000 });
+    const alice = new TestClient(server.port);
+    const bob = new TestClient(server.port);
+    await alice.open();
+    await bob.open();
+    alice.send({ type: 'hello', protocolVersion: PROTOCOL_VERSION, name: 'alice' });
+    bob.send({ type: 'hello', protocolVersion: PROTOCOL_VERSION, name: 'bob' });
+    const tokenA = (await alice.next('welcome')).token;
+    await bob.next('welcome');
+    alice.send({ type: 'create_room' });
+    const { code } = await alice.next('room_created');
+    bob.send({ type: 'join_room', code });
+    await bob.next('room_joined');
+    alice.send({ type: 'ready' });
+    bob.send({ type: 'ready' });
+    await alice.next('match_start');
+    await bob.next('match_start');
+    alice.send({ type: 'inputs', startTick: 0, frames: [0, 16] });
+    await bob.next('peer_inputs');
+
+    alice.close();
+    await bob.next('peer_dropped');
+
+    const alice2 = new TestClient(server.port);
+    await alice2.open();
+    alice2.send({ type: 'hello', protocolVersion: PROTOCOL_VERSION, name: 'alice', token: tokenA });
+    await alice2.next('welcome');
+    const resume = await alice2.next('match_resume');
+    expect(resume.playerIndex).toBe(0);
+    expect(resume.frames[0]).toEqual([0, 16]);
+    await bob.next('peer_rejoined');
+
+    // Live traffic flows again.
+    alice2.send({ type: 'inputs', startTick: 2, frames: [4] });
+    const relayed = await bob.next('peer_inputs');
+    expect(relayed.startTick).toBe(2);
+
+    alice2.close();
     bob.close();
   });
 });

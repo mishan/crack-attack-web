@@ -29,10 +29,17 @@ export class NetClient {
 
   /** Open the socket; resolves on connect, rejects on failure to connect. */
   connect(url: string): Promise<void> {
+    // A NetClient may be reused across reconnect attempts: each connect starts
+    // a fresh close-notification cycle.
+    this.closed = false;
     return new Promise((resolve, reject) => {
       const ws = new WebSocket(url);
       this.ws = ws;
-      ws.onopen = () => resolve();
+      let opened = false;
+      ws.onopen = () => {
+        opened = true;
+        resolve();
+      };
       ws.onerror = () => {
         if (ws.readyState !== WebSocket.OPEN) reject(new Error(`cannot reach ${url}`));
       };
@@ -48,7 +55,12 @@ export class NetClient {
         }
         this.handlers.onMessage(msg);
       };
-      ws.onclose = () => this.notifyClose('connection closed');
+      ws.onclose = () => {
+        // A close before open must settle the connect() promise too, or the
+        // caller would hang in "connecting…" forever.
+        if (!opened) reject(new Error(`connection to ${url} closed before opening`));
+        this.notifyClose('connection closed');
+      };
     });
   }
 

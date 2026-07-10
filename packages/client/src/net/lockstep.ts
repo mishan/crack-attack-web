@@ -58,13 +58,42 @@ export class LockstepSession {
   private outboxStart = 0;
   /** Digest snapshots awaiting submission. */
   private readonly digestQueue: DigestSnapshot[] = [];
+  /**
+   * Digests at or below this tick are not queued. Set on resume: the replay
+   * re-crosses checkpoints whose digests the server already compared and
+   * discarded, and resubmitting them would leak into its pending map.
+   */
+  private digestFloor = -1;
 
   private readonly scratchActions = new ActionState(0);
 
   /** Set once a sim has lost; the session refuses to step further. */
   outcome: Outcome | null = null;
 
-  constructor(seed: number, localIndex: number, inputDelay: number) {
+  /**
+   * Rebuild a session from the server's `match_resume` ledgers: both players'
+   * full input histories from tick 0. The caller then drives {@link advance}
+   * hard (catch-up) — the sims replay deterministically to the frontier and
+   * the session continues live from there. The server's ledger is
+   * authoritative for the local stream too: anything scheduled before the
+   * drop but never sent is gone.
+   */
+  static resume(
+    seed: number,
+    localIndex: number,
+    inputDelay: number,
+    histories: [number[], number[]],
+  ): LockstepSession {
+    const s = new LockstepSession(seed, localIndex, inputDelay, histories);
+    return s;
+  }
+
+  constructor(
+    seed: number,
+    localIndex: number,
+    inputDelay: number,
+    resumeHistories?: [number[], number[]],
+  ) {
     this.localIndex = localIndex;
     this.inputDelay = inputDelay;
     this.sims = [new GameSim(seed), new GameSim(seed)];
@@ -84,6 +113,17 @@ export class LockstepSession {
       };
     }
 
+    if (resumeHistories) {
+      // Resume: adopt the server ledgers wholesale. Everything in them was
+      // already sent, so the outbox starts empty at the ledger frontier, and
+      // digests are suppressed up to the steppable frontier.
+      this.frames[0] = [...resumeHistories[0]];
+      this.frames[1] = [...resumeHistories[1]];
+      this.outboxStart = this.frames[localIndex]!.length;
+      this.digestFloor = Math.min(this.frames[0].length, this.frames[1].length);
+      return;
+    }
+
     // Pre-fill the local stream's first `inputDelay` ticks with neutral input
     // (both clients do this, so the streams agree without a wire exchange) and
     // queue them for sending so the relay's contiguity ledger starts at 0.
@@ -91,6 +131,11 @@ export class LockstepSession {
       this.frames[localIndex]!.push(0);
       this.outbox.push(0);
     }
+  }
+
+  /** How many remote ticks are buffered beyond the current tick (catch-up depth). */
+  get bufferedRemoteTicks(): number {
+    return Math.max(0, this.frames[1 - this.localIndex]!.length - this.ticks);
   }
 
   /** The tick both sims are at. */
@@ -119,12 +164,13 @@ export class LockstepSession {
   }
 
   /**
-   * Try to advance up to `maxSteps` ticks. `sampleLocal` is called once per
-   * tick actually stepped, returning the local `CC_*` bitmask to schedule
-   * `inputDelay` ticks ahead — input is only sampled for ticks that run, so a
-   * stall doesn't eat presses into the future. `onTick`, when given, fires
-   * after each stepped tick (the render layer captures view models there).
-   * Returns the ticks stepped.
+   * Try to advance up to `maxSteps` ticks. `sampleLocal` returns the local
+   * `CC_*` bitmask and is called as ticks are stepped (once per tick in steady
+   * state; not at all while replaying resumed history, since those inputs are
+   * already fixed) — input is only sampled for ticks that run, so a stall
+   * doesn't eat presses into the future. `onTick`, when given, fires after
+   * each stepped tick (the render layer captures view models there). Returns
+   * the ticks stepped.
    */
   advance(maxSteps: number, sampleLocal: () => number, onTick?: (tick: number) => void): number {
     let stepped = 0;
@@ -135,12 +181,15 @@ export class LockstepSession {
       const t = this.ticks;
       if (remote.length <= t) break; // waiting for the opponent
 
-      // Schedule local input for t + inputDelay. The stream invariant is
-      // local.length === t + inputDelay, so with inputDelay = 0 the frame
-      // pushed here is the one consumed below.
-      const bits = sampleLocal() & ACTION_MASK;
-      local.push(bits);
-      this.outbox.push(bits);
+      // Schedule local input so local[t] exists. Steady state pushes exactly
+      // one frame at t + inputDelay; during a resume replay the slots already
+      // exist (zero pushes); after a truncated ledger (frames scheduled but
+      // never sent before the drop) it fills the shortfall with live input.
+      while (local.length < t + this.inputDelay + 1) {
+        const bits = sampleLocal() & ACTION_MASK;
+        local.push(bits);
+        this.outbox.push(bits);
+      }
 
       for (let i = 0; i < 2; i++) {
         this.scratchActions.state = this.frames[i]![t]!;
@@ -149,7 +198,7 @@ export class LockstepSession {
       this.ticks++;
       stepped++;
 
-      if (this.ticks % DIGEST_PERIOD === 0) {
+      if (this.ticks % DIGEST_PERIOD === 0 && this.ticks > this.digestFloor) {
         this.digestQueue.push({
           tick: this.ticks,
           digests: [this.sims[0]!.digest(), this.sims[1]!.digest()],

@@ -24,10 +24,13 @@ import type {
 import {
   ACTION_MASK,
   MAX_INPUT_FRAMES_PER_MESSAGE,
+  MAX_MATCH_FRAMES,
   MAX_PLAYER_NAME_LENGTH,
   ROOM_CODE_ALPHABET,
   ROOM_CODE_LENGTH,
+  SESSION_TOKEN_LENGTH,
 } from './messages.js';
+import type { PlayerRecord, RoomSummary } from './messages.js';
 
 /** Thrown by the decode functions on any malformed or unknown message. */
 export class ProtocolError extends Error {
@@ -137,6 +140,63 @@ function isName(n: unknown): n is string {
   return typeof n === 'string' && n.length >= 1 && n.length <= MAX_PLAYER_NAME_LENGTH;
 }
 
+/** Whether `token` is a well-formed session token (shape check only). */
+export function isSessionToken(token: string): boolean {
+  if (token.length !== SESSION_TOKEN_LENGTH) return false;
+  for (const ch of token) if (!'0123456789abcdef'.includes(ch)) return false;
+  return true;
+}
+
+function sessionToken(m: Record<string, unknown>, field: string): string {
+  const v = str(m, field);
+  if (!isSessionToken(v)) throw new ProtocolError(`${field} is not a valid session token`);
+  return v;
+}
+
+function playerRecord(m: Record<string, unknown>, field: string): PlayerRecord {
+  const v = m[field];
+  if (typeof v !== 'object' || v === null || Array.isArray(v))
+    throw new ProtocolError(`${field} must be a record object`);
+  const r = v as Record<string, unknown>;
+  return { wins: uint32(r, 'wins'), losses: uint32(r, 'losses') };
+}
+
+/** A full-match input history: like inputFrames but may be empty and far longer. */
+function matchFrames(v: unknown, field: string): number[] {
+  if (!Array.isArray(v) || v.length > MAX_MATCH_FRAMES)
+    throw new ProtocolError(`${field} must be an array of 0..${MAX_MATCH_FRAMES}`);
+  for (const f of v)
+    if (typeof f !== 'number' || !Number.isInteger(f) || f < 0 || f > ACTION_MASK)
+      throw new ProtocolError(`${field} entries must be CC_* action bitmasks`);
+  return v as number[];
+}
+
+function roomSummaries(m: Record<string, unknown>, field: string): RoomSummary[] {
+  const v = m[field];
+  if (!Array.isArray(v)) throw new ProtocolError(`${field} must be an array`);
+  return v.map((entry, i) => {
+    if (typeof entry !== 'object' || entry === null || Array.isArray(entry))
+      throw new ProtocolError(`${field}[${i}] must be a room object`);
+    const r = entry as Record<string, unknown>;
+    const state = str(r, 'state');
+    if (state !== 'waiting' && state !== 'playing')
+      throw new ProtocolError(`${field}[${i}].state must be waiting|playing`);
+    const players = r['players'];
+    if (!Array.isArray(players) || players.length > 2)
+      throw new ProtocolError(`${field}[${i}].players must be an array of 0..2`);
+    return {
+      code: roomCode(r, 'code'),
+      state,
+      players: players.map((p, j) => {
+        if (typeof p !== 'object' || p === null || Array.isArray(p))
+          throw new ProtocolError(`${field}[${i}].players[${j}] must be an object`);
+        const pr = p as Record<string, unknown>;
+        return { name: playerName(pr, 'name'), record: playerRecord(pr, 'record') };
+      }),
+    };
+  });
+}
+
 function namePair(m: Record<string, unknown>, field: string): [string, string] {
   const v = m[field];
   if (!Array.isArray(v) || v.length !== 2 || !v.every(isName))
@@ -154,6 +214,7 @@ const ERROR_CODES: ReadonlySet<string> = new Set([
 ] satisfies ErrorCode[]);
 
 const MATCH_END_REASONS: ReadonlySet<string> = new Set([
+  'result',
   'concession',
   'disconnect',
   'desync',
@@ -168,17 +229,22 @@ const CLIENT_TYPES: ReadonlySet<string> = new Set([
   'ready',
   'inputs',
   'digest',
+  'result',
   'concede',
   'leave_room',
 ]);
 
 const SERVER_TYPES: ReadonlySet<string> = new Set([
   'welcome',
+  'room_list',
   'room_created',
   'room_joined',
   'peer_joined',
   'peer_left',
+  'peer_dropped',
+  'peer_rejoined',
   'match_start',
+  'match_resume',
   'peer_inputs',
   'desync',
   'match_end',
@@ -190,8 +256,14 @@ function decodeAny(m: Record<string, unknown>): Message {
   if (typeof type !== 'string') throw new ProtocolError('missing message type');
   switch (type) {
     // client → server
-    case 'hello':
-      return { type, protocolVersion: uint32(m, 'protocolVersion'), name: playerName(m, 'name') };
+    case 'hello': {
+      const base = {
+        type,
+        protocolVersion: uint32(m, 'protocolVersion'),
+        name: playerName(m, 'name'),
+      } as const;
+      return m['token'] === undefined ? base : { ...base, token: sessionToken(m, 'token') };
+    }
     case 'create_room':
     case 'ready':
     case 'concede':
@@ -203,9 +275,40 @@ function decodeAny(m: Record<string, unknown>): Message {
       return { type, startTick: uint32(m, 'startTick'), frames: inputFrames(m, 'frames') };
     case 'digest':
       return { type, tick: uint32(m, 'tick'), digests: digestPair(m, 'digests') };
+    case 'result': {
+      const w = m['winner'];
+      if (w !== null && (typeof w !== 'number' || !Number.isInteger(w) || w < 0 || w > 1))
+        throw new ProtocolError('winner must be a player index or null');
+      return { type, winner: w };
+    }
     // server → client
     case 'welcome':
-      return { type, protocolVersion: uint32(m, 'protocolVersion') };
+      return {
+        type,
+        protocolVersion: uint32(m, 'protocolVersion'),
+        token: sessionToken(m, 'token'),
+        name: playerName(m, 'name'),
+        record: playerRecord(m, 'record'),
+      };
+    case 'room_list':
+      return { type, rooms: roomSummaries(m, 'rooms') };
+    case 'peer_dropped':
+      return { type, name: playerName(m, 'name'), graceMs: uint32(m, 'graceMs') };
+    case 'peer_rejoined':
+      return { type, name: playerName(m, 'name') };
+    case 'match_resume': {
+      const frames = m['frames'];
+      if (!Array.isArray(frames) || frames.length !== 2)
+        throw new ProtocolError('frames must be a pair of histories');
+      return {
+        type,
+        seed: uint32(m, 'seed'),
+        playerIndex: playerIndex(m, 'playerIndex'),
+        inputDelay: uint32(m, 'inputDelay'),
+        players: namePair(m, 'players'),
+        frames: [matchFrames(frames[0], 'frames[0]'), matchFrames(frames[1], 'frames[1]')],
+      };
+    }
     case 'room_created':
       return { type, code: roomCode(m, 'code') };
     case 'room_joined': {

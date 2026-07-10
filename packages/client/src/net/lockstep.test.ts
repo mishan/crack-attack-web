@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { CC_DOWN, CC_LEFT, CC_RIGHT, CC_SWAP, CC_UP, Rng } from '@crack-attack/core';
+import { CC_ADVANCE, CC_DOWN, CC_LEFT, CC_RIGHT, CC_SWAP, CC_UP, Rng } from '@crack-attack/core';
 import { DIGEST_PERIOD, MAX_INPUT_FRAMES_PER_MESSAGE } from '@crack-attack/protocol';
 import { LockstepSession } from './lockstep.js';
 
@@ -130,13 +130,112 @@ describe('LockstepSession', () => {
     expect(a.takeDigests()).toEqual([]); // drained
   });
 
+  it('resumes from server ledgers to the same stream as an unbroken session', () => {
+    // Run an unbroken pair for a while, recording everything each side sends
+    // (= the relay's ledgers), then rebuild A from the ledgers and check the
+    // resumed session reproduces the unbroken one exactly.
+    const a = new LockstepSession(SEED, 0, DELAY);
+    const b = new LockstepSession(SEED, 1, DELAY);
+    const inA = scripted(11);
+    const inB = scripted(22);
+    const ledgers: [number[], number[]] = [[], []];
+    const pump = (): void => {
+      for (const batch of a.takeOutgoing()) {
+        ledgers[0].push(...batch.frames);
+        b.addRemoteFrames(batch.startTick, batch.frames);
+      }
+      for (const batch of b.takeOutgoing()) {
+        ledgers[1].push(...batch.frames);
+        a.addRemoteFrames(batch.startTick, batch.frames);
+      }
+    };
+    for (let i = 0; i < 100; i++) {
+      pump();
+      a.advance(3, inA);
+      b.advance(3, inB);
+    }
+    pump();
+    a.takeDigests();
+    b.takeDigests();
+
+    // A "drops": rebuild from the ledgers. Replay consumes no live input
+    // until the ledger's own stream is exhausted.
+    const a2 = LockstepSession.resume(SEED, 0, DELAY, [[...ledgers[0]], [...ledgers[1]]]);
+    let sampled = 0;
+    const frontier = Math.min(ledgers[0].length, ledgers[1].length);
+    a2.advance(100000, () => {
+      sampled++;
+      return 0;
+    });
+    expect(a2.currentTick).toBe(frontier);
+    // Live sampling only for ticks whose scheduled slot is past the ledger:
+    // t >= len - DELAY, i.e. the last DELAY ticks the peer got ahead of us.
+    expect(sampled).toBe(Math.max(0, frontier - ledgers[0].length + DELAY));
+    // Replay digests are suppressed (the server already compared them).
+    expect(a2.takeDigests()).toEqual([]);
+
+    // Independent reference: a fresh unbroken pair driven by the same
+    // deterministic scripts reaches the frontier with identical sims.
+    const c = new LockstepSession(SEED, 0, DELAY);
+    const d = new LockstepSession(SEED, 1, DELAY);
+    const inC = scripted(11);
+    const inD = scripted(22);
+    while (c.currentTick < frontier || d.currentTick < frontier) {
+      for (const batch of c.takeOutgoing()) d.addRemoteFrames(batch.startTick, batch.frames);
+      for (const batch of d.takeOutgoing()) c.addRemoteFrames(batch.startTick, batch.frames);
+      c.advance(Math.min(1, frontier - c.currentTick), inC);
+      d.advance(Math.min(1, frontier - d.currentTick), inD);
+    }
+    expect(c.currentTick).toBe(frontier);
+    expect([a2.sims[0]!.digest(), a2.sims[1]!.digest()]).toEqual([
+      c.sims[0]!.digest(),
+      c.sims[1]!.digest(),
+    ]);
+
+    // Continue live: a2 and b exchange as before and stay in lockstep.
+    const pump2 = (): void => {
+      for (const batch of a2.takeOutgoing()) b.addRemoteFrames(batch.startTick, batch.frames);
+      for (const batch of b.takeOutgoing()) a2.addRemoteFrames(batch.startTick, batch.frames);
+    };
+    // b is ahead of a2's outbox history? No: b already has all of ledgers[0];
+    // a2's outboxStart continues at ledgers[0].length, exactly b's frontier.
+    for (let i = 0; i < 200; i++) {
+      pump2();
+      a2.advance(3, inA);
+      b.advance(3, inB);
+    }
+    pump2();
+    b.advance(1000, inB);
+    const common = Math.min(a2.currentTick, b.currentTick);
+    expect(common).toBeGreaterThan(frontier + 100);
+    const dA = new Map(a2.takeDigests().map((d) => [d.tick, d.digests]));
+    const dB = new Map(b.takeDigests().map((d) => [d.tick, d.digests]));
+    let compared = 0;
+    for (const [t, va] of dA) {
+      const vb = dB.get(t);
+      if (!vb) continue;
+      expect(va).toEqual(vb);
+      compared++;
+    }
+    expect(compared).toBeGreaterThan(3);
+  });
+
+  it('reports catch-up depth via bufferedRemoteTicks', () => {
+    const a = new LockstepSession(SEED, 0, 0);
+    expect(a.bufferedRemoteTicks).toBe(0);
+    a.addRemoteFrames(0, Array<number>(100).fill(0));
+    expect(a.bufferedRemoteTicks).toBe(100);
+    a.advance(40, () => 0);
+    expect(a.bufferedRemoteTicks).toBe(60);
+  });
+
   it('resolves the outcome deterministically on both machines', () => {
     // Drive both sessions with manual-advance held down so a loss arrives fast.
     const a = new LockstepSession(SEED, 0, DELAY);
     const b = new LockstepSession(SEED, 1, DELAY);
     // Player 0 raises constantly; player 1 idles. Identical boards -> player 0
     // tops out first on both machines.
-    const inA = (): number => 32; // CC_ADVANCE
+    const inA = (): number => CC_ADVANCE;
     const inB = (): number => 0;
     for (let i = 0; i < 5000 && !a.outcome; i++) {
       exchange(a, b);

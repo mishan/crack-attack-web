@@ -7,4 +7,6 @@
  */
 
 export * from './relay.js';
+export * from './store.js';
+export * from './sqliteStore.js';
 export * from './wsServer.js';

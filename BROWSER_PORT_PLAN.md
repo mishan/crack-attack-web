@@ -80,7 +80,9 @@ Milestone: two browsers playing head-to-head through the relay.
 
 ## Phase 5 — Lobby
 
-Node/TS server (`packages/server`), same process as the relay initially: named players (lightweight auth — start with display names + session tokens), room list, create/join/ready flow, seed generation, match lifecycle (best-of-3 per `GC_GAMES_PER_MATCH`), reconnect grace using the lockstep buffer, and basic rankings/W-L records in SQLite. Spectating falls out almost free later: a spectator is a third sim pair fed both players' input streams.
+Node/TS server (`packages/server`), same process as the relay. Landed (protocol v2): named players with server-minted session tokens (lightweight auth — the token is the identity key, held in the client's localStorage), live room-list pushes with per-player W-L records, create/join/ready flow, and reconnect grace built on the lockstep ledgers — a seat survives its connection, the server holds both players' full input histories, and a rejoining token gets `match_resume` to rebuild its session from tick 0 and fast-forward. Game outcomes are client-reported (`result`) and cross-checked (both clients compute them deterministically; disagreement is treated as a desync); agreed decisive results, concessions, and expired grace record W-L through an abstract async store (`LobbyStore`: SQLite now via better-sqlite3, Redis-swappable later).
+
+Deferred from this phase: best-of-3 match lifecycle per `GC_GAMES_PER_MATCH` (rematch-by-re-readying stands in), and richer rankings (only W-L records so far). Spectating falls out almost free later: a spectator is a third sim pair fed both players' input streams — the `match_resume` ledger mechanism is exactly the late-join primitive it needs.
 
 ## Phase 6 — Stretch
 
