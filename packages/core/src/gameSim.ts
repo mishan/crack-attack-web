@@ -37,6 +37,7 @@ import { GarbageGenerator } from './garbageGenerator.js';
 import { GR_BLOCK, GR_EMPTY, Grid } from './grid.js';
 import { Rng } from './rng.js';
 import type { SignEvent, SignKind, SignSink } from './signs.js';
+import type { SoundEvent, SoundId } from './sound.js';
 import { Swapper } from './swapper.js';
 import { GC_PLAY_HEIGHT, GC_PLAY_WIDTH } from './constants.js';
 
@@ -53,6 +54,9 @@ const IMPACT_BUFFER_CAP = 64;
 /** Caps on undrained cosmetic sparkle events (same rationale as signs). */
 const SPARK_BUFFER_CAP = 128;
 const MOTE_BUFFER_CAP = 64;
+
+/** Cap on undrained cosmetic sound cues (same rationale as signs). */
+const SOUND_BUFFER_CAP = 128;
 
 /** A dying block popped: spawn its death sparks (cosmetic). */
 export interface SparkEvent {
@@ -126,6 +130,8 @@ export class GameSim implements CreepSimContext, SignSink {
   /** Cosmetic sparkle events emitted since the last drains. */
   private readonly sparkBuffer: SparkEvent[] = [];
   private readonly moteBuffer: MoteEvent[] = [];
+  /** Cosmetic sound cues emitted since the last {@link drainSoundEvents}. */
+  private readonly soundBuffer: SoundEvent[] = [];
 
   constructor(seed: number) {
     this.seed = seed >>> 0;
@@ -157,6 +163,7 @@ export class GameSim implements CreepSimContext, SignSink {
     this.impactBuffer.length = 0;
     this.sparkBuffer.length = 0;
     this.moteBuffer.length = 0;
+    this.soundBuffer.length = 0;
 
     // Reseed both RNGs so a restart is fully deterministic and does not depend
     // on draws made during the previous game.
@@ -305,6 +312,21 @@ export class GameSim implements CreepSimContext, SignSink {
   drainMoteEvents(): MoteEvent[] {
     if (this.moteBuffer.length === 0) return [];
     return this.moteBuffer.splice(0, this.moteBuffer.length);
+  }
+
+  /**
+   * {@link BlockSimContext.notifyCosmeticSound}: buffer a gameplay sound cue for
+   * the display layer (WebAudio). Cosmetic: draws no RNG, never enters the digest.
+   */
+  notifyCosmeticSound(sound: SoundId, volume: number): void {
+    if (this.soundBuffer.length >= SOUND_BUFFER_CAP) this.soundBuffer.shift();
+    this.soundBuffer.push({ sound, volume });
+  }
+
+  /** Remove and return sound cues since the last drain (see {@link drainSignEvents}). */
+  drainSoundEvents(): SoundEvent[] {
+    if (this.soundBuffer.length === 0) return [];
+    return this.soundBuffer.splice(0, this.soundBuffer.length);
   }
 
   /**

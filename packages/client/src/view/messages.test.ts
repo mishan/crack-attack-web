@@ -1,8 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import {
+  COUNTDOWN_BEEP_OFFSET,
+  COUNTDOWN_BEEP_VOLUMES,
   COUNTDOWN_GATE_TICKS,
   GO_DISPLAY_TICKS,
   MESSAGE_PULSE_PERIOD,
+  countdownBeepsFired,
   countdownMessage,
   messagePulseAlpha,
 } from './messages.js';
@@ -22,6 +25,34 @@ describe('countdownMessage', () => {
     expect(countdownMessage(COUNTDOWN_GATE_TICKS + GO_DISPLAY_TICKS - 1)).toBe('count_down_go');
     expect(countdownMessage(COUNTDOWN_GATE_TICKS + GO_DISPLAY_TICKS)).toBeNull();
     expect(countdownMessage(100000)).toBeNull();
+  });
+});
+
+describe('countdownBeepsFired', () => {
+  const PERIOD = COUNTDOWN_GATE_TICKS / 3; // 50
+
+  it('fires one beep per phase, 20 ticks in', () => {
+    expect(COUNTDOWN_BEEP_OFFSET).toBe(20);
+    expect(countdownBeepsFired(0)).toBe(0);
+    expect(countdownBeepsFired(COUNTDOWN_BEEP_OFFSET - 1)).toBe(0);
+    expect(countdownBeepsFired(COUNTDOWN_BEEP_OFFSET)).toBe(1); // "3"
+    expect(countdownBeepsFired(PERIOD + COUNTDOWN_BEEP_OFFSET)).toBe(2); // "2"
+    expect(countdownBeepsFired(2 * PERIOD + COUNTDOWN_BEEP_OFFSET)).toBe(3); // "1"
+    expect(countdownBeepsFired(3 * PERIOD + COUNTDOWN_BEEP_OFFSET)).toBe(4); // "GO"
+  });
+
+  it('caps at four beeps and is monotonic (handles jumps)', () => {
+    expect(countdownBeepsFired(100000)).toBe(COUNTDOWN_BEEP_VOLUMES.length);
+    let prev = 0;
+    for (let t = 0; t < 300; t++) {
+      const n = countdownBeepsFired(t);
+      expect(n).toBeGreaterThanOrEqual(prev);
+      prev = n;
+    }
+  });
+
+  it('volumes descend 10 → 1 across the phases', () => {
+    expect([...COUNTDOWN_BEEP_VOLUMES]).toEqual([10, 7, 4, 1]);
   });
 });
 

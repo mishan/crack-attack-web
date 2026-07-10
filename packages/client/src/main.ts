@@ -32,15 +32,17 @@ import { deriveViewModel } from './view/boardViewModel.js';
 import { COUNTDOWN_GATE_TICKS, countdownMessage } from './view/messages.js';
 import { Spring } from './view/spring.js';
 import { ViewInterpolator } from './view/viewInterpolator.js';
+import { AudioManager } from './audio/audioManager.js';
+import { mountAudioControls } from './audio/audioControls.js';
 
 const SEED = 0x1a2b3c4d;
 const MS_PER_TICK = 1000 / GC_STEPS_PER_SECOND;
 /** Cap sign advance per frame so a long stall (tab refocus) doesn't warp them away. */
 const MAX_SIGN_DT_TICKS = 10;
 
-const SOLO_HELP = '←→↑↓ move · Z / Space swap · X raise · R restart';
+const SOLO_HELP = '←→↑↓ move · Z / Space swap · X raise · R restart · M mute';
 const NET_HELP =
-  '←→↑↓ move · Z / Space swap · X raise · R ready/rematch · Esc concede/stop watching';
+  '←→↑↓ move · Z / Space swap · X raise · R ready/rematch · Esc concede/stop watching · M mute';
 
 /** A running mode (solo board or netplay shell); dispose to switch away. */
 interface ModeHandle {
@@ -63,6 +65,13 @@ function resolveRelayUrl(params: URLSearchParams): string {
   return `${scheme}://${globalThis.location.hostname}:8080`;
 }
 
+/** Whether an event target is a form control or editable element (keys should pass through). */
+function isTypingTarget(target: EventTarget | null): boolean {
+  if (!(target instanceof HTMLElement)) return false;
+  const tag = target.tagName;
+  return tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || target.isContentEditable;
+}
+
 function boot(): void {
   const app = document.getElementById('app');
   const hudEl = document.getElementById('hud');
@@ -72,6 +81,33 @@ function boot(): void {
   const relayUrl = resolveRelayUrl(params);
   const help = document.getElementById('help');
 
+  // One AudioManager spans both modes so music and settings survive a switch.
+  // Browsers gate audio behind a gesture: unlock on the first key/pointer, and
+  // pause music while the tab is hidden (C++ Music::pause/resume on GS_PAUSED).
+  const audio = new AudioManager();
+  const audioUi = mountAudioControls(audio);
+  audio.playPrelude(); // menu music; starts once the first gesture unlocks audio
+  // Unlock on user gestures. Listeners stay attached (not one-shot): unlock() is
+  // cheap and idempotent, and keeping them means a later autoplay/resume
+  // rejection (e.g. after tab backgrounding) can recover on the next gesture by
+  // resuming a suspended context and retrying any queued track.
+  const onGesture = (): void => audio.unlock();
+  globalThis.addEventListener('pointerdown', onGesture);
+  globalThis.addEventListener('keydown', onGesture);
+  globalThis.addEventListener('keydown', (e) => {
+    // Ignore auto-repeat (holding M is one toggle) and keys typed into a form
+    // control / editable element (sliders, future text inputs) so adjusting
+    // settings doesn't accidentally mute.
+    if (e.code === 'KeyM' && !e.repeat && !isTypingTarget(e.target)) {
+      audio.toggleMuted();
+      audioUi.syncMuted();
+    }
+  });
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) audio.pauseMusic();
+    else audio.resumeMusic();
+  });
+
   let current: ModeHandle | null = null;
   const enter = (mode: 'solo' | 'net'): void => {
     current?.dispose();
@@ -80,10 +116,10 @@ function boot(): void {
     if (help) help.textContent = mode === 'net' ? NET_HELP : SOLO_HELP;
     if (mode === 'net') {
       void import('./netplay.js').then((m) => {
-        current = m.bootNetplay(app, hudEl, relayUrl, () => enter('solo'));
+        current = m.bootNetplay(app, hudEl, relayUrl, () => enter('solo'), audio);
       });
     } else {
-      current = bootSolo(app, hudEl, () => enter('net'));
+      current = bootSolo(app, hudEl, () => enter('net'), audio);
     }
   };
 
@@ -94,6 +130,7 @@ function bootSolo(
   app: HTMLElement,
   hudEl: HTMLElement | null,
   onPlayOnline: () => void,
+  audio: AudioManager,
 ): ModeHandle {
   let sim = new GameSim(SEED);
   const clock = new FixedTimestep();
@@ -116,6 +153,15 @@ function bootSolo(
   let rafId = 0;
   /** Ticks since game start, counting the held countdown gate. */
   let metaTicks = 0;
+  // Audio lifecycle for this game: game music starts at GO, the game-over stinger
+  // on loss (each fired once). Mirrors the C++ CountDownManager/CelebrationManager
+  // music transitions.
+  let gameMusicOn = false;
+  let endMusicOn = false;
+  audio.resetCountdown();
+  // Fade the menu prelude over the first 3-2-1 (C++ gameStart → Music::fadeout),
+  // matching restart(); game music takes over at GO.
+  audio.fadeoutMusic(3000);
   levelLights.reset(initial.hud.topEffectiveRow);
 
   // Temporary lighting/material tuner — open with `?tune` in the URL.
@@ -150,6 +196,12 @@ function bootSolo(
     view.setShake(0);
     levelLights.reset(fresh.hud.topEffectiveRow);
     metaTicks = 0;
+    // Fade the ending stinger over the new countdown, then game music at GO
+    // (C++ gameStart → Music::fadeout(3000); GO → Music::play).
+    gameMusicOn = false;
+    endMusicOn = false;
+    audio.resetCountdown();
+    audio.fadeoutMusic(3000);
   };
 
   const onKeyDown = (e: KeyboardEvent): void => {
@@ -211,6 +263,20 @@ function bootSolo(
       }
       // Spawn reward signs for the combos that fired across this frame's ticks.
       for (const ev of sim.drainSignEvents()) signs.spawn(ev.gridX, ev.gridY, ev.kind, ev.level);
+    }
+
+    // Audio: countdown beeps track the meta timeline; game music starts at GO.
+    audio.updateCountdown(metaTicks);
+    if (!gameMusicOn && metaTicks >= COUNTDOWN_GATE_TICKS) {
+      gameMusicOn = true;
+      audio.playGame(); // C++ CountDownManager GO → Music::stop + Music::play
+    }
+    // Gameplay sound cues (landings, pops, deaths, shatters) for this frame.
+    audio.playCues(sim.drainSoundEvents());
+    // The game-over stinger on the tick a loss lands (C++ CelebrationManager).
+    if (sim.lost && !endMusicOn) {
+      endMusicOn = true;
+      audio.playGameOver();
     }
 
     // Cosmetic garbage-landing impacts: kick the shake spring and flash the

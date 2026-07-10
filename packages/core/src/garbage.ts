@@ -353,6 +353,9 @@ export class Garbage {
           } else {
             // landed
             this.state = GS_STATIC;
+            // Impact cue on every landing, volume scaled by slab area
+            // (Garbage.cxx:256). Distinct from the initial-fall-only shake below.
+            ctx.notifyCosmeticSound?.('garbage_fallen', this.width * this.height);
             if (this.initial_fall) {
               this.initial_fall = false;
               grid.notifyImpact(this.y, this.height);
@@ -468,6 +471,10 @@ export class Garbage {
     // see empty cells (our accessors always enforce the empty invariant; the
     // C++ only does this under NDEBUG-off, but for us it is mandatory).
     for (let w = 0; w < this.width; w++) ctx.grid.remove(sX + w, sY, this);
+
+    // Shatter cue, volume scaled by slab area (Garbage.cxx:347). Fired once per
+    // shattered row, as in the C++ (startShattering runs per row).
+    ctx.notifyCosmeticSound?.('garbage_shattering', this.width * this.height);
 
     if (
       (this.width === GC_PLAY_WIDTH &&
