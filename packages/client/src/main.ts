@@ -87,14 +87,13 @@ function boot(): void {
   const audio = new AudioManager();
   const audioUi = mountAudioControls(audio);
   audio.playPrelude(); // menu music; starts once the first gesture unlocks audio
-  // Unlock on the first gesture, then stop listening (unlock is a one-time thing).
-  const onFirstGesture = (): void => {
-    audio.unlock();
-    globalThis.removeEventListener('pointerdown', onFirstGesture);
-    globalThis.removeEventListener('keydown', onFirstGesture);
-  };
-  globalThis.addEventListener('pointerdown', onFirstGesture);
-  globalThis.addEventListener('keydown', onFirstGesture);
+  // Unlock on user gestures. Listeners stay attached (not one-shot): unlock() is
+  // cheap and idempotent, and keeping them means a later autoplay/resume
+  // rejection (e.g. after tab backgrounding) can recover on the next gesture by
+  // resuming a suspended context and retrying any queued track.
+  const onGesture = (): void => audio.unlock();
+  globalThis.addEventListener('pointerdown', onGesture);
+  globalThis.addEventListener('keydown', onGesture);
   globalThis.addEventListener('keydown', (e) => {
     // Ignore auto-repeat (holding M is one toggle) and keys typed into a form
     // control / editable element (sliders, future text inputs) so adjusting

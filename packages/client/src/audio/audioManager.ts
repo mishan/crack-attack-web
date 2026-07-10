@@ -117,9 +117,11 @@ export class AudioManager {
         (globalThis as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
       if (Ctor) this.ctx = new Ctor();
     }
-    void this.ctx?.resume();
-    this.loadSfx();
+    // Only resume when actually suspended (avoids needless work on every gesture).
+    if (this.ctx && this.ctx.state === 'suspended') void this.ctx.resume();
+    this.loadSfx(); // guarded internally — decodes once
     this.unlocked = true;
+    // Retry a track whose play() was rejected earlier (autoplay/resume block).
     if (this.pendingTrack) {
       const { track, loop } = this.pendingTrack;
       this.pendingTrack = null;
