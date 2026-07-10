@@ -320,7 +320,10 @@ export class Grid implements BlockGridSink, GarbageGridSink {
     for (let n = 0; n < this.check_registry.length; n++) {
       const c = this.check_registry[n]!;
       h.addBool(c.mark);
-      h.add(c.combo ? c.combo.id : HASH_NONE);
+      // Only a *marked* entry's combo is gameplay state: `timeStep` clears the
+      // mark when draining but leaves `combo` behind, and that stale reference
+      // is never read again. Hashing it would raise false desyncs.
+      h.add(c.mark && c.combo ? c.combo.id : HASH_NONE);
     }
   }
 

@@ -8,6 +8,7 @@ import {
   CC_UP,
   noActions,
 } from './controller.js';
+import { ComboTabulator } from './combo.js';
 import { GameSim } from './gameSim.js';
 import { Rng } from './rng.js';
 import { StateHasher } from './digest.js';
@@ -110,6 +111,20 @@ describe('GameSim.digest', () => {
     }
     expect(probed.digest()).toBe(control.digest());
     expect(probed.rng.state).toBe(control.rng.state);
+  });
+
+  it('ignores stale unmarked check-registry combo references', () => {
+    // Grid.timeStep clears an entry's mark when draining but leaves its combo
+    // reference behind; that stale pointer is never read again, so it must not
+    // influence the digest (regression: it once did, risking false desyncs).
+    const simA = new GameSim(0x5eed);
+    const simB = new GameSim(0x5eed);
+    const stale = new ComboTabulator();
+    stale.id = 7;
+    const entry = simA.grid.checkRegistryOf(3);
+    entry.mark = false;
+    entry.combo = stale;
+    expect(simA.digest()).toBe(simB.digest());
   });
 
   it('restart reproduces the fresh-sim digest', () => {
