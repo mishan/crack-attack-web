@@ -60,23 +60,27 @@ Defer X-mode (`X.cxx` wilds/invisibility) to a later phase; it hooks into blocks
 
 Port `ComputerPlayer`/`ComputerPlayerAI`. Note it does **not** simulate a grid — it's a timed state machine that fabricates garbage sends and decides its own loss based on queued garbage height, with per-difficulty timing parameters. It plugs into the same garbage in/out port as the network path. Cheap to port, gives single-player depth immediately. Local score records in `localStorage` (replacing `~/.crack-attack/`).
 
-## Phase 4 — Multiplayer (server-relayed lockstep)
+## Phase 4 — Multiplayer (input-relay lockstep over a relay server)
 
-The original's netcode surface is tiny and worth keeping conceptually: both sides run identical sims from a shared seed; every 32 ticks (`CO_COMMUNICATION_PERIOD`) they exchange only (a) queued garbage events `{time_stamp, height, width, flavor}` and (b) a status word `{level_lights, game_state, loss_time_stamp, sync}`. The opponent's board is rendered from your *local* sim of them fed by these events — no state transfer.
+Decision (supersedes the event-exchange sketch this section used to carry): the port uses **input-relay lockstep** rather than the original's protocol. The C++ exchanged garbage events `{time_stamp, height, width, flavor}` plus a status word `{level_lights, game_state, loss_time_stamp, sync}` every 32 ticks, and never simulated the opponent's board — you only saw their level lights. Instead, both clients run *both* sims (`GameSim` is instanced for exactly this) from a shared seed, and a tick advances only when both players' inputs for it are known. Local input is scheduled `inputDelay` ticks ahead (default 3 ≈ 60 ms) to hide latency; if the opponent's inputs haven't arrived the sim stalls with a "waiting for opponent" indicator. You see the opponent's actual board, and replays and spectating fall out of the same input streams.
 
-Changes required for the browser:
+Consequences, relative to the C++ `Communicator`:
 
-- **Transport**: WebSocket to the relay server, ordered+reliable, which subsumes ENet's reliable channels. Define messages in `packages/protocol` (compact JSON first; binary later only if measurements demand it).
-- **No blocking**: the C++ sides literally block on alternating send/recv each period. Browsers can't. Replace with: each peer sends its period-N packet as soon as tick 32·N completes; the sim may run ahead until it *needs* period-N data from the opponent (garbage insertion time or period N+1 boundary — whichever is stricter), then stalls with a "waiting for opponent" indicator. This is standard lockstep buffering and preserves determinism exactly.
-- **Handshake** (server-mediated, replacing the original version-string/X-flag/name/texture/seed exchange): lobby server assigns the match, generates the seed, and forwards protocol version, mode flags, and player names. Custom garbage-flavor image exchange (the original sends raw texture bytes) is deferred.
-- **Sync/pause/loss**: keep the sync-counter scheme (`Game::syncPause`) for pauses; keep loss resolution by comparing `loss_time_stamp` (original quirk: client loses ties — with a relay, let the server arbitrate instead).
-- **Desync detection** (improvement over the original): include the per-tick state digest from Phase 1 in each status message; the relay or peers compare and surface desyncs immediately instead of letting boards silently diverge.
+- **Garbage events never cross the wire** — each client cross-wires the two sims' garbage-out ports locally, so insertion happens at the same tick on both machines.
+- **The status word disappears** — level lights, game state, and losses are all computed from the opponent's sim. Loss ties resolve by a fixed deterministic rule, retiring the hidden server-wins-ties quirk.
+- **The wire carries only**: room flow (create/join by 5-char code — grows into the Phase 5 lobby), per-tick `CC_*` input frames, periodic per-sim state digests (server-compared desync detection — an improvement over the original, which let boards silently diverge), and lifecycle events the sims can't decide (concede, disconnect).
+
+Remaining notes:
+
+- **Transport**: WebSocket to the relay server, ordered+reliable, which subsumes ENet's reliable channels. Messages live in `packages/protocol` (landed: typed message union + strict shape/range-validating JSON codec; binary later only if measurements demand it).
+- **Handshake** (server-mediated, replacing the original version-string/X-flag/name/texture/seed exchange): hello/version check → room create/join → ready → `match_start` carrying the server-generated seed, player index, names, and input delay. Custom garbage-flavor image exchange (the original sends raw texture bytes) is deferred.
+- **Sync/pause**: lockstep subsumes the sync-counter scheme — neither side can outrun the other, so `Game::syncPause` has no equivalent. Mid-match pause, if ever wanted, becomes an explicit lifecycle message (deferred).
 
 Milestone: two browsers playing head-to-head through the relay.
 
 ## Phase 5 — Lobby
 
-Node/TS server (`packages/server`), same process as the relay initially: named players (lightweight auth — start with display names + session tokens), room list, create/join/ready flow, seed generation, match lifecycle (best-of-3 per `GC_GAMES_PER_MATCH`), reconnect grace using the lockstep buffer, and basic rankings/W-L records in SQLite. Spectating falls out almost free later: a spectator is a third sim fed both players' event streams.
+Node/TS server (`packages/server`), same process as the relay initially: named players (lightweight auth — start with display names + session tokens), room list, create/join/ready flow, seed generation, match lifecycle (best-of-3 per `GC_GAMES_PER_MATCH`), reconnect grace using the lockstep buffer, and basic rankings/W-L records in SQLite. Spectating falls out almost free later: a spectator is a third sim pair fed both players' input streams.
 
 ## Phase 6 — Stretch
 
