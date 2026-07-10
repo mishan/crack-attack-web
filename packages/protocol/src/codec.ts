@@ -116,8 +116,10 @@ function inputFrames(m: Record<string, unknown>, field: string): number[] {
   const v = m[field];
   if (!Array.isArray(v) || v.length < 1 || v.length > MAX_INPUT_FRAMES_PER_MESSAGE)
     throw new ProtocolError(`${field} must be an array of 1..${MAX_INPUT_FRAMES_PER_MESSAGE}`);
+  // Range check, not a bitwise one: JS bitwise ops truncate to int32, so
+  // `(f & ~ACTION_MASK) !== 0` would let values like 2**33 + 1 slip through.
   for (const f of v)
-    if (typeof f !== 'number' || !Number.isInteger(f) || (f & ~ACTION_MASK) !== 0 || f < 0)
+    if (typeof f !== 'number' || !Number.isInteger(f) || f < 0 || f > ACTION_MASK)
       throw new ProtocolError(`${field} entries must be CC_* action bitmasks`);
   return v as number[];
 }

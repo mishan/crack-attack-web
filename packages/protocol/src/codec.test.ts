@@ -92,6 +92,14 @@ describe('malformed input', () => {
     ['inputs negative tick', '{"type":"inputs","startTick":-1,"frames":[0]}'],
     ['inputs empty frames', '{"type":"inputs","startTick":0,"frames":[]}'],
     ['inputs frame out of mask', `{"type":"inputs","startTick":0,"frames":[${ACTION_MASK + 1}]}`],
+    // Regression: values beyond 2^32 truncate under JS bitwise ops, so a pure
+    // `(f & ~ACTION_MASK)` check would wrongly accept 2**33 + 1 (int32-truncates
+    // to 1). The validator must bound the range explicitly.
+    [
+      'inputs frame beyond int32 range',
+      `{"type":"inputs","startTick":0,"frames":[${2 ** 33 + 1}]}`,
+    ],
+    ['inputs frame at 2**32', `{"type":"inputs","startTick":0,"frames":[${2 ** 32}]}`],
     ['inputs fractional frame', '{"type":"inputs","startTick":0,"frames":[0.5]}'],
     ['inputs frames not array', '{"type":"inputs","startTick":0,"frames":"lol"}'],
     [
