@@ -36,23 +36,30 @@ export function mountAudioControls(audio: AudioManager): AudioControlsHandle {
     'display:flex;align-items:center;gap:8px;background:rgba(11,13,18,.85);' +
     'padding:6px 10px;border-radius:6px';
 
-  const slider = (label: string, value: number, on: (v: number) => void): HTMLElement => {
+  const slider = (
+    label: string,
+    ariaLabel: string,
+    value: number,
+    on: (v: number) => void,
+  ): HTMLElement => {
     const box = document.createElement('label');
     box.style.cssText = 'display:flex;align-items:center;gap:4px';
-    box.textContent = label;
+    box.textContent = label; // compact glyph; the input carries the real name
     const input = document.createElement('input');
     input.type = 'range';
     input.min = '0';
     input.max = '100';
     input.value = String(Math.round(value * 100));
     input.style.width = '70px';
+    // The glyph label is decorative; give screen readers a real name.
+    input.setAttribute('aria-label', ariaLabel);
     input.oninput = (): void => on(Number(input.value) / 100);
     box.appendChild(input);
     return box;
   };
 
-  panel.appendChild(slider('♪', settings.music, (v) => audio.setMusicVolume(v)));
-  panel.appendChild(slider('▸', settings.sfx, (v) => audio.setSfxVolume(v)));
+  panel.appendChild(slider('♪', 'Music volume', settings.music, (v) => audio.setMusicVolume(v)));
+  panel.appendChild(slider('▸', 'Sound effects volume', settings.sfx, (v) => audio.setSfxVolume(v)));
 
   const syncMuted = (): void => {
     const muted = audio.getSettings().muted;

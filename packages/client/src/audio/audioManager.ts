@@ -266,7 +266,18 @@ export class AudioManager {
    */
   fadeoutMusic(ms: number): void {
     this.cancelFade();
+    // Requested before unlock: drop the pending track so it doesn't start later
+    // mid-countdown at full volume (there's nothing audible to fade yet).
+    if (!this.unlocked) {
+      this.pendingTrack = null;
+      return;
+    }
     if (!this.currentTrack || this.musicEl.paused) return;
+    // Non-positive duration → immediate stop (avoids a divide-by-zero NaN volume).
+    if (ms <= 0) {
+      this.stopMusic();
+      return;
+    }
     const start = performance.now();
     const from = this.musicEl.volume;
     const step = (now: number): void => {

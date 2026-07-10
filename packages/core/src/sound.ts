@@ -8,8 +8,9 @@
  * `Garbage.cxx`, and `CountDownManager.cxx` (see `Sound.{h,cxx}`, SDL_mixer).
  *
  * Like signs and sparkles, sound is purely cosmetic, so the deterministic core
- * does **not** own playback — it only *reports* that a cue should fire, as an
- * integer {@link SoundEvent} on a {@link SoundSink}. Emitting a cue draws **no**
+ * does **not** own playback — it only *reports* that a cue should fire, via a
+ * `(SoundId, volume)` pair on a {@link SoundSink} (buffered as a
+ * {@link SoundEvent}). Emitting a cue draws **no**
  * gameplay RNG and never enters the digest, so audio can't perturb the
  * load-bearing draw order or replay determinism. The client (WebAudio) turns
  * these events into actual sound.

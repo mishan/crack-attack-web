@@ -65,6 +65,13 @@ function resolveRelayUrl(params: URLSearchParams): string {
   return `${scheme}://${globalThis.location.hostname}:8080`;
 }
 
+/** Whether an event target is a form control or editable element (keys should pass through). */
+function isTypingTarget(target: EventTarget | null): boolean {
+  if (!(target instanceof HTMLElement)) return false;
+  const tag = target.tagName;
+  return tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || target.isContentEditable;
+}
+
 function boot(): void {
   const app = document.getElementById('app');
   const hudEl = document.getElementById('hud');
@@ -89,8 +96,10 @@ function boot(): void {
   globalThis.addEventListener('pointerdown', onFirstGesture);
   globalThis.addEventListener('keydown', onFirstGesture);
   globalThis.addEventListener('keydown', (e) => {
-    // Ignore auto-repeat so holding M is a single toggle, not a rapid flap.
-    if (e.code === 'KeyM' && !e.repeat) {
+    // Ignore auto-repeat (holding M is one toggle) and keys typed into a form
+    // control / editable element (sliders, future text inputs) so adjusting
+    // settings doesn't accidentally mute.
+    if (e.code === 'KeyM' && !e.repeat && !isTypingTarget(e.target)) {
       audio.toggleMuted();
       audioUi.syncMuted();
     }
@@ -151,6 +160,9 @@ function bootSolo(
   let gameMusicOn = false;
   let endMusicOn = false;
   audio.resetCountdown();
+  // Fade the menu prelude over the first 3-2-1 (C++ gameStart → Music::fadeout),
+  // matching restart(); game music takes over at GO.
+  audio.fadeoutMusic(3000);
   levelLights.reset(initial.hud.topEffectiveRow);
 
   // Temporary lighting/material tuner — open with `?tune` in the URL.
