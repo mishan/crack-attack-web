@@ -47,6 +47,20 @@ import { GC_PLAY_HEIGHT, GC_PLAY_WIDTH } from './constants.js';
  */
 const SIGN_BUFFER_CAP = 256;
 
+/** Cap on undrained cosmetic impact events (same rationale as signs). */
+const IMPACT_BUFFER_CAP = 64;
+
+/**
+ * A garbage slab finished its initial fall (cosmetic): drives the render
+ * layer's screen-shake spring and level-light impact flashes.
+ */
+export interface ImpactEvent {
+  /** Bottom grid row of the landed slab. */
+  y: number;
+  height: number;
+  width: number;
+}
+
 export class GameSim implements CreepSimContext, SignSink {
   /** Shared tick counter (mirrors `Game::time_step`). */
   readonly clock = new Clock();
@@ -84,6 +98,8 @@ export class GameSim implements CreepSimContext, SignSink {
 
   /** Cosmetic reward signs emitted since the last {@link drainSignEvents}. */
   private readonly signBuffer: SignEvent[] = [];
+  /** Cosmetic impact events emitted since the last {@link drainImpactEvents}. */
+  private readonly impactBuffer: ImpactEvent[] = [];
 
   constructor(seed: number) {
     this.seed = seed >>> 0;
@@ -112,6 +128,7 @@ export class GameSim implements CreepSimContext, SignSink {
     this.dying_count = 0;
     this.lost = false;
     this.signBuffer.length = 0;
+    this.impactBuffer.length = 0;
 
     // Reseed both RNGs so a restart is fully deterministic and does not depend
     // on draws made during the previous game.
@@ -220,6 +237,22 @@ export class GameSim implements CreepSimContext, SignSink {
   drainSignEvents(): SignEvent[] {
     if (this.signBuffer.length === 0) return [];
     return this.signBuffer.splice(0, this.signBuffer.length);
+  }
+
+  /**
+   * {@link BlockSimContext.notifyCosmeticImpact}: buffer a garbage-landing
+   * impact for the display layer (screen shake + light flashes). Cosmetic:
+   * draws no RNG, never enters the digest.
+   */
+  notifyCosmeticImpact(y: number, height: number, width: number): void {
+    if (this.impactBuffer.length >= IMPACT_BUFFER_CAP) this.impactBuffer.shift();
+    this.impactBuffer.push({ y, height, width });
+  }
+
+  /** Remove and return impacts since the last drain (see {@link drainSignEvents}). */
+  drainImpactEvents(): ImpactEvent[] {
+    if (this.impactBuffer.length === 0) return [];
+    return this.impactBuffer.splice(0, this.impactBuffer.length);
   }
 
   /**

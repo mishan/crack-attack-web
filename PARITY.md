@@ -30,21 +30,21 @@ File:line references are into `crack-attack/src/`.
    gravity/tumble physics. This is the flagship use of the reserved
    `cosmeticRng`. Reward motes also fly toward the level lights on combos.
 
-4. **Screen shake on garbage impact** — `Spring.{h,cxx}`, applied at
-   Displayer.cxx:638. A damped spring on the board's y:
-   `notifyImpact(h, w): v -= (SP_IMPACT_VELOCITY + v)·(h·w)·SP_GARBAGE_DENSITY`,
-   per tick `y += v; v -= SP_STIFFNESS·y + SP_DRAG·v`. Port note: the sim's
-   `Grid.notifyImpact` is the trigger point — expose a cosmetic impact event
-   (same pattern as `SignSink`), integrate the spring in the render layer and
-   offset each `BoardView` by its y.
+4. ~~**Screen shake on garbage impact**~~ **DONE** — `view/spring.ts` (pure,
+   tested) ports `Spring.{h,cxx}` exactly; the core emits a cosmetic
+   `ImpactEvent {y, height, width}` at the C++ call site (initial-fall garbage
+   landings, Garbage.cxx:263) via the sign-sink pattern (digest-neutral), and
+   each `BoardView` dips by the spring's offset (solo, both netplay boards,
+   and spectator boards each have their own spring).
 
-5. **Level-light death flash (final-countdown blink)** — `LevelLights.h:105-137`,
-   DC_LEVEL_LIGHT_DEATH_FLASH_TIME = 12 (Displayer.h:335). When the loss
-   countdown runs, all arrows strobe; arrows also impact-flash when garbage
-   lands (LS_IMPACT_FLASH) and fade between red/blue (LS_FADE_*) rather than
-   snapping. Our `view/levelLights.ts` has only the static red/blue rule —
-   it can compute all of this from sim state it already sees (loss_alarm,
-   impacts) without any wire changes.
+5. ~~**Level-light death flash (final-countdown blink)**~~ **DONE** —
+   `view/levelLights.ts` now carries the full `LevelLights` state machine
+   (pure, tested): red/blue fades over DC_LEVEL_LIGHT_FADE_TIME = 150 with
+   mid-fade reversal mirroring, impact flashes (20-tick pulse with the 0.9
+   inflection resync) fed by the cosmetic impact events, and the death strobe
+   while the stack violates the safe height (re-arming only while the game is
+   live). Colors come from the DrawLevelLights.cxx math (sqrt crossfade,
+   whitening), boosted ×1.35 for our black background.
 
 6. **Bonus/sign coverage** — `SignManager.{h,cxx}`; art exists for magnitude
    4-12 (`sign_4..12`), multipliers ×2-×12 (`sign_x2..x12`), and
@@ -61,8 +61,12 @@ File:line references are into `crack-attack/src/`.
 
 ## Also missing (smaller / adjacent)
 
-8. **Block landing flash** — blocks flash white for a few ticks on landing
-   (DrawBlocks.cxx flash path). Small `deriveViewModel` + material tweak.
+8. ~~**Block dying flash**~~ **DONE** (survey correction: the DrawBlocks.cxx
+   flash is the _dying_ strobe, not a landing flash) — `view/dyingAnim.ts`
+   (pure, tested) ports the two-phase death exactly: 12 ticks full-size with
+   two white strobe pulses (the folded triangle wave), then the quadratically
+   accelerating tumble while shrinking to DC_DYING_SHRINK_MIN_SIZE = 0.1.
+   Replaces the port's previous blended approximation in `BoardView`.
 9. **Win/loss celebration** — `CelebrationManager.{h,cxx}`: end-of-match
    dancing-squares animation behind the WINNER/LOSER message.
 10. **Score** — `Score.{h,cxx}`: per-elimination scoring with a backlog that
@@ -92,8 +96,8 @@ File:line references are into `crack-attack/src/`.
 
 ## Suggested order
 
-Cheap and high-impact first: (5) light flashes + (8) landing flash + (4)
-screen shake are small, self-contained render-layer wins; then (1) countdown
-and (7) message overlays (shared textured-overlay plumbing); then (2) lose
-bar, (3) sparkles, (6) bonus sign audit; then (10)/(11) score + stars, (9)
-celebration, (12) pause, (13) audio, (14) glyph rendering.
+Cheap and high-impact first: ~~(5) light flashes + (8) dying flash + (4)
+screen shake~~ (done); next (1) countdown and (7) message overlays (shared
+textured-overlay plumbing); then (2) lose bar, (3) sparkles, (6) bonus sign
+audit; then (10)/(11) score + stars, (9) celebration, (12) pause, (13) audio,
+(14) glyph rendering.

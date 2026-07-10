@@ -31,6 +31,7 @@ import { LevelLightsView } from './render/levelLightsView.js';
 import { SignsView } from './render/signsView.js';
 import { FixedTimestep } from './sim/fixedTimestep.js';
 import { deriveViewModel } from './view/boardViewModel.js';
+import { Spring } from './view/spring.js';
 import { ViewInterpolator } from './view/viewInterpolator.js';
 import { LockstepSession } from './net/lockstep.js';
 import { NetClient } from './net/session.js';
@@ -54,6 +55,7 @@ interface BoardBundle {
   signs: SignsView;
   decals: GarbageDecalView;
   levelLights: LevelLightsView;
+  spring: Spring;
 }
 
 type Phase = 'connecting' | 'lobby' | 'room' | 'playing' | 'ended' | 'spectating';
@@ -435,13 +437,16 @@ export function bootNetplay(
       const view = new BoardView(container, vm.width, vm.visibleHeight);
       const halfW = (vm.width - 1) / 2;
       const halfH = (vm.visibleHeight - 1) / 2;
+      const levelLights = new LevelLightsView(view.scene, halfW, halfH);
+      levelLights.reset(vm.hud.topEffectiveRow);
       return {
         container,
         view,
         interp,
         signs: new SignsView(view.scene, halfW, halfH),
         decals: new GarbageDecalView(view.scene, halfW, halfH),
-        levelLights: new LevelLightsView(view.scene, halfW, halfH),
+        levelLights,
+        spring: new Spring(),
       };
     };
     // Local board left, opponent right, regardless of player index.
@@ -478,14 +483,24 @@ export function bootNetplay(
       boards = makeBoards(localSim, remoteSim);
       fitToWindow();
     } else {
-      for (const b of boards) {
-        b.interp.reset();
-        b.signs.clear();
-        b.decals.clear();
-      }
-      boards[0].interp.push(deriveViewModel(localSim));
-      boards[1].interp.push(deriveViewModel(remoteSim));
+      resetBoards(localSim, remoteSim);
     }
+  }
+
+  /** Reset reused board bundles for a fresh game (rematch/resume/spectate). */
+  function resetBoards(leftSim: GameSim, rightSim: GameSim): void {
+    if (!boards) return;
+    const sims = [leftSim, rightSim];
+    boards.forEach((b, i) => {
+      b.interp.reset();
+      b.signs.clear();
+      b.decals.clear();
+      b.spring.gameStart();
+      b.view.setShake(0);
+      const vm = deriveViewModel(sims[i]!);
+      b.interp.push(vm);
+      b.levelLights.reset(vm.hud.topEffectiveRow);
+    });
   }
 
   function startMatch(msg: MatchStartMessage): void {
@@ -508,13 +523,7 @@ export function bootNetplay(
       boards = makeBoards(spectator.sims[0]!, spectator.sims[1]!);
       fitToWindow();
     } else {
-      for (const b of boards) {
-        b.interp.reset();
-        b.signs.clear();
-        b.decals.clear();
-      }
-      boards[0].interp.push(deriveViewModel(spectator.sims[0]!));
-      boards[1].interp.push(deriveViewModel(spectator.sims[1]!));
+      resetBoards(spectator.sims[0]!, spectator.sims[1]!);
     }
   }
 
@@ -567,11 +576,12 @@ export function bootNetplay(
     // --- watcher branch: no input, no sending; just consume and render.
     if (spectator && boards && phase === 'spectating') {
       const w = spectator;
+      let steppedTicks = 0;
       if (!w.outcome) {
         const due = clock.sample(nowMs);
         const backlog = w.bufferedTicks;
         const budget = backlog > 25 ? Math.min(backlog, CATCH_UP_STEPS_PER_FRAME) : due;
-        w.advance(budget, () => {
+        steppedTicks = w.advance(budget, () => {
           boards![0].interp.push(deriveViewModel(w.sims[0]!));
           boards![1].interp.push(deriveViewModel(w.sims[1]!));
         });
@@ -587,14 +597,18 @@ export function bootNetplay(
           }
         }
       }
+      const impacts = [w.sims[0]!.drainImpactEvents(), w.sims[1]!.drainImpactEvents()];
       const dtTicks = Math.min(MAX_SIGN_DT_TICKS, (nowMs - lastMs) / MS_PER_TICK);
       const alpha = w.outcome ? 1 : clock.alpha;
-      boards.forEach((b) => {
+      boards.forEach((b, i) => {
         b.signs.update(dtTicks);
+        for (const imp of impacts[i]!) b.spring.notifyImpact(imp.height, imp.width);
+        for (let t = 0; t < steppedTicks; t++) b.spring.timeStep();
+        b.view.setShake(b.spring.offsetCells);
         const vm = b.interp.sample(alpha);
         b.view.update(vm);
         b.decals.update(vm.garbage);
-        b.levelLights.update(vm.hud.topEffectiveRow);
+        b.levelLights.update(steppedTicks, vm.hud.topEffectiveRow, !w.outcome, impacts[i]!);
         b.view.render();
       });
       lastMs = nowMs;
@@ -606,6 +620,7 @@ export function bootNetplay(
     if (s && boards && (phase === 'playing' || phase === 'ended')) {
       const localSim = s.sims[localIndex]!;
       const remoteSim = s.sims[1 - localIndex]!;
+      let steppedTicks = 0;
 
       if (!s.outcome) {
         const due = clock.sample(nowMs);
@@ -623,6 +638,7 @@ export function bootNetplay(
             boards![1].interp.push(deriveViewModel(remoteSim));
           },
         );
+        steppedTicks = stepped;
 
         for (const batch of s.takeOutgoing()) {
           net?.send({ type: 'inputs', startTick: batch.startTick, frames: batch.frames });
@@ -672,14 +688,18 @@ export function bootNetplay(
         }
       }
 
+      const impacts = [localSim.drainImpactEvents(), remoteSim.drainImpactEvents()];
       const dtTicks = Math.min(MAX_SIGN_DT_TICKS, (nowMs - lastMs) / MS_PER_TICK);
       const alpha = s.outcome ? 1 : clock.alpha;
       boards.forEach((b, i) => {
         b.signs.update(dtTicks);
+        for (const imp of impacts[i]!) b.spring.notifyImpact(imp.height, imp.width);
+        for (let t = 0; t < steppedTicks; t++) b.spring.timeStep();
+        b.view.setShake(b.spring.offsetCells);
         const vm = b.interp.sample(alpha);
         b.view.update(vm);
         b.decals.update(vm.garbage);
-        b.levelLights.update(vm.hud.topEffectiveRow);
+        b.levelLights.update(steppedTicks, vm.hud.topEffectiveRow, !s.outcome, impacts[i]!);
         b.view.render();
         if (i === 0) hud?.update(vm.hud);
       });

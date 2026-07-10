@@ -48,6 +48,7 @@ import {
   GC_PLAY_WIDTH,
 } from '@crack-attack/core';
 import type { BoardViewModel } from '../view/boardViewModel.js';
+import { dyingPose } from '../view/dyingAnim.js';
 import { blockColor, garbageColor } from './palette.js';
 
 const CELL = 1;
@@ -367,6 +368,16 @@ export class BoardView {
     return this.pos.set(x - this.halfW, y - this.halfH, z);
   }
 
+  /**
+   * Vertical shake offset in cell units (the Spring's output). Applied to the
+   * whole scene, so blocks, garbage, signs, and lights dip together — faithful
+   * to the reference applying Spring::y to the board translation
+   * (Displayer.cxx:638).
+   */
+  setShake(offsetCells: number): void {
+    this.scene.position.y = offsetCells;
+  }
+
   /** Mirror `vm` onto the meshes. Call once per rendered frame. */
   update(vm: BoardViewModel): void {
     // Blocks.
@@ -376,10 +387,13 @@ export class BoardView {
       this.color.copy(blockColor(b.flavor));
 
       if (b.phase === 'dying') {
-        // Pop: shrink toward nothing, tumble, and flash white over the countdown.
-        this.scl.setScalar(Math.max(0.02, 1 - 0.92 * b.deathProgress));
-        this.rot.setFromAxisAngle(this.spinAxis, b.deathProgress * Math.PI * 1.5);
-        this.color.lerp(this.flash, 0.6 * b.deathProgress);
+        // Two-phase pop, faithful to DrawBlocks.cxx:318-360: first a full-size
+        // double white strobe (DC_DYING_FLASH_TIME), then a quadratically
+        // accelerating tumble while shrinking to DC_DYING_SHRINK_MIN_SIZE.
+        const pose = dyingPose(b.deathProgress);
+        this.scl.setScalar(pose.scale);
+        this.rot.setFromAxisAngle(this.spinAxis, pose.angle);
+        this.color.lerp(this.flash, pose.flash);
       } else if (b.phase === 'swapping') {
         // Revolving door: the block swings a semicircle around the vertical edge
         // it shares with its swap partner (faithful to the swap_factor transform
