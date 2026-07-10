@@ -164,6 +164,12 @@ export function bootNetplay(app: HTMLElement, hudEl: HTMLElement | null, relayUr
   /** Reconnect with backoff while a match seat may still be held for us. */
   function onConnectionLost(): void {
     net = null;
+    // connect() can fail twice for one attempt (promise rejection AND the
+    // socket's close event); never stack reconnect timers.
+    if (reconnectTimer !== null) {
+      clearTimeout(reconnectTimer);
+      reconnectTimer = null;
+    }
     const midMatch = (phase === 'playing' || phase === 'ended') && session !== null;
     if (midMatch && reconnectUntil === 0) reconnectUntil = performance.now() + graceMs;
 

@@ -455,6 +455,26 @@ describe('reconnect grace', () => {
     ]);
   });
 
+  it('ending the match during grace cancels the timer and evicts the dropped seat', async () => {
+    // Regression: a concede while the opponent was in grace left the timer
+    // armed; it later fired against the already-ended match and recorded the
+    // forfeit a second time.
+    const relay = new RelayServer();
+    const { b, tokenA } = await droppedMidMatch(relay);
+    await say(relay, b, { type: 'concede' });
+    // Conceding forfeits to the dropped player; the dead seat is evicted.
+    expect(b.lastOf('match_end')).toEqual({ type: 'match_end', reason: 'concession', winner: 0 });
+    expect(b.lastOf('peer_left').name).toBe('alice');
+    const endsBefore = b.allOf('match_end').length;
+
+    await vi.advanceTimersByTimeAsync(DEFAULT_RECONNECT_GRACE_MS * 2);
+    // The grace timer must not fire: no second match_end, no double record.
+    expect(b.allOf('match_end')).toHaveLength(endsBefore);
+    const a2 = await client(relay, 'alice', tokenA);
+    expect(a2.allOf('match_resume')).toHaveLength(0); // nothing to rejoin
+    expect(a2.lastOf('welcome').record).toEqual({ wins: 1, losses: 0 }); // once
+  });
+
   it('a rejoin after expiry lands in the lobby, not the dead match', async () => {
     const relay = new RelayServer();
     const { tokenA } = await droppedMidMatch(relay);

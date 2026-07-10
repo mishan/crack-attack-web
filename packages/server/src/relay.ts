@@ -580,13 +580,31 @@ export class RelayServer {
   private endMatch(room: Room, reason: MatchEndReason, winner: number | null): void {
     room.state = 'waiting';
     room.digest_floor = -1;
+
+    // The match is settled: a pending grace timer must not fire against it
+    // later (it would double-record and re-end the room), and a dropped seat
+    // has nothing left to rejoin — remove it.
+    if (room.grace_timer !== null) {
+      clearTimeout(room.grace_timer);
+      room.grace_timer = null;
+    }
+    const orphaned = room.seats.filter((s) => s.conn === null);
+    for (const s of orphaned) {
+      this.dropped.delete(s.token);
+      room.seats.splice(room.seats.indexOf(s), 1);
+    }
+
     for (const s of room.seats) {
       s.ready = false;
       s.frames = [];
       s.digests.clear();
       s.reported_result = undefined;
-      if (s.conn) this.send(s.conn, { type: 'match_end', reason, winner });
+      const conn = s.conn;
+      if (!conn) continue; // (unreachable: orphans were removed above)
+      this.send(conn, { type: 'match_end', reason, winner });
+      for (const gone of orphaned) this.send(conn, { type: 'peer_left', name: gone.name });
     }
+    if (room.seats.length === 0) this.rooms.delete(room.code);
   }
 
   /**
