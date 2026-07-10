@@ -90,11 +90,28 @@ File:line references are into `crack-attack/src/`.
     lifecycle.
 12. **Solo pause** — GS_PAUSED + MS_PAUSED overlay (netplay pause deliberately
     retired with the sync-counter scheme; solo pause is trivial).
-13. **Audio** — `Sound.{h,cxx}`, `Music.{h,cxx}` (SDL_mixer; init at
-    Attack.cxx:149-151, music pauses with the game). The upstream `data/`
-    tree ships no audio assets (fork-supplied), so the web build needs its
-    own sources; WebAudio + a small event sink (combo, pop, land, drop) fits
-    the existing cosmetic-sink pattern.
+13. ~~**Audio**~~ **DONE** — `Sound.{h,cxx}`, `Music.{h,cxx}` ported to
+    WebAudio. The core emits cosmetic `SoundEvent`s on the existing sink
+    pattern (`core/sound.ts`, `GameSim.drainSoundEvents`) at the exact C++
+    `Sound::play` call sites — block awaking pop (Block.cxx:104, vol 5), block
+    landing (Block.cxx:168, vol 2), block death (Block.cxx:274, vol
+    spark_number/3), garbage landing (Garbage.cxx:256, vol width×height), and
+    garbage shatter (Garbage.cxx:347, vol width×height) — all digest-neutral
+    and RNG-free. The client `audio/audioManager.ts` plays SFX through an
+    `AudioContext` (polyphonic, gesture-unlocked) and streams music through an
+    `HTMLAudioElement` with the faithful `Music.cxx` state machine: prelude in
+    the menu/lobby, fade-out over the 3-2-1 countdown, game loop at GO,
+    gameover/youwin stingers at match end, plus pause/resume on tab-hide. The
+    countdown beep schedule (CountDownManager.cxx:63-67, vols 10/7/4/1) is the
+    pure, tested `view/messages.ts`. Volume math (mute + music/SFX sliders over
+    the C++ levels, localStorage-persisted, `audio/volume.ts`) is pure/tested;
+    an on-screen control + `M` shortcut drive it. Wired into solo, netplay
+    (local board audible, faithful to per-client sound), and spectator (both
+    boards). Assets are the Fedora/Arch fork set; see
+    `packages/client/public/AUDIO_COPYRIGHT.txt` for provenance and the
+    dual GPL / Crystal-Stacker-freeware licensing. Deferred: the commented-out
+    shatter-to-garbage cue (Garbage.cxx:106, disabled upstream) and the X-mode
+    extreme sound variants.
 14. **Textured clock/name rendering** — `data/clock_*.tga`, `font0_*.tga`
     glyph textures for names/scores above the boards. We render DOM text;
     parity here is cosmetic taste.
@@ -109,5 +126,5 @@ File:line references are into `crack-attack/src/`.
 
 Cheap and high-impact first: ~~(5) light flashes + (8) dying flash + (4)
 screen shake~~, ~~(1) countdown and (7) message overlays~~, ~~(3) sparkles,
-(6) bonus sign audit~~ (done); next (2) lose bar; then (10)/(11) score +
-stars, (9) celebration, (12) pause, (13) audio, (14) glyph rendering.
+(6) bonus sign audit~~, ~~(13) audio~~ (done); next (2) lose bar; then
+(10)/(11) score + stars, (9) celebration, (12) pause, (14) glyph rendering.

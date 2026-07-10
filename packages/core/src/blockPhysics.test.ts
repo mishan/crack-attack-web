@@ -35,6 +35,7 @@ class Ctx implements BlockSimContext {
   readonly cosmeticRng = new Rng(1);
   landingCalls = 0;
   garbageFallCalls = 0;
+  readonly sounds: { sound: string; volume: number }[] = [];
 
   constructor() {
     this.blocks = new BlockManager(this.grid, new Rng(1));
@@ -45,6 +46,9 @@ class Ctx implements BlockSimContext {
   }
   startGarbageFalling(_garbage: Garbage, _combo: ComboTabulator | null, _noHang: boolean): void {
     this.garbageFallCalls++;
+  }
+  notifyCosmeticSound(sound: string, volume: number): void {
+    this.sounds.push({ sound, volume });
   }
 }
 
@@ -84,6 +88,8 @@ describe('Block falling', () => {
     expect(b.y).toBe(1); // rests directly on the floor
     expect(ctx.grid.blockAt(0, 1)).toBe(b);
     expect(ctx.grid.stateAt(0, 5)).toBe(GR_EMPTY);
+    // Landing fires the block_fallen cue exactly once (Block.cxx:168, vol 2).
+    expect(ctx.sounds).toEqual([{ sound: 'block_fallen', volume: 2 }]);
   });
 
   it('registers an elimination check when it lands', () => {
@@ -123,6 +129,8 @@ describe('Block dying', () => {
     combo.initialize(0);
     dying.startDying(ctx, combo, 5);
 
+    // startDying fires the block_dying cue at volume spark_number/3 (Block.cxx:274).
+    expect(ctx.sounds).toEqual([{ sound: 'block_dying', volume: 1 }]);
     expect(ctx.dying_count).toBe(1);
     expect(dying.state).toBe(BS_DYING);
     expect(dying.alarm).toBe(GC_DYING_DELAY);
@@ -209,9 +217,11 @@ describe('Block awaking', () => {
     expect(ctx.grid.stateAt(0, 1)).toBe(GR_IMMUTABLE);
 
     ctx.clock.time_step = 1;
-    b.timeStep(ctx); // pop_alarm fires (appearance only)
+    b.timeStep(ctx); // pop_alarm fires (appearance + cue)
     expect(b.pop_alarm).toBe(0);
     expect(b.state).toBe(BS_AWAKING);
+    // The pop cues block_awaking at volume 5 (Block.cxx:104).
+    expect(ctx.sounds).toEqual([{ sound: 'block_awaking', volume: 5 }]);
 
     ctx.clock.time_step = 2;
     b.timeStep(ctx); // nothing at the boundary yet

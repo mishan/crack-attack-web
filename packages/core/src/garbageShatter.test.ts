@@ -23,6 +23,7 @@ class Ctx implements GridSimContext {
   readonly combos: ComboManager;
   awaking_count = 0;
   dying_count = 0;
+  readonly sounds: { sound: string; volume: number }[] = [];
 
   constructor() {
     this.blocks = new BlockManager(this.grid, this.rng);
@@ -31,6 +32,9 @@ class Ctx implements GridSimContext {
     this.combos = new ComboManager(this.clock, this.garbageGenerator);
   }
 
+  notifyCosmeticSound(sound: string, volume: number): void {
+    this.sounds.push({ sound, volume });
+  }
   notifyLanding(_x: number, _y: number, _block: Block, _combo: ComboTabulator): void {}
   startGarbageFalling(garbage: Garbage, combo: ComboTabulator | null, noHang: boolean): void {
     garbage.startFalling(this, combo, noHang);
@@ -105,6 +109,8 @@ describe('Garbage shattering', () => {
       expect(ctx.grid.residentTypeAt(x, 1) & GR_BLOCK).toBeTruthy();
       expect(ctx.grid.stateAt(x, 1)).toBe(GR_IMMUTABLE); // awaking
     }
+    // Shattering cues garbage_shattering, volume = width * height (Garbage.cxx:347).
+    expect(ctx.sounds).toContainEqual({ sound: 'garbage_shattering', volume: 2 });
   });
 
   it('a shatter-to-garbage slab re-forms as an awaking garbage row', () => {

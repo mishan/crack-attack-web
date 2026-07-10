@@ -39,6 +39,7 @@ import type { ComboTabulator } from './combo.js';
 import { HASH_NONE, type StateHasher } from './digest.js';
 import type { Garbage } from './garbage.js';
 import type { Rng } from './rng.js';
+import type { SoundId } from './sound.js';
 import {
   GR_BLOCK,
   GR_EMPTY,
@@ -93,6 +94,13 @@ export interface BlockSimContext {
    * {@link notifyCosmeticImpact}.
    */
   notifyCosmeticSpark?(x: number, y: number, flavor: number, count: number): void;
+  /**
+   * Cosmetic: a gameplay event asks for a sound cue (Sound::play, e.g.
+   * Block.cxx:104/168/274, Garbage.cxx:256/347). `volume` is the C++ integer
+   * 0..10 scale, left unclamped. Same contract as {@link notifyCosmeticImpact}:
+   * draws no RNG, never enters the digest, optional so headless runs skip it.
+   */
+  notifyCosmeticSound?(sound: SoundId, volume: number): void;
 }
 
 // --- Block states (Block.h:33-38) ------------------------------------------
@@ -269,8 +277,11 @@ export class Block {
       if (grid.stateAt(this.x, this.y - 1) & GR_EMPTY) this.startFalling(ctx);
       else return;
     } else if (this.state & BS_AWAKING) {
-      // pop_alarm only switches appearance (a sound cue in the C++).
-      if (this.pop_alarm === now) this.pop_alarm = 0;
+      // pop_alarm switches appearance and cues the awaking pop (Block.cxx:100-106).
+      if (this.pop_alarm === now) {
+        ctx.notifyCosmeticSound?.('block_awaking', 5);
+        this.pop_alarm = 0;
+      }
 
       if (this.alarm === now) {
         ctx.awaking_count--;
@@ -305,6 +316,7 @@ export class Block {
           } else {
             // we've landed
             this.state = BS_STATIC;
+            ctx.notifyCosmeticSound?.('block_fallen', 2); // Block.cxx:168
             grid.changeState(this.x, this.y, this, GR_BLOCK);
             grid.requestEliminationCheck(this, this.current_combo);
             // if the block below is swapping, its combo may need switching
@@ -387,7 +399,9 @@ export class Block {
    * (Block.cxx:268). Sets the dying countdown and a cosmetic rotation axis.
    */
   startDying(ctx: BlockSimContext, combo: ComboTabulator, sparkNumber: number): void {
-    void sparkNumber; // used only for the (omitted) death sound
+    // Death cue volume scales with the combo magnitude (Block.cxx:274,
+    // `spark_number / 3`, integer division).
+    ctx.notifyCosmeticSound?.('block_dying', Math.floor(sparkNumber / 3));
 
     ctx.dying_count++;
     this.beginComboInvolvement(combo);

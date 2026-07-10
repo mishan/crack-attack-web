@@ -17,6 +17,7 @@ class Ctx implements BlockSimContext {
   awaking_count = 0;
   dying_count = 0;
   readonly cosmeticRng = new Rng(1);
+  readonly sounds: { sound: string; volume: number }[] = [];
 
   constructor() {
     const rng = new Rng(1);
@@ -24,6 +25,9 @@ class Ctx implements BlockSimContext {
     this.garbageStore = new GarbageManager(this.grid, rng);
   }
 
+  notifyCosmeticSound(sound: string, volume: number): void {
+    this.sounds.push({ sound, volume });
+  }
   notifyLanding(_x: number, _y: number, _block: Block, _combo: ComboTabulator): void {}
   startGarbageFalling(garbage: Garbage, combo: ComboTabulator | null, noHang: boolean): void {
     garbage.startFalling(this, combo, noHang);
@@ -77,6 +81,8 @@ describe('Garbage falling', () => {
       expect(ctx.grid.stateAt(x, 1)).toBe(GR_GARBAGE);
       expect(ctx.grid.stateAt(x, 2)).toBe(GR_GARBAGE);
     }
+    // Landing cues garbage_fallen once, volume = width * height (Garbage.cxx:256).
+    expect(ctx.sounds).toEqual([{ sound: 'garbage_fallen', volume: GC_PLAY_WIDTH * 2 }]);
   });
 
   it('raises top_effective_row when an initial fall lands (notifyImpact)', () => {

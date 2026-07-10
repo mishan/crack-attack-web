@@ -1,0 +1,75 @@
+Crack Attack! — Audio assets copyright and provenance
+=====================================================
+
+The music (music/*.ogg) and sound effects (sounds/*.wav) shipped here were
+taken from Fedora's `crack-attack` package (the same set Arch distributes as
+`crack-attack-sounds`, built from the Fedora source RPM
+crack-attack-1.1.14-40.fc30). Upstream Crack Attack! ships no audio in its
+`data/` tree; these files are fork-supplied and have been carried by the
+Fedora/Arch packages for years. The Fedora package installs a combined
+`music-sound-copyright.txt`; that file could not be retrieved directly (the
+dist-git blocks automated fetches), so this notice reconstructs its two parts
+from primary sources.
+
+Two different licenses apply:
+
+
+1. Sound effects — sounds/*.wav
+-------------------------------
+  block_awaking.wav, block_dying.wav, block_fallen.wav, countdown.wav,
+  garbage_fallen.wav, garbage_shattering.wav
+
+Part of Crack Attack!, which is Free Software under the GNU General Public
+License, version 2 or (at your option) any later version (GPL-2.0-or-later).
+Crack Attack! is Copyright (C) 2000 Daniel Nelson and contributors; see the
+project COPYRIGHT file for the full listing. This port is released under the
+same terms.
+
+
+2. Music — music/*.ogg
+----------------------
+  game.ogg, gameover.ogg, prelude.ogg, youwin.ogg
+
+The music tracks originate from "Crystal Stacker" by NewCreature Design and
+are distributed as freeware. Fedora tracks this as the "CrystalStacker"
+license. The license text (verbatim, per the Fedora Licensing wiki,
+https://fedoraproject.org/wiki/Licensing:CrystalStacker):
+
+    License Text
+
+    Crystal Stacker is freeware. This means you can pass copies around
+    freely provided you include this document in it's original form in your
+    distribution. Please see the "Contacting Us" section of this document if
+    you need to contact us for any reason.
+
+    Disclaimer
+    ----------
+
+    NewCreature Design makes no guarantees regarding the Crystal Stacker
+    software. We are not responsible for damages caused by it, though the
+    software is not known to cause any problems. If you have trouble with
+    the software, see the "Contacting Us" section of this document.
+
+    The source code is provided as-is and you may do with it whatsoever you
+    please provided that you include this file in its unmodified form with
+    any new distribution. NewCreature Design makes no gaurantees regarding
+    the usability of the source but are willing to help with any problems
+    you might run into. Please see the "Contacting Us" section of this
+    document if you need to get in touch with us about any issues you have
+    regarding the source.
+
+The freeware grant is conditioned on redistributing this notice. Keeping this
+file alongside the .ogg tracks satisfies that condition.
+
+
+References
+----------
+  - Fedora Licensing:CrystalStacker
+    https://fedoraproject.org/wiki/Licensing:CrystalStacker
+  - SPDX CrystalStacker license
+    https://spdx.org/licenses/CrystalStacker.html
+  - Fedora crack-attack package
+    https://packages.fedoraproject.org/pkgs/crack-attack/crack-attack/
+  - Arch crack-attack-sounds PKGBUILD (documents the Fedora source and the
+    `music-sound-copyright.txt` install), license: 'GPL' + 'custom:Crystal
+    Stacker freeware'

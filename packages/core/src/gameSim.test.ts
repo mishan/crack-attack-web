@@ -250,3 +250,37 @@ describe('GameSim cosmetic impact/spark/mote buffers', () => {
     expect(typeof sim.notifyCosmeticImpact).toBe('function');
   });
 });
+
+describe('GameSim cosmetic sound buffer', () => {
+  it('drains sound cues once, then reports empty', () => {
+    const sim = new GameSim(1);
+    sim.notifyCosmeticSound('block_fallen', 2);
+    sim.notifyCosmeticSound('garbage_shattering', 12);
+    expect(sim.drainSoundEvents()).toEqual([
+      { sound: 'block_fallen', volume: 2 },
+      { sound: 'garbage_shattering', volume: 12 },
+    ]);
+    expect(sim.drainSoundEvents()).toEqual([]);
+  });
+
+  it('clears the sound buffer on restart', () => {
+    const sim = new GameSim(1);
+    sim.notifyCosmeticSound('block_dying', 4);
+    sim.gameStart();
+    expect(sim.drainSoundEvents()).toEqual([]);
+  });
+
+  it('caps the sound buffer for a never-drained run, keeping the newest', () => {
+    const sim = new GameSim(1);
+    for (let i = 0; i < 500; i++) sim.notifyCosmeticSound('block_awaking', i);
+    const sounds = sim.drainSoundEvents();
+    expect(sounds.length).toBe(128);
+    expect(sounds[sounds.length - 1]!.volume).toBe(499);
+    expect(sounds[0]!.volume).toBe(500 - 128);
+  });
+
+  it('is the sound sink reached through the block context', () => {
+    const sim = new GameSim(1);
+    expect(typeof sim.notifyCosmeticSound).toBe('function');
+  });
+});

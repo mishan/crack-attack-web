@@ -44,6 +44,7 @@ import { ViewInterpolator } from './view/viewInterpolator.js';
 import { LockstepSession } from './net/lockstep.js';
 import { NetClient } from './net/session.js';
 import { SpectatorSession } from './net/spectator.js';
+import type { AudioManager } from './audio/audioManager.js';
 
 const MS_PER_TICK = 1000 / GC_STEPS_PER_SECOND;
 const MAX_SIGN_DT_TICKS = 10;
@@ -79,6 +80,7 @@ export function bootNetplay(
   hudEl: HTMLElement | null,
   relayUrl: string,
   onExit: () => void,
+  audio: AudioManager,
 ): NetplayHandle {
   // --- overlay UI ------------------------------------------------------------
   const overlay = document.createElement('div');
@@ -184,11 +186,35 @@ export function bootNetplay(
   let metaTicks = 0;
   /** Big result image once the game is decided (winner/loser/draw). */
   let resultKind: MessageKind | null = null;
+  // Audio lifecycle for the current match (game music at GO, stinger at the end).
+  let gameMusicOn = false;
+  let endMusicOn = false;
+
+  /**
+   * Set up music for a match about to begin. Fresh games fade the lobby prelude
+   * over the 3-2-1 countdown and start the game loop at GO; a resume/mid-match
+   * join skips the countdown and drops straight into the game loop.
+   */
+  function beginMatchAudio(skipCountdown: boolean): void {
+    gameMusicOn = false;
+    endMusicOn = false;
+    if (skipCountdown) {
+      audio.skipCountdown();
+      gameMusicOn = true;
+      audio.playGame();
+    } else {
+      audio.resetCountdown();
+      audio.fadeoutMusic(3000);
+    }
+  }
 
   const clock = new FixedTimestep();
   const input = new KeyboardInput();
   const bigMessage = new MessageOverlay(app);
   const hud = hudEl ? new HudView(hudEl) : null;
+
+  // The lobby plays the menu prelude (switching from any solo game music).
+  audio.playPrelude();
 
   /** Clear the big-message state (leaving a match, back to lobby/room). */
   function clearOverlay(): void {
@@ -513,6 +539,7 @@ export function bootNetplay(
     showBanner('');
     input.clear();
     clock.reset();
+    beginMatchAudio(resume);
 
     const localSim = newSession.sims[localIndex]!;
     const remoteSim = newSession.sims[1 - localIndex]!;
@@ -562,6 +589,7 @@ export function bootNetplay(
     titleEl.textContent = `${msg.players[0]} vs ${msg.players[1]}`;
     titleEl.style.display = 'block';
     clock.reset();
+    beginMatchAudio(midMatch);
 
     if (!boards) {
       boards = makeBoards(spectator.sims[0]!, spectator.sims[1]!);
@@ -595,6 +623,7 @@ export function bootNetplay(
       showBanner('');
       clearOverlay();
       setStatus('stopped watching');
+      audio.playPrelude(); // back to lobby menu music
       return;
     }
     if (e.code === 'Escape' && phase === 'playing' && !session?.outcome) {
@@ -640,17 +669,34 @@ export function bootNetplay(
           boards![1].interp.push(deriveViewModel(w.sims[1]!));
         });
         lightsTicks += steppedTicks;
+
+        // Audio: mirror the players' countdown beeps; game music at GO.
+        audio.updateCountdown(metaTicks);
+        if (!gameMusicOn && metaTicks >= COUNTDOWN_GATE_TICKS) {
+          gameMusicOn = true;
+          audio.playGame();
+        }
+
         if (w.outcome) {
           const { winner } = w.outcome;
           resultKind = 'message_game_over';
           showBanner(winner === null ? 'Draw — both topped out.' : `${names[winner]} wins!`);
+          if (!endMusicOn) {
+            endMusicOn = true;
+            if (winner === null) audio.playGameOver();
+            else audio.playYouWin();
+          }
         } else if (backlog <= 25 && banner.textContent === 'catching up…') {
           showBanner('');
         }
+        const catchingUp = backlog > 25;
         for (let i = 0; i < 2; i++) {
           for (const ev of w.sims[i]!.drainSignEvents()) {
             boards[i]!.signs.spawn(ev.gridX, ev.gridY, ev.kind, ev.level);
           }
+          // A watcher hears both boards; suppress the burst while catching up.
+          if (catchingUp) w.sims[i]!.drainSoundEvents();
+          else audio.playCues(w.sims[i]!.drainSoundEvents());
         }
       }
       bigMessage.show(resultKind ?? countdownMessage(metaTicks));
@@ -724,6 +770,13 @@ export function bootNetplay(
         lightsTicks += stepped;
         metaTicks += stepped; // times the GO tail of the countdown
 
+        // Audio: countdown beeps track the meta timeline; game music at GO.
+        audio.updateCountdown(metaTicks);
+        if (!gameMusicOn && metaTicks >= COUNTDOWN_GATE_TICKS) {
+          gameMusicOn = true;
+          audio.playGame();
+        }
+
         if (!gateActive) {
           for (const batch of s.takeOutgoing()) {
             net?.send({ type: 'inputs', startTick: batch.startTick, frames: batch.frames });
@@ -762,6 +815,12 @@ export function bootNetplay(
             resultSent = true;
             net?.send({ type: 'result', winner });
           }
+          if (!endMusicOn) {
+            endMusicOn = true;
+            // Win → youwin, loss/draw → gameover (C++ CelebrationManager).
+            if (winner === localIndex) audio.playYouWin();
+            else audio.playGameOver();
+          }
           readyBtn.hidden = false;
           readyBtn.disabled = false;
           readyBtn.textContent = 'Rematch';
@@ -773,6 +832,16 @@ export function bootNetplay(
         for (const ev of remoteSim.drainSignEvents()) {
           boards[1].signs.spawn(ev.gridX, ev.gridY, ev.kind, ev.level);
         }
+
+        // Sound cues: play the local board (faithful — each client heard only
+        // its own board); the opponent sim's buffer is drained and discarded.
+        // Suppress the burst while catching up a resume backlog.
+        if (catchingUp) {
+          localSim.drainSoundEvents();
+        } else {
+          audio.playCues(localSim.drainSoundEvents());
+        }
+        remoteSim.drainSoundEvents();
       }
 
       // Big overlay: result image > countdown / GO > lockstep-stall WAITING.
