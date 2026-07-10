@@ -32,7 +32,6 @@ class HeadlessPlayer {
 
   constructor(
     private readonly relay: RelayServer,
-    name: string,
     scriptSeed: number,
   ) {
     const r = new Rng(scriptSeed);
@@ -54,11 +53,15 @@ class HeadlessPlayer {
     this.conn.deliver = (text: string) => this.onMessage(decodeServerMessage(text));
     this.conn.send = (text: string) => this.conn.deliver(text);
     relay.connect(this.conn);
-    this.say({ type: 'hello', protocolVersion: PROTOCOL_VERSION, name });
   }
 
-  say(msg: ClientMessage): void {
-    this.relay.message(this.conn, encodeMessage(msg));
+  /** Hello the relay (async: identity touches the store). */
+  async join(name: string): Promise<void> {
+    await this.say({ type: 'hello', protocolVersion: PROTOCOL_VERSION, name });
+  }
+
+  async say(msg: ClientMessage): Promise<void> {
+    await this.relay.message(this.conn, encodeMessage(msg));
   }
 
   private onMessage(msg: ServerMessage): void {
@@ -74,44 +77,46 @@ class HeadlessPlayer {
   }
 
   /** One "render frame": advance up to `steps` ticks, ship inputs + digests. */
-  pump(steps: number): void {
+  async pump(steps: number): Promise<void> {
     const s = this.session;
     if (!s) return;
     s.advance(steps, this.script);
     for (const b of s.takeOutgoing()) {
-      this.say({ type: 'inputs', startTick: b.startTick, frames: b.frames });
+      await this.say({ type: 'inputs', startTick: b.startTick, frames: b.frames });
     }
     for (const d of s.takeDigests()) {
-      this.say({ type: 'digest', tick: d.tick, digests: d.digests });
+      await this.say({ type: 'digest', tick: d.tick, digests: d.digests });
     }
   }
 }
 
 describe('end-to-end lockstep through the relay', () => {
-  it('plays a full match to a deterministic outcome with zero desyncs', () => {
+  it('plays a full match to a deterministic outcome with zero desyncs', async () => {
     const relay = new RelayServer({ inputDelay: 3 });
-    const alice = new HeadlessPlayer(relay, 'alice', 101);
-    const bob = new HeadlessPlayer(relay, 'bob', 202);
+    const alice = new HeadlessPlayer(relay, 101);
+    const bob = new HeadlessPlayer(relay, 202);
+    await alice.join('alice');
+    await bob.join('bob');
 
-    alice.say({ type: 'create_room' });
+    await alice.say({ type: 'create_room' });
     expect(relay.roomCount).toBe(1);
     expect(alice.roomCode).not.toBe('');
 
-    bob.say({ type: 'join_room', code: alice.roomCode });
-    alice.say({ type: 'ready' });
-    bob.say({ type: 'ready' });
+    await bob.say({ type: 'join_room', code: alice.roomCode });
+    await alice.say({ type: 'ready' });
+    await bob.say({ type: 'ready' });
     expect(alice.session).not.toBeNull();
     expect(bob.session).not.toBeNull();
 
     // Interleave frames of different sizes until the match resolves.
     for (let i = 0; i < 100000 && !alice.session!.outcome; i++) {
-      alice.pump(1 + (i % 3));
-      bob.pump(1 + ((i + 1) % 3));
+      await alice.pump(1 + (i % 3));
+      await bob.pump(1 + ((i + 1) % 3));
     }
     // Let the trailing input batches flush and the laggard finish.
     for (let i = 0; i < 10; i++) {
-      alice.pump(100);
-      bob.pump(100);
+      await alice.pump(100);
+      await bob.pump(100);
     }
 
     expect(alice.session!.outcome).not.toBeNull();

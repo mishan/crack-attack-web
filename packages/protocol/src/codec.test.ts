@@ -96,6 +96,8 @@ const serverMessages: ServerMessage[] = [
   { type: 'peer_inputs', playerIndex: 0, startTick: 0, frames: [CC_SWAP] },
   { type: 'desync', tick: 64 },
   { type: 'match_end', reason: 'concession', winner: 0 },
+  { type: 'match_end', reason: 'result', winner: 1 },
+  { type: 'match_end', reason: 'result', winner: null },
   { type: 'match_end', reason: 'desync', winner: null },
   { type: 'error', code: 'room_not_found', message: 'no such room' },
 ];

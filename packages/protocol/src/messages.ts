@@ -294,13 +294,16 @@ export interface MatchResumeMessage {
   frames: [number[], number[]];
 }
 
-/** Reasons a match can end that the deterministic sims cannot decide. */
-export type MatchEndReason = 'concession' | 'disconnect' | 'desync';
+/**
+ * Why a match ended: `result` confirms an agreed client-reported gameplay
+ * outcome (v2); the others are events the deterministic sims cannot decide.
+ */
+export type MatchEndReason = 'result' | 'concession' | 'disconnect' | 'desync';
 
 /**
- * The match ended for a non-gameplay reason (gameplay losses are computed
- * deterministically client-side and need no server message). `winner` is a
- * player index, or null if the match is void (e.g. desync).
+ * The match is over and the room is back to waiting (re-ready for a rematch).
+ * `winner` is a player index, or null if void (desync) or a draw (`result`
+ * with a same-tick double loss).
  */
 export interface MatchEndMessage {
   type: 'match_end';

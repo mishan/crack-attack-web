@@ -214,6 +214,7 @@ const ERROR_CODES: ReadonlySet<string> = new Set([
 ] satisfies ErrorCode[]);
 
 const MATCH_END_REASONS: ReadonlySet<string> = new Set([
+  'result',
   'concession',
   'disconnect',
   'desync',
