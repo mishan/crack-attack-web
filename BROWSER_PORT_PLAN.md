@@ -82,11 +82,13 @@ Milestone: two browsers playing head-to-head through the relay.
 
 Node/TS server (`packages/server`), same process as the relay. Landed (protocol v2): named players with server-minted session tokens (lightweight auth — the token is the identity key, held in the client's localStorage), live room-list pushes with per-player W-L records, create/join/ready flow, and reconnect grace built on the lockstep ledgers — a seat survives its connection, the server holds both players' full input histories, and a rejoining token gets `match_resume` to rebuild its session from tick 0 and fast-forward. Game outcomes are client-reported (`result`) and cross-checked (both clients compute them deterministically; disagreement is treated as a desync); agreed decisive results, concessions, and expired grace record W-L through an abstract async store (`LobbyStore`: SQLite now via better-sqlite3, Redis-swappable later).
 
-Deferred from this phase: best-of-3 match lifecycle per `GC_GAMES_PER_MATCH` (rematch-by-re-readying stands in), and richer rankings (only W-L records so far). Spectating falls out almost free later: a spectator is a third sim pair fed both players' input streams — the `match_resume` ledger mechanism is exactly the late-join primitive it needs.
+Deferred from this phase: best-of-3 match lifecycle per `GC_GAMES_PER_MATCH` (rematch-by-re-readying stands in), and richer rankings (only W-L records so far).
+
+Spectating (landed, protocol v3): as predicted, it fell out of the architecture — a spectator is a third sim pair fed both players' input streams, and the `match_resume` ledger mechanism doubles as the mid-match late-join primitive (`spectate_start` carries both ledgers). Watchers are live and visible by name (roster pushes + room list), connection-bound (no grace; re-watching is cheap), and stay seated across rematches. An anti-ghosting delay, if ever wanted, is a client-side buffer over the same streams — no protocol change.
 
 ## Phase 6 — Stretch
 
-X-mode (extreme variant), shareable replays (seed + action streams are tiny), touch/mobile controls, spectator mode, WebRTC data channels as a latency upgrade (relay stays for signaling and fallback), custom garbage flavor images.
+X-mode (extreme variant), shareable replays (seed + action streams are tiny), WebRTC data channels as a latency upgrade (relay stays for signaling and fallback), custom garbage flavor images. (Touch controls and spectator mode, once listed here, have landed.)
 
 ## Risks / open questions
 

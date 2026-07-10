@@ -288,7 +288,20 @@ just use `pnpm` directly.
       (default `./crack-attack.db`). e2e: mid-match drop → rejoin by token →
       resume → identical deterministic outcome, zero desyncs. Deferred: best-of-3
       (`GC_GAMES_PER_MATCH`), richer rankings.
-- [ ] Phase 3 AI, Phase 6 stretch (X-mode, replays, spectators, WebRTC, binary
-      codec if measurements demand it)
+- [x] **Spectator mode landed** (protocol v3): a spectator is a third sim pair
+      fed both players' input streams — `net/spectator.ts` (DOM-free
+      `SpectatorSession`: same garbage cross-wiring, per-stream contiguity,
+      steps only fully-buffered ticks, identical deterministic outcome). The
+      relay attaches watchers to waiting or playing rooms (`spectate` →
+      `spectate_joined` + `spectate_start`; mid-match joins ship both ledgers —
+      the `match_resume` mechanism reused), fans both `peer_inputs` streams and
+      all match lifecycle to them, pushes `spectators` rosters (watchers are
+      live and visible by name, per design), and closes evaporated rooms with
+      `room_closed`. Lobby room list shows watcher counts + a watch button; the
+      watch view titles the boards "A vs B", catches up in chunks, and stays
+      seated across rematches (Esc leaves). e2e: a mid-match watcher catches up
+      and lands bit-identical sims and the same outcome as the players.
+- [ ] Phase 3 AI, Phase 6 stretch (X-mode, replays, WebRTC, binary codec if
+      measurements demand it)
 
 See `BROWSER_PORT_PLAN.md` for the full phase breakdown and suggested order of work.
