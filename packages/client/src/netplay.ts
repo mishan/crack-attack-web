@@ -48,6 +48,7 @@ const STORAGE_NAME = 'crack-attack.name';
 
 /** Everything one rendered board needs, bundled per player. */
 interface BoardBundle {
+  container: HTMLDivElement;
   view: BoardView;
   interp: ViewInterpolator;
   signs: SignsView;
@@ -57,7 +58,17 @@ interface BoardBundle {
 
 type Phase = 'connecting' | 'lobby' | 'room' | 'playing' | 'ended' | 'spectating';
 
-export function bootNetplay(app: HTMLElement, hudEl: HTMLElement | null, relayUrl: string): void {
+/** A running netplay mode; `dispose` tears everything down (mode switch). */
+export interface NetplayHandle {
+  dispose(): void;
+}
+
+export function bootNetplay(
+  app: HTMLElement,
+  hudEl: HTMLElement | null,
+  relayUrl: string,
+  onExit: () => void,
+): NetplayHandle {
   // --- overlay UI ------------------------------------------------------------
   const overlay = document.createElement('div');
   overlay.style.cssText =
@@ -79,7 +90,8 @@ export function bootNetplay(app: HTMLElement, hudEl: HTMLElement | null, relayUr
     </div>
     <div id="net-rooms" style="display:flex;flex-direction:column;gap:4px"></div>
     <button id="net-ready" hidden>Ready</button>
-    <div id="net-status" style="min-height:2.5em;opacity:.8"></div>`;
+    <div id="net-status" style="min-height:2.5em;opacity:.8"></div>
+    <button id="net-solo" style="opacity:.8">Back to solo play</button>`;
   overlay.appendChild(panel);
   document.body.appendChild(overlay);
 
@@ -155,12 +167,15 @@ export function bootNetplay(app: HTMLElement, hudEl: HTMLElement | null, relayUr
   let graceMs = DEFAULT_RECONNECT_GRACE_MS;
   let reconnectUntil = 0;
   let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  let disposed = false;
+  let rafId = 0;
 
   const clock = new FixedTimestep();
   const input = new KeyboardInput();
   const hud = hudEl ? new HudView(hudEl) : null;
 
   function connect(): void {
+    if (disposed) return;
     if (reconnectTimer !== null) {
       clearTimeout(reconnectTimer);
       reconnectTimer = null;
@@ -191,6 +206,7 @@ export function bootNetplay(app: HTMLElement, hudEl: HTMLElement | null, relayUr
   /** Reconnect with backoff while a match seat may still be held for us. */
   function onConnectionLost(): void {
     net = null;
+    if (disposed) return; // mode switched away; stay quiet
     // connect() can fail twice for one attempt (promise rejection AND the
     // socket's close event); never stack reconnect timers.
     if (reconnectTimer !== null) {
@@ -420,6 +436,7 @@ export function bootNetplay(app: HTMLElement, hudEl: HTMLElement | null, relayUr
       const halfW = (vm.width - 1) / 2;
       const halfH = (vm.visibleHeight - 1) / 2;
       return {
+        container,
         view,
         interp,
         signs: new SignsView(view.scene, halfW, halfH),
@@ -510,7 +527,7 @@ export function bootNetplay(app: HTMLElement, hudEl: HTMLElement | null, relayUr
   }
 
   // --- input ---------------------------------------------------------------------
-  globalThis.addEventListener('keydown', (e: KeyboardEvent) => {
+  const onKeyDown = (e: KeyboardEvent): void => {
     if (e.code === 'KeyR' && session?.outcome && (phase === 'playing' || phase === 'ended')) {
       sendReady();
       return;
@@ -534,15 +551,19 @@ export function bootNetplay(app: HTMLElement, hudEl: HTMLElement | null, relayUr
       input.press(e.code);
       e.preventDefault();
     }
-  });
-  globalThis.addEventListener('keyup', (e: KeyboardEvent) => input.release(e.code));
-  globalThis.addEventListener('blur', () => input.clear());
+  };
+  const onKeyUp = (e: KeyboardEvent): void => input.release(e.code);
+  const onBlur = (): void => input.clear();
+  globalThis.addEventListener('keydown', onKeyDown);
+  globalThis.addEventListener('keyup', onKeyUp);
+  globalThis.addEventListener('blur', onBlur);
 
   // --- loop ------------------------------------------------------------------------
   let lastMs = performance.now();
   let waitingSince: number | null = null;
 
   const frame = (nowMs: number): void => {
+    if (disposed) return;
     // --- watcher branch: no input, no sending; just consume and render.
     if (spectator && boards && phase === 'spectating') {
       const w = spectator;
@@ -577,7 +598,7 @@ export function bootNetplay(app: HTMLElement, hudEl: HTMLElement | null, relayUr
         b.view.render();
       });
       lastMs = nowMs;
-      globalThis.requestAnimationFrame(frame);
+      rafId = globalThis.requestAnimationFrame(frame);
       return;
     }
 
@@ -664,10 +685,44 @@ export function bootNetplay(app: HTMLElement, hudEl: HTMLElement | null, relayUr
       });
     }
     lastMs = nowMs;
-    globalThis.requestAnimationFrame(frame);
+    rafId = globalThis.requestAnimationFrame(frame);
   };
-  globalThis.requestAnimationFrame(frame);
+  rafId = globalThis.requestAnimationFrame(frame);
+
+  // Mode switch back to solo: tear down and hand control to the caller.
+  const soloBtn = $<HTMLButtonElement>('net-solo');
+  soloBtn.onclick = (): void => onExit();
 
   // Kick everything off.
   connect();
+
+  return {
+    dispose(): void {
+      if (disposed) return;
+      disposed = true;
+      if (reconnectTimer !== null) {
+        clearTimeout(reconnectTimer);
+        reconnectTimer = null;
+      }
+      net?.close('mode switch');
+      net = null;
+      cancelAnimationFrame(rafId);
+      globalThis.removeEventListener('keydown', onKeyDown);
+      globalThis.removeEventListener('keyup', onKeyUp);
+      globalThis.removeEventListener('blur', onBlur);
+      globalThis.removeEventListener('resize', fitToWindow);
+      if (boards) {
+        for (const b of boards) {
+          b.view.dispose(); // release the WebGL contexts (browsers cap them)
+          b.container.remove();
+        }
+        boards = null;
+      }
+      overlay.remove();
+      banner.remove();
+      rosterEl.remove();
+      titleEl.remove();
+      if (hudEl) hudEl.textContent = '';
+    },
+  };
 }

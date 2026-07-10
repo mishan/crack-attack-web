@@ -469,4 +469,14 @@ export class BoardView {
     this.camera.updateProjectionMatrix();
     this.renderer.setSize(width, height);
   }
+
+  /**
+   * Release the WebGL context and detach the canvas. For mode switches
+   * (solo ↔ netplay): browsers cap live WebGL contexts, so views must not
+   * simply be dropped on the floor.
+   */
+  dispose(): void {
+    this.renderer.dispose();
+    this.renderer.domElement.remove();
+  }
 }
