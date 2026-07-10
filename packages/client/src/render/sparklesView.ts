@@ -101,6 +101,9 @@ export class SparklesView {
       mesh.renderOrder = 5; // over blocks and garbage
       mesh.frustumCulled = false;
       for (let i = 0; i < mesh.count; i++) mesh.setMatrixAt(i, HIDDEN);
+      // Flush the hidden matrices now: without this, a frame rendered before
+      // the first sync() would draw every instance at the origin (identity).
+      mesh.instanceMatrix.needsUpdate = true;
       scene.add(mesh);
     }
   }
