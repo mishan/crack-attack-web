@@ -73,8 +73,21 @@ describe('reward motes', () => {
     expect(active[1]!.type).toBe(MT_SPECIAL_STAR);
     expect(active[1]!.color).toBe(4);
     expect(active[2]!.type).toBe(MT_MULTIPLIER_ONE_STAR);
+    expect(active[2]!.inverse_mass).toBe(1); // ×2 chains are still light
     expect(active[3]!.size).toBe(5.1);
+    expect(active[3]!.inverse_mass).toBeCloseTo(1 / 4.2, 10); // heaviest, level 21
     expect(s.mote_count).toBe(4);
+  });
+
+  it('the heavy multiplier band starts at level 14 (table alignment)', () => {
+    // Regression: a dropped 1.0 entry once shifted the whole inverse-mass
+    // band by one level (and left level 21 falling off the table).
+    const s = make();
+    s.createRewardMote(1, 1, 13, 0); // ×4 chain: last of the unit-mass band
+    s.createRewardMote(1, 1, 14, 0); // ×5 chain: first heavy mote
+    const [l13, l14] = s.motes.filter((m) => m.active);
+    expect(l13!.inverse_mass).toBe(1);
+    expect(l14!.inverse_mass).toBeCloseTo(1 / 1.4, 10);
   });
 
   it('holds at the payout (rotating only), staggered by sibling, then launches', () => {

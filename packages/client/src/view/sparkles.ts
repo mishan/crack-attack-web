@@ -24,6 +24,10 @@ import { GC_DYING_DELAY, GC_PLAY_WIDTH, type Rng } from '@crack-attack/core';
 export const DC_MAX_SPARK_NUMBER = 400;
 export const DC_MAX_MOTE_NUMBER = 40;
 const DC_GRID_ELEMENT_LENGTH = 2.0;
+/**
+ * A *world-unit* length like everything else in this module — the `0.4 / 2.0`
+ * is the reference's own expression (Displayer.h:174), not a cell conversion.
+ */
 export const DC_SPARKLE_LENGTH = 0.4 / 2.0;
 
 const DC_SPARK_GRAVITY = 0.001;
@@ -91,7 +95,10 @@ const MOTE_SIZES_BY_LEVEL = [
   2.0, 2.8, 2.8, 3.4, 3.4, 3.4, 3.4, 3.4, 3.4, 3.4, 3.4, 4.0, 2.6, 3.5, 3.7, 3.9, 4.1, 4.3, 4.5,
   4.7, 4.9, 5.1,
 ];
+// 22 entries: fourteen 1.0s, then the heavy multiplier motes
+// (SparkleManager.cxx:66-68).
 const MOTE_INVERSE_MASSES_BY_LEVEL = [
+  1,
   1,
   1,
   1,
@@ -345,7 +352,7 @@ export class Sparkles {
     mote.color = MOTE_COLORS_BY_LEVEL[level]!;
     mote.type = MOTE_TYPES_BY_LEVEL[level]!;
     mote.size = MOTE_SIZES_BY_LEVEL[level]!;
-    mote.inverse_mass = MOTE_INVERSE_MASSES_BY_LEVEL[level] ?? 1;
+    mote.inverse_mass = MOTE_INVERSE_MASSES_BY_LEVEL[level]!;
 
     mote.x =
       (cellX - this.halfW) * DC_GRID_ELEMENT_LENGTH -
