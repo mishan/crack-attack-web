@@ -29,11 +29,29 @@ const MS_PER_TICK = 1000 / GC_STEPS_PER_SECOND;
 /** Cap sign advance per frame so a long stall (tab refocus) doesn't warp them away. */
 const MAX_SIGN_DT_TICKS = 10;
 
+/**
+ * Mode dispatch: `?net` boots the head-to-head netplay shell (Phase 4);
+ * `?relay=ws://host:port` overrides the relay URL. Default is the solo game.
+ */
 function boot(): void {
   const app = document.getElementById('app');
   const hudEl = document.getElementById('hud');
   if (!app) throw new Error('missing #app container');
 
+  const params = new URLSearchParams(globalThis.location.search);
+  if (params.has('net')) {
+    const relayUrl = params.get('relay') ?? `ws://${globalThis.location.hostname}:8080`;
+    const help = document.getElementById('help');
+    if (help) {
+      help.textContent = '←→↑↓ move · Z / Space swap · X raise · R ready/rematch · Esc concede';
+    }
+    void import('./netplay.js').then((m) => m.bootNetplay(app, hudEl, relayUrl));
+    return;
+  }
+  bootSolo(app, hudEl);
+}
+
+function bootSolo(app: HTMLElement, hudEl: HTMLElement | null): void {
   let sim = new GameSim(SEED);
   const clock = new FixedTimestep();
   const input = new KeyboardInput();
