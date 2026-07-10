@@ -128,6 +128,11 @@ export class GarbageGenerator {
     // used by blocks to determine death-spark number (cosmetic, but faithful)
     combo.latest_magnitude = combo.special_magnitude + combo.magnitude + combo.multiplier - 1;
 
+    // Cosmetic reward motes accompany each garbage send, staggered by a
+    // sibling index (SparkleManager::createRewardMote call sites,
+    // GarbageGenerator.cxx:74-133). Levels are the C++ literals.
+    let sibling = 0;
+
     // --- special garbage (per tallied special flavor) ---
     // Track whether any per-flavor special sign was shown, so the gray branch
     // below only adds a generic bonus sign when none was (GarbageGenerator.cxx:62-84).
@@ -141,6 +146,7 @@ export class GarbageGenerator {
         if (isColorlessCode(n)) combo.special_magnitude -= count;
         while (count--) {
           this.sendSpecialGarbage(mapBlockCodeToGarbageFlavor(n));
+          this.signSink?.createMote?.(combo.x, combo.y, n + 4, sibling++);
         }
         combo.special[n] = 0;
       }
@@ -153,6 +159,7 @@ export class GarbageGenerator {
       combo.special_magnitude -= GC_MIN_PATTERN_LENGTH - 2;
       while (--combo.special_magnitude) {
         this.sendSpecialGarbage(GF_GRAY);
+        this.signSink?.createMote?.(combo.x, combo.y, 3, sibling++);
       }
     } else {
       combo.special_magnitude = 0;
@@ -165,17 +172,27 @@ export class GarbageGenerator {
       this.signSink?.createSign(combo.x, combo.y, 'magnitude', combo.magnitude - 4);
       if (combo.magnitude <= GC_PLAY_WIDTH) {
         this.sendGarbage(1, combo.magnitude - 1, GF_NORMAL);
+        this.signSink?.createMote?.(combo.x, combo.y, combo.magnitude - 4, sibling++);
       } else if (combo.magnitude < 2 * GC_PLAY_WIDTH - 1) {
         this.sendGarbage(1, combo.magnitude - (combo.magnitude >> 1), GF_NORMAL);
+        this.signSink?.createMote?.(
+          combo.x,
+          combo.y,
+          combo.magnitude - (combo.magnitude >> 1) - 3,
+          sibling++,
+        );
         this.sendGarbage(1, combo.magnitude >> 1, GF_NORMAL);
+        this.signSink?.createMote?.(combo.x, combo.y, (combo.magnitude >> 1) - 3, sibling++);
       } else {
         combo.magnitude += GC_MIN_PATTERN_LENGTH;
         while (combo.magnitude > GC_PLAY_WIDTH - 1) {
           this.sendGarbage(1, GC_PLAY_WIDTH - 1, GF_NORMAL);
+          this.signSink?.createMote?.(combo.x, combo.y, GC_PLAY_WIDTH - 4, sibling++);
           combo.magnitude -= GC_PLAY_WIDTH - 1;
         }
         if (combo.magnitude >= GC_MIN_PATTERN_LENGTH) {
           this.sendGarbage(1, combo.magnitude, GF_NORMAL);
+          this.signSink?.createMote?.(combo.x, combo.y, combo.magnitude - 3, sibling);
         }
       }
     }

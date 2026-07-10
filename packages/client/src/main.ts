@@ -26,6 +26,7 @@ import { mountRenderTuner } from './render/renderTuner.js';
 import { LevelLightsView } from './render/levelLightsView.js';
 import { SignsView } from './render/signsView.js';
 import { MessageOverlay } from './render/messageOverlay.js';
+import { SparklesView } from './render/sparklesView.js';
 import { FixedTimestep } from './sim/fixedTimestep.js';
 import { deriveViewModel } from './view/boardViewModel.js';
 import { COUNTDOWN_GATE_TICKS, countdownMessage } from './view/messages.js';
@@ -107,6 +108,7 @@ function bootSolo(
   const signs = new SignsView(view.scene, halfW, halfH);
   const decals = new GarbageDecalView(view.scene, halfW, halfH);
   const levelLights = new LevelLightsView(view.scene, halfW, halfH);
+  const sparkles = new SparklesView(view.scene, halfW, halfH);
   const spring = new Spring();
   const overlay = new MessageOverlay(app);
   const hud = hudEl ? new HudView(hudEl) : null;
@@ -142,6 +144,7 @@ function bootSolo(
     interp.push(fresh);
     signs.clear();
     decals.clear();
+    sparkles.clear();
     input.clear();
     spring.gameStart();
     view.setShake(0);
@@ -186,6 +189,7 @@ function bootSolo(
     // the clock (and thus the HUD timer) and the board freeze on the final tick
     // until the player restarts.
     let stepped = 0;
+    let gateTicks = 0; // wall ticks the countdown gate consumed this frame
     if (!sim.lost) {
       const steps = clock.sample(nowMs);
       for (let s = 0; s < steps; s++) {
@@ -193,6 +197,7 @@ function bootSolo(
         // GC_START_PAUSE_DELAY ticks (Game.cxx:399-408) while 3-2-1 shows.
         if (metaTicks < COUNTDOWN_GATE_TICKS) {
           metaTicks++;
+          gateTicks++;
           continue;
         }
         sim.step(input.actionState());
@@ -215,6 +220,12 @@ function bootSolo(
     for (let t = 0; t < stepped; t++) spring.timeStep();
     view.setShake(spring.offsetCells);
 
+    // Death sparks + reward motes, ticking with the sim like the spring.
+    for (const ev of sim.drainSparkEvents()) sparkles.spawnSparks(ev.x, ev.y, ev.flavor, ev.count);
+    for (const ev of sim.drainMoteEvents()) sparkles.spawnMote(ev.x, ev.y, ev.level, ev.sibling);
+    sparkles.advance(stepped);
+    sparkles.sync();
+
     // Signs float on wall-clock time (and keep fading out after a loss).
     const dtTicks = Math.min(MAX_SIGN_DT_TICKS, (nowMs - lastMs) / MS_PER_TICK);
     lastMs = nowMs;
@@ -229,7 +240,9 @@ function bootSolo(
     const vm = interp.sample(sim.lost ? 1 : clock.alpha);
     view.update(vm);
     decals.update(vm.garbage);
-    levelLights.update(stepped, vm.hud.topEffectiveRow, !sim.lost, impacts);
+    // Lights tick through the countdown gate too (Game.cxx:389 runs before
+    // the gate check) — the start-of-game fade completes exactly at GO.
+    levelLights.update(gateTicks + stepped, vm.hud.topEffectiveRow, !sim.lost, impacts);
     view.render();
     hud?.update(vm.hud);
 

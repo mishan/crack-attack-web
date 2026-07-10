@@ -64,14 +64,24 @@ export class LevelLightsState {
     }
   }
 
-  /** Reset for a new game at the given starting stack height. Mirrors `gameStart`. */
-  gameStart(topEffectiveRow: number): void {
+  /**
+   * Reset for a new game at the given starting stack height. Mirrors
+   * `gameStart`: the initial reds *fade in* — deliberately, because the fade
+   * time (150) equals the countdown gate, and the C++ ticks the lights before
+   * the gate check (Game.cxx:389 vs 399), so the fade completes exactly at GO.
+   * Pass `instant` where no countdown will cover the fade (resume, mid-match
+   * spectate): the boundary then snaps to the steady state immediately.
+   */
+  gameStart(topEffectiveRow: number, instant = false): void {
     for (let n = 0; n < LEVEL_LIGHT_COUNT; n++) {
       const light = this.lights[n]!;
       light.state = LS_BLUE;
       light.fade_alarm = 0;
       light.flash_alarm = 0;
-      if (n < topEffectiveRow) this.setRed(light);
+      if (n < topEffectiveRow) {
+        if (instant) light.state = LS_RED;
+        else this.setRed(light);
+      }
     }
     this.death_flash_alarm = -1;
   }
@@ -87,7 +97,11 @@ export class LevelLightsState {
       if (height < 1) return;
     }
     while (height--) {
-      this.setFlashing(this.lights[y - 1 + height]!);
+      const index = y - 1 + height;
+      // Low-end guard (beyond the C++, whose raw arrays tolerated it): an
+      // impact reported at/below the creep row must not index negatively.
+      if (index < 0) break;
+      this.setFlashing(this.lights[index]!);
     }
   }
 

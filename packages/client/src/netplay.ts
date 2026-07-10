@@ -30,6 +30,7 @@ import { HudView } from './render/hudView.js';
 import { LevelLightsView } from './render/levelLightsView.js';
 import { SignsView } from './render/signsView.js';
 import { MessageOverlay } from './render/messageOverlay.js';
+import { SparklesView } from './render/sparklesView.js';
 import { FixedTimestep } from './sim/fixedTimestep.js';
 import { deriveViewModel } from './view/boardViewModel.js';
 import {
@@ -63,6 +64,7 @@ interface BoardBundle {
   decals: GarbageDecalView;
   levelLights: LevelLightsView;
   spring: Spring;
+  sparkles: SparklesView;
 }
 
 type Phase = 'connecting' | 'lobby' | 'room' | 'playing' | 'ended' | 'spectating';
@@ -474,6 +476,7 @@ export function bootNetplay(
         decals: new GarbageDecalView(view.scene, halfW, halfH),
         levelLights,
         spring: new Spring(),
+        sparkles: new SparklesView(view.scene, halfW, halfH),
       };
     };
     // Local board left, opponent right, regardless of player index.
@@ -516,24 +519,27 @@ export function bootNetplay(
     if (!boards) {
       boards = makeBoards(localSim, remoteSim);
       fitToWindow();
-    } else {
-      resetBoards(localSim, remoteSim);
     }
+    resetBoards(localSim, remoteSim, resume);
   }
 
-  /** Reset reused board bundles for a fresh game (rematch/resume/spectate). */
-  function resetBoards(leftSim: GameSim, rightSim: GameSim): void {
+  /**
+   * Reset board bundles for a fresh game (rematch/resume/spectate). `instant`
+   * skips the level lights' start-of-game fade (no countdown will cover it).
+   */
+  function resetBoards(leftSim: GameSim, rightSim: GameSim, instant: boolean): void {
     if (!boards) return;
     const sims = [leftSim, rightSim];
     boards.forEach((b, i) => {
       b.interp.reset();
       b.signs.clear();
       b.decals.clear();
+      b.sparkles.clear();
       b.spring.gameStart();
       b.view.setShake(0);
       const vm = deriveViewModel(sims[i]!);
       b.interp.push(vm);
-      b.levelLights.reset(vm.hud.topEffectiveRow);
+      b.levelLights.reset(vm.hud.topEffectiveRow, instant);
     });
   }
 
@@ -560,9 +566,8 @@ export function bootNetplay(
     if (!boards) {
       boards = makeBoards(spectator.sims[0]!, spectator.sims[1]!);
       fitToWindow();
-    } else {
-      resetBoards(spectator.sims[0]!, spectator.sims[1]!);
     }
+    resetBoards(spectator.sims[0]!, spectator.sims[1]!, midMatch);
   }
 
   function resumeMatch(msg: MatchResumeMessage): void {
@@ -620,10 +625,13 @@ export function bootNetplay(
     if (spectator && boards && phase === 'spectating') {
       const w = spectator;
       let steppedTicks = 0;
+      let lightsTicks = 0;
       if (!w.outcome) {
         const due = clock.sample(nowMs);
         // Display-only countdown mirror: the players are gated for the same
-        // wall time, so no frames arrive while 3-2-1 shows here.
+        // wall time, so no frames arrive while 3-2-1 shows here. The lights
+        // fade across the gate here too.
+        lightsTicks += Math.max(0, Math.min(due, COUNTDOWN_GATE_TICKS - metaTicks));
         if (metaTicks < COUNTDOWN_GATE_TICKS + GO_DISPLAY_TICKS) metaTicks += due;
         const backlog = w.bufferedTicks;
         const budget = backlog > 25 ? Math.min(backlog, CATCH_UP_STEPS_PER_FRAME) : due;
@@ -631,6 +639,7 @@ export function bootNetplay(
           boards![0].interp.push(deriveViewModel(w.sims[0]!));
           boards![1].interp.push(deriveViewModel(w.sims[1]!));
         });
+        lightsTicks += steppedTicks;
         if (w.outcome) {
           const { winner } = w.outcome;
           resultKind = 'message_game_over';
@@ -655,10 +664,17 @@ export function bootNetplay(
         for (const imp of impacts[i]!) b.spring.notifyImpact(imp.height, imp.width);
         for (let t = 0; t < steppedTicks; t++) b.spring.timeStep();
         b.view.setShake(b.spring.offsetCells);
+        const sim = w.sims[i]!;
+        for (const ev of sim.drainSparkEvents())
+          b.sparkles.spawnSparks(ev.x, ev.y, ev.flavor, ev.count);
+        for (const ev of sim.drainMoteEvents())
+          b.sparkles.spawnMote(ev.x, ev.y, ev.level, ev.sibling);
+        b.sparkles.advance(steppedTicks);
+        b.sparkles.sync();
         const vm = b.interp.sample(alpha);
         b.view.update(vm);
         b.decals.update(vm.garbage);
-        b.levelLights.update(steppedTicks, vm.hud.topEffectiveRow, !w.outcome, impacts[i]!);
+        b.levelLights.update(lightsTicks, vm.hud.topEffectiveRow, !w.outcome, impacts[i]!);
         b.view.render();
       });
       lastMs = nowMs;
@@ -671,6 +687,7 @@ export function bootNetplay(
       const localSim = s.sims[localIndex]!;
       const remoteSim = s.sims[1 - localIndex]!;
       let steppedTicks = 0;
+      let lightsTicks = 0; // lights also tick through the gate (Game.cxx:389)
       let wantWaiting = false;
 
       if (!s.outcome) {
@@ -682,6 +699,7 @@ export function bootNetplay(
           const burn = Math.min(due, COUNTDOWN_GATE_TICKS - metaTicks);
           metaTicks += burn;
           due -= burn;
+          lightsTicks += burn;
         }
         const gateActive = metaTicks < COUNTDOWN_GATE_TICKS;
         // Catch-up: after a resume the remote buffer runs deep; burn it down
@@ -703,6 +721,7 @@ export function bootNetplay(
           },
         );
         steppedTicks = stepped;
+        lightsTicks += stepped;
         metaTicks += stepped; // times the GO tail of the countdown
 
         if (!gateActive) {
@@ -765,15 +784,23 @@ export function bootNetplay(
       const dtTicks = Math.min(MAX_SIGN_DT_TICKS, (nowMs - lastMs) / MS_PER_TICK);
       bigMessage.update(dtTicks);
       const alpha = s.outcome ? 1 : clock.alpha;
+      const simsByBoard = [localSim, remoteSim];
       boards.forEach((b, i) => {
         b.signs.update(dtTicks);
         for (const imp of impacts[i]!) b.spring.notifyImpact(imp.height, imp.width);
         for (let t = 0; t < steppedTicks; t++) b.spring.timeStep();
         b.view.setShake(b.spring.offsetCells);
+        const sim = simsByBoard[i]!;
+        for (const ev of sim.drainSparkEvents())
+          b.sparkles.spawnSparks(ev.x, ev.y, ev.flavor, ev.count);
+        for (const ev of sim.drainMoteEvents())
+          b.sparkles.spawnMote(ev.x, ev.y, ev.level, ev.sibling);
+        b.sparkles.advance(steppedTicks);
+        b.sparkles.sync();
         const vm = b.interp.sample(alpha);
         b.view.update(vm);
         b.decals.update(vm.garbage);
-        b.levelLights.update(steppedTicks, vm.hud.topEffectiveRow, !s.outcome, impacts[i]!);
+        b.levelLights.update(lightsTicks, vm.hud.topEffectiveRow, !s.outcome, impacts[i]!);
         b.view.render();
         if (i === 0) hud?.update(vm.hud);
       });

@@ -80,7 +80,7 @@ export class SignsView {
       worldY: cellY - this.halfH + OFFSET_Y + jitterY,
       life: 0,
       key: signTextureKey(kind, level),
-      colorHex: signColor(kind),
+      colorHex: signColor(kind, level),
     };
     if (this.active.length >= SIGN_POOL_SIZE) this.active.shift(); // drop the oldest
     this.active.push(sign);

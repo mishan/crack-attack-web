@@ -50,6 +50,29 @@ const SIGN_BUFFER_CAP = 256;
 /** Cap on undrained cosmetic impact events (same rationale as signs). */
 const IMPACT_BUFFER_CAP = 64;
 
+/** Caps on undrained cosmetic sparkle events (same rationale as signs). */
+const SPARK_BUFFER_CAP = 128;
+const MOTE_BUFFER_CAP = 64;
+
+/** A dying block popped: spawn its death sparks (cosmetic). */
+export interface SparkEvent {
+  x: number;
+  y: number;
+  flavor: number;
+  /** Number of sparks (the combo magnitude stashed in `pop_alarm`). */
+  count: number;
+}
+
+/** A combo paid out: spawn a reward mote (cosmetic). */
+export interface MoteEvent {
+  x: number;
+  y: number;
+  /** Index into the mote level tables (clamped by the display layer). */
+  level: number;
+  /** Launch stagger index for multi-mote payouts. */
+  sibling: number;
+}
+
 /**
  * A garbage slab finished its initial fall (cosmetic): drives the render
  * layer's screen-shake spring and level-light impact flashes.
@@ -100,6 +123,9 @@ export class GameSim implements CreepSimContext, SignSink {
   private readonly signBuffer: SignEvent[] = [];
   /** Cosmetic impact events emitted since the last {@link drainImpactEvents}. */
   private readonly impactBuffer: ImpactEvent[] = [];
+  /** Cosmetic sparkle events emitted since the last drains. */
+  private readonly sparkBuffer: SparkEvent[] = [];
+  private readonly moteBuffer: MoteEvent[] = [];
 
   constructor(seed: number) {
     this.seed = seed >>> 0;
@@ -129,6 +155,8 @@ export class GameSim implements CreepSimContext, SignSink {
     this.lost = false;
     this.signBuffer.length = 0;
     this.impactBuffer.length = 0;
+    this.sparkBuffer.length = 0;
+    this.moteBuffer.length = 0;
 
     // Reseed both RNGs so a restart is fully deterministic and does not depend
     // on draws made during the previous game.
@@ -253,6 +281,30 @@ export class GameSim implements CreepSimContext, SignSink {
   drainImpactEvents(): ImpactEvent[] {
     if (this.impactBuffer.length === 0) return [];
     return this.impactBuffer.splice(0, this.impactBuffer.length);
+  }
+
+  /** {@link BlockSimContext.notifyCosmeticSpark}: buffer a block-death spark burst. */
+  notifyCosmeticSpark(x: number, y: number, flavor: number, count: number): void {
+    if (this.sparkBuffer.length >= SPARK_BUFFER_CAP) this.sparkBuffer.shift();
+    this.sparkBuffer.push({ x, y, flavor, count });
+  }
+
+  /** {@link SignSink.createMote}: buffer a combo reward mote. */
+  createMote(gridX: number, gridY: number, level: number, sibling: number): void {
+    if (this.moteBuffer.length >= MOTE_BUFFER_CAP) this.moteBuffer.shift();
+    this.moteBuffer.push({ x: gridX, y: gridY, level, sibling });
+  }
+
+  /** Remove and return spark bursts since the last drain (see {@link drainSignEvents}). */
+  drainSparkEvents(): SparkEvent[] {
+    if (this.sparkBuffer.length === 0) return [];
+    return this.sparkBuffer.splice(0, this.sparkBuffer.length);
+  }
+
+  /** Remove and return reward motes since the last drain (see {@link drainSignEvents}). */
+  drainMoteEvents(): MoteEvent[] {
+    if (this.moteBuffer.length === 0) return [];
+    return this.moteBuffer.splice(0, this.moteBuffer.length);
   }
 
   /**

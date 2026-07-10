@@ -176,3 +176,77 @@ describe('GameSim reward-sign sink', () => {
     expect(drained[0]!.level).toBe(1000 - 256);
   });
 });
+
+describe('GameSim cosmetic impact/spark/mote buffers', () => {
+  it('drains impacts once, then reports empty', () => {
+    const sim = new GameSim(1);
+    sim.notifyCosmeticImpact(3, 1, 6);
+    sim.notifyCosmeticImpact(5, 2, 3);
+    expect(sim.drainImpactEvents()).toEqual([
+      { y: 3, height: 1, width: 6 },
+      { y: 5, height: 2, width: 3 },
+    ]);
+    expect(sim.drainImpactEvents()).toEqual([]);
+  });
+
+  it('drains spark bursts once, then reports empty', () => {
+    const sim = new GameSim(1);
+    sim.notifyCosmeticSpark(2, 4, 3, 7);
+    expect(sim.drainSparkEvents()).toEqual([{ x: 2, y: 4, flavor: 3, count: 7 }]);
+    expect(sim.drainSparkEvents()).toEqual([]);
+  });
+
+  it('drains reward motes once, then reports empty', () => {
+    const sim = new GameSim(1);
+    sim.createMote(1, 2, 14, 0);
+    sim.createMote(1, 2, 3, 1);
+    expect(sim.drainMoteEvents()).toEqual([
+      { x: 1, y: 2, level: 14, sibling: 0 },
+      { x: 1, y: 2, level: 3, sibling: 1 },
+    ]);
+    expect(sim.drainMoteEvents()).toEqual([]);
+  });
+
+  it('clears all cosmetic buffers on restart', () => {
+    const sim = new GameSim(1);
+    sim.notifyCosmeticImpact(3, 1, 6);
+    sim.notifyCosmeticSpark(2, 4, 3, 7);
+    sim.createMote(1, 2, 14, 0);
+    sim.gameStart();
+    expect(sim.drainImpactEvents()).toEqual([]);
+    expect(sim.drainSparkEvents()).toEqual([]);
+    expect(sim.drainMoteEvents()).toEqual([]);
+  });
+
+  it('caps each buffer for a never-drained run, keeping the newest', () => {
+    const sim = new GameSim(1);
+    for (let i = 0; i < 500; i++) {
+      sim.notifyCosmeticImpact(i, 1, 1);
+      sim.notifyCosmeticSpark(i, 1, 0, 1);
+      sim.createMote(i, 1, 0, 0);
+    }
+    const impacts = sim.drainImpactEvents();
+    expect(impacts.length).toBe(64);
+    expect(impacts[impacts.length - 1]!.y).toBe(499);
+    expect(impacts[0]!.y).toBe(500 - 64);
+
+    const sparks = sim.drainSparkEvents();
+    expect(sparks.length).toBe(128);
+    expect(sparks[sparks.length - 1]!.x).toBe(499);
+    expect(sparks[0]!.x).toBe(500 - 128);
+
+    const motes = sim.drainMoteEvents();
+    expect(motes.length).toBe(64);
+    expect(motes[motes.length - 1]!.x).toBe(499);
+    expect(motes[0]!.x).toBe(500 - 64);
+  });
+
+  it('is wired as the sink for block deaths and garbage payouts', () => {
+    const sim = new GameSim(1);
+    // The generator's sign sink (which carries createMote) is the sim itself,
+    // and blocks reach the spark/impact hooks through their sim context.
+    expect(sim.garbageGenerator.signSink).toBe(sim);
+    expect(typeof sim.notifyCosmeticSpark).toBe('function');
+    expect(typeof sim.notifyCosmeticImpact).toBe('function');
+  });
+});

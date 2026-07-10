@@ -42,10 +42,36 @@ export function signTextureKey(kind: SignKind, level: number): string {
   return 'sign_bonus';
 }
 
-/** Tint applied to a sign's white glyph, by kind (a cosmetic, legible choice). */
-export function signColor(kind: SignKind): number {
-  if (kind === 'multiplier') return 0xffe24a; // gold chains
-  if (kind === 'special') return 0xff8a3d; // orange bonus
+/**
+ * The C++ special-sign tints (`sign_colors`, DrawCandy.cxx:51-60), indexed by
+ * the special sign's level (`SignManager::createSign` sets `sign.color =
+ * level` for ST_SPECIAL only): 0 = the generic gray-branch bonus, 1..7 = the
+ * special flavor that was matched (black, white, purple, blue, green, yellow,
+ * orange).
+ */
+const SPECIAL_SIGN_COLORS = [
+  0xffffff, // normal
+  0x333333, // black
+  0xffffff, // white
+  0xeebfee, // purple
+  0xccccf2, // blue
+  0xbfe5bf, // green
+  0xf5f5bf, // yellow
+  0xffd9bf, // orange
+] as const;
+
+/**
+ * Tint applied to a sign's white glyph. Specials are tinted per matched
+ * flavor, faithful to the C++ (`sign.color = level` for ST_SPECIAL); the
+ * magnitude/multiplier tints are a deliberate cosmetic divergence (the C++
+ * leaves those white) for legibility on our background.
+ */
+export function signColor(kind: SignKind, level = 0): number {
+  if (kind === 'multiplier') return 0xffe24a; // gold chains (divergence)
+  if (kind === 'special') {
+    const clamped = Math.max(0, Math.min(SPECIAL_SIGN_COLORS.length - 1, Math.floor(level)));
+    return SPECIAL_SIGN_COLORS[clamped]!;
+  }
   return 0xffffff; // white combo size
 }
 

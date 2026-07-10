@@ -101,6 +101,37 @@ describe('LevelLightsState', () => {
     expect(() => state.notifyImpact(LEVEL_LIGHT_COUNT + 2, 1)).not.toThrow();
   });
 
+  it('guards impacts at or below the creep row (no negative indexing)', () => {
+    const state = new LevelLightsState();
+    state.gameStart(0);
+    expect(() => state.notifyImpact(0, 2)).not.toThrow();
+    expect(() => state.notifyImpact(-1, 3)).not.toThrow();
+    // The in-column part still flashes: y=0, height=2 covers light index 0.
+    run(state, 1, 0);
+    expect(rgb(state, 0)[1]).toBeGreaterThan(0);
+  });
+
+  it('instant reset snaps the boundary to steady state immediately', () => {
+    const state = new LevelLightsState();
+    state.gameStart(5, true);
+    // No fade: correct steady colors on the very first frame.
+    expect(rgb(state, 0)).toEqual([0.7, 0, 0]);
+    expect(rgb(state, 5)).toEqual([0, 0, 0.7]);
+  });
+
+  it('a fresh (non-instant) reset fades in across the countdown gate length', () => {
+    const state = new LevelLightsState();
+    state.gameStart(5);
+    // Mid-fade: both channels present on a rising light.
+    run(state, 40, 5);
+    const [r, , b] = rgb(state, 2);
+    expect(r).toBeGreaterThan(0);
+    expect(b).toBeGreaterThan(0);
+    // Fade time (150) = countdown gate: steady exactly as play begins.
+    run(state, 110, 5);
+    expect(rgb(state, 2)).toEqual([0.7, 0, 0]);
+  });
+
   it('death-flashes the whole column while the stack violates the safe height', () => {
     const state = new LevelLightsState();
     state.gameStart(0);
