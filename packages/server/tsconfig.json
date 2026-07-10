@@ -3,8 +3,9 @@
   "compilerOptions": {
     "rootDir": "./src",
     "outDir": "./dist",
-    "types": []
+    "types": ["node"]
   },
   "references": [{ "path": "../core" }, { "path": "../protocol" }],
-  "include": ["src/**/*.ts"]
+  "include": ["src/**/*.ts"],
+  "exclude": ["src/**/*.test.ts", "src/**/*.spec.ts"]
 }
