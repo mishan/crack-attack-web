@@ -30,13 +30,17 @@ import {
   MeshPhongMaterial,
   type Scene,
 } from 'three';
-import { LEVEL_LIGHT_COUNT, isLevelLightRed } from '../view/levelLights.js';
+import type { ImpactEvent } from '@crack-attack/core';
+import { LEVEL_LIGHT_COUNT, LevelLightsState } from '../view/levelLights.js';
 
 /** Gap between the board edge and the (inner, tail) end of the light column, in cells. */
 const SIDE_MARGIN = 0.7;
-/** Per-instance colours (DC_LEVEL_LIGHT_RED / _BLUE ≈ 0.7, brightened to read on black). */
-const RED = new Color(0.95, 0.1, 0.1);
-const BLUE = new Color(0.16, 0.32, 1.0);
+/**
+ * Brightness boost over the reference's 0.7 emission values, so the steady
+ * red/blue read on our black background the way the old fixed colours did.
+ * Flash/fade whites already run to 1.0 and are clamped.
+ */
+const BOOST = 1.35;
 
 // Arrow shape from obj_level_lights.cxx (LG_A..D), scaled from the reference's
 // 2-unit cells to our 1-unit cells (≈0.5) so it matches the original's small size,
@@ -89,7 +93,8 @@ function lightMaterial(): MeshPhongMaterial {
 
 export class LevelLightsView {
   private readonly mesh: InstancedMesh;
-  private lastTop = Number.NaN;
+  private readonly state = new LevelLightsState();
+  private readonly color = new Color();
 
   constructor(scene: Scene, halfW: number, halfH: number) {
     this.mesh = new InstancedMesh(arrowGeometry(), lightMaterial(), LEVEL_LIGHT_COUNT * 2);
@@ -113,17 +118,38 @@ export class LevelLightsView {
     }
     this.mesh.instanceMatrix.needsUpdate = true;
     // Seed the instance colours (also allocates instanceColor before first render).
-    this.update(0);
+    this.recolor();
     scene.add(this.mesh);
   }
 
-  /** Recolour the lights for the current stack height (`grid.top_effective_row`). */
-  update(topEffectiveRow: number): void {
-    if (topEffectiveRow === this.lastTop) return; // colours only change with the stack top
-    this.lastTop = topEffectiveRow;
+  /** Reset the light machine for a new game at the given starting stack height. */
+  reset(topEffectiveRow: number): void {
+    this.state.gameStart(topEffectiveRow);
+    this.recolor();
+  }
+
+  /**
+   * Advance the light machine by the sim ticks stepped this frame and
+   * recolour. `impacts` are the frame's drained cosmetic garbage landings;
+   * `gameLive` gates death-flash re-arming (false once the game is over).
+   */
+  update(
+    steppedTicks: number,
+    topEffectiveRow: number,
+    gameLive: boolean,
+    impacts: readonly ImpactEvent[],
+  ): void {
+    for (const impact of impacts) this.state.notifyImpact(impact.y, impact.height);
+    for (let t = 0; t < steppedTicks; t++) this.state.tick(topEffectiveRow, gameLive);
+    this.recolor();
+  }
+
+  private recolor(): void {
     for (let i = 0; i < this.mesh.count; i++) {
       const n = i % LEVEL_LIGHT_COUNT; // both columns share the same per-row state
-      this.mesh.setColorAt(i, isLevelLightRed(n, topEffectiveRow) ? RED : BLUE);
+      const [r, g, b] = this.state.color(n);
+      this.color.setRGB(Math.min(1, r * BOOST), Math.min(1, g * BOOST), Math.min(1, b * BOOST));
+      this.mesh.setColorAt(i, this.color);
     }
     if (this.mesh.instanceColor) this.mesh.instanceColor.needsUpdate = true;
   }

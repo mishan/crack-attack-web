@@ -356,6 +356,9 @@ export class Garbage {
             if (this.initial_fall) {
               this.initial_fall = false;
               grid.notifyImpact(this.y, this.height);
+              // Cosmetic shake/flash hook, at the exact C++ call site
+              // (Garbage.cxx:263-264): initial-fall landings only.
+              ctx.notifyCosmeticImpact?.(this.y, this.height, this.width);
             }
             for (let h = 0; h < this.height; h++) {
               for (let w = 0; w < this.width; w++) {

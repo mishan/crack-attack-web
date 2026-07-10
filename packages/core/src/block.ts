@@ -79,6 +79,13 @@ export interface BlockSimContext {
   notifyLanding(x: number, y: number, block: Block, combo: ComboTabulator): void;
   /** Start a garbage slab falling (Garbage::startFalling). No-op until Garbage physics lands. */
   startGarbageFalling(garbage: Garbage, combo: ComboTabulator | null, noHang: boolean): void;
+  /**
+   * Cosmetic: a garbage slab finished its initial fall — the render layer's
+   * screen-shake spring (Spring::notifyImpact, Garbage.cxx:263) and level-light
+   * impact flash (Grid::notifyImpact → LevelLights, Grid.h:197) feed on this.
+   * Draws no RNG, never enters the digest; optional so headless runs skip it.
+   */
+  notifyCosmeticImpact?(y: number, height: number, width: number): void;
 }
 
 // --- Block states (Block.h:33-38) ------------------------------------------

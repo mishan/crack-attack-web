@@ -27,6 +27,7 @@ import { LevelLightsView } from './render/levelLightsView.js';
 import { SignsView } from './render/signsView.js';
 import { FixedTimestep } from './sim/fixedTimestep.js';
 import { deriveViewModel } from './view/boardViewModel.js';
+import { Spring } from './view/spring.js';
 import { ViewInterpolator } from './view/viewInterpolator.js';
 
 const SEED = 0x1a2b3c4d;
@@ -104,9 +105,11 @@ function bootSolo(
   const signs = new SignsView(view.scene, halfW, halfH);
   const decals = new GarbageDecalView(view.scene, halfW, halfH);
   const levelLights = new LevelLightsView(view.scene, halfW, halfH);
+  const spring = new Spring();
   const hud = hudEl ? new HudView(hudEl) : null;
   let disposed = false;
   let rafId = 0;
+  levelLights.reset(initial.hud.topEffectiveRow);
 
   // Temporary lighting/material tuner — open with `?tune` in the URL.
   if (new URLSearchParams(globalThis.location.search).has('tune')) {
@@ -130,10 +133,14 @@ function bootSolo(
     sim = new GameSim(SEED); // fresh deterministic game
     clock.reset();
     interp.reset();
-    interp.push(deriveViewModel(sim));
+    const fresh = deriveViewModel(sim);
+    interp.push(fresh);
     signs.clear();
     decals.clear();
     input.clear();
+    spring.gameStart();
+    view.setShake(0);
+    levelLights.reset(fresh.hud.topEffectiveRow);
   };
 
   const onKeyDown = (e: KeyboardEvent): void => {
@@ -172,10 +179,12 @@ function bootSolo(
     // Advance the sim only while the game is live. On a loss we stop stepping, so
     // the clock (and thus the HUD timer) and the board freeze on the final tick
     // until the player restarts.
+    let stepped = 0;
     if (!sim.lost) {
       const steps = clock.sample(nowMs);
       for (let s = 0; s < steps; s++) {
         sim.step(input.actionState());
+        stepped++;
         // Interpolation only needs the last two ticks, so under catch-up (steps > 1)
         // skip the expensive grid-walk for the intermediate ticks that get
         // discarded — but always capture the tick a loss lands on.
@@ -185,6 +194,13 @@ function bootSolo(
       // Spawn reward signs for the combos that fired across this frame's ticks.
       for (const ev of sim.drainSignEvents()) signs.spawn(ev.gridX, ev.gridY, ev.kind, ev.level);
     }
+
+    // Cosmetic garbage-landing impacts: kick the shake spring and flash the
+    // lights; both tick with the sim (they freeze when it does).
+    const impacts = sim.drainImpactEvents();
+    for (const imp of impacts) spring.notifyImpact(imp.height, imp.width);
+    for (let t = 0; t < stepped; t++) spring.timeStep();
+    view.setShake(spring.offsetCells);
 
     // Signs float on wall-clock time (and keep fading out after a loss).
     const dtTicks = Math.min(MAX_SIGN_DT_TICKS, (nowMs - lastMs) / MS_PER_TICK);
@@ -196,7 +212,7 @@ function bootSolo(
     const vm = interp.sample(sim.lost ? 1 : clock.alpha);
     view.update(vm);
     decals.update(vm.garbage);
-    levelLights.update(vm.hud.topEffectiveRow);
+    levelLights.update(stepped, vm.hud.topEffectiveRow, !sim.lost, impacts);
     view.render();
     hud?.update(vm.hud);
 
