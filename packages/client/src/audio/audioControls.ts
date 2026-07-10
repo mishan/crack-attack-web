@@ -59,7 +59,9 @@ export function mountAudioControls(audio: AudioManager): AudioControlsHandle {
   };
 
   panel.appendChild(slider('♪', 'Music volume', settings.music, (v) => audio.setMusicVolume(v)));
-  panel.appendChild(slider('▸', 'Sound effects volume', settings.sfx, (v) => audio.setSfxVolume(v)));
+  panel.appendChild(
+    slider('▸', 'Sound effects volume', settings.sfx, (v) => audio.setSfxVolume(v)),
+  );
 
   const syncMuted = (): void => {
     const muted = audio.getSettings().muted;
