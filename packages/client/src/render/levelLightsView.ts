@@ -122,9 +122,13 @@ export class LevelLightsView {
     scene.add(this.mesh);
   }
 
-  /** Reset the light machine for a new game at the given starting stack height. */
-  reset(topEffectiveRow: number): void {
-    this.state.gameStart(topEffectiveRow);
+  /**
+   * Reset the light machine for a new game at the given starting stack height.
+   * `instant` skips the fade-in (resume / mid-match spectate — no countdown
+   * gate will cover it).
+   */
+  reset(topEffectiveRow: number, instant = false): void {
+    this.state.gameStart(topEffectiveRow, instant);
     this.recolor();
   }
 

@@ -189,6 +189,7 @@ function bootSolo(
     // the clock (and thus the HUD timer) and the board freeze on the final tick
     // until the player restarts.
     let stepped = 0;
+    let gateTicks = 0; // wall ticks the countdown gate consumed this frame
     if (!sim.lost) {
       const steps = clock.sample(nowMs);
       for (let s = 0; s < steps; s++) {
@@ -196,6 +197,7 @@ function bootSolo(
         // GC_START_PAUSE_DELAY ticks (Game.cxx:399-408) while 3-2-1 shows.
         if (metaTicks < COUNTDOWN_GATE_TICKS) {
           metaTicks++;
+          gateTicks++;
           continue;
         }
         sim.step(input.actionState());
@@ -238,7 +240,9 @@ function bootSolo(
     const vm = interp.sample(sim.lost ? 1 : clock.alpha);
     view.update(vm);
     decals.update(vm.garbage);
-    levelLights.update(stepped, vm.hud.topEffectiveRow, !sim.lost, impacts);
+    // Lights tick through the countdown gate too (Game.cxx:389 runs before
+    // the gate check) — the start-of-game fade completes exactly at GO.
+    levelLights.update(gateTicks + stepped, vm.hud.topEffectiveRow, !sim.lost, impacts);
     view.render();
     hud?.update(vm.hud);
 
