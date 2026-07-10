@@ -246,8 +246,31 @@ just use `pnpm` directly.
   detection), and lifecycle events the sims can't decide (concede/disconnect).
   `messages.ts` (typed union + constants), `codec.ts` (JSON now, binary later;
   strict shape/range-validating decode — semantic rules like version match and
-  batch contiguity stay in server/client logic). Still to come: relay server,
-  core digest function, client netplay integration.
-- [ ] Phase 3 AI, Phase 4 remainder (relay server + client netplay), Phase 5 lobby
+  batch contiguity stay in server/client logic).
+- [x] Phase 4 — **digest, relay server, and client netplay landed**; the
+      milestone (two browsers head-to-head through the relay) is playable.
+      `GameSim.digest()` (`core/digest.ts`): pure word-wise FNV-1a over every
+      gameplay field — each class feeds its own words via `hashState(h)`, cosmetic
+      state (death axes, pop direction/color, cosmeticRng) deliberately excluded —
+      also the comparison key for the future `tools/replay-check` harness.
+      `packages/server`: transport-free `RelayServer` (hello/version gate, rooms,
+      ready → `match_start` with server seed + pinned player indices, verbatim
+      input relay with fatal contiguity enforcement, digest comparison → `desync`,
+      concede/disconnect forfeits, rematch by re-readying — the relay never learns
+      gameplay outcomes, they're deterministic) + `wsServer.ts` (`ws`) + `main.ts`
+      CLI (PORT/HOST, default 8080 per `CO_DEFAULT_PORT`); unit tests on fake
+      connections, integration tests over real sockets, and an e2e test driving two
+      real `LockstepSession`s through the relay to a shared deterministic outcome.
+      `packages/client`: `net/lockstep.ts` (DOM-free) runs both sims from the match
+      seed, steps only when both players' frames are known, samples local input per
+      stepped tick scheduled `inputDelay` ahead (prefilled neutral), cross-wires the
+      garbage ports, snapshots digests each `DIGEST_PERIOD`, and resolves the
+      outcome deterministically (same-tick double loss = draw); `net/session.ts`
+      wraps WebSocket+codec; `netplay.ts` renders both boards side by side with a
+      room overlay, waiting indicator, and result banner (R = ready/rematch, Esc =
+      concede). `?net` on the client URL enters netplay (`?relay=` overrides the
+      relay URL; `pnpm --filter @crack-attack/server start` runs the relay).
+- [ ] Phase 3 AI, Phase 5 lobby (rooms → named lobby, records, reconnect),
+      Phase 4 stretch: binary codec if measurements demand it
 
 See `BROWSER_PORT_PLAN.md` for the full phase breakdown and suggested order of work.
