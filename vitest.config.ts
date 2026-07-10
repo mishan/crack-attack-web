@@ -5,11 +5,13 @@ import { defineConfig } from 'vitest/config';
 // without a prior `tsc -b`. The client/tool tests import @crack-attack/core,
 // whose package entry points at dist/index.js — absent in a fresh checkout.
 const coreSrc = fileURLToPath(new URL('./packages/core/src/index.ts', import.meta.url));
+const protocolSrc = fileURLToPath(new URL('./packages/protocol/src/index.ts', import.meta.url));
 
 export default defineConfig({
   resolve: {
     alias: {
       '@crack-attack/core': coreSrc,
+      '@crack-attack/protocol': protocolSrc,
     },
   },
   test: {

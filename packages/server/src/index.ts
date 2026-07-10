@@ -1,13 +1,10 @@
 /**
  * @crack-attack/server — lobby + lockstep relay (Node).
  *
- * Placeholder. Phase 4 adds the WebSocket relay (server-relayed lockstep) and
- * Phase 5 the lobby (rooms, seeds, match lifecycle, records). Kept as a valid
- * workspace package so the monorepo builds end-to-end from day one.
+ * `relay.ts` holds the transport-free room/match logic; `wsServer.ts` binds it
+ * to WebSockets; `main.ts` is the CLI entry. Phase 5 grows the lobby (named
+ * players, room lists, rankings) on the same surface.
  */
 
-import { PROTOCOL_VERSION } from '@crack-attack/protocol';
-
-export function serverInfo(): { protocol: number; status: 'not-implemented' } {
-  return { protocol: PROTOCOL_VERSION, status: 'not-implemented' };
-}
+export * from './relay.js';
+export * from './wsServer.js';
