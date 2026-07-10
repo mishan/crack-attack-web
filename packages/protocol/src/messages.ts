@@ -36,8 +36,12 @@ import { CC_MOVE_MASK, CC_SWAP, CC_ADVANCE } from '@crack-attack/core';
  * Bumped whenever the wire format changes incompatibly. Exchanged in
  * `hello`/`welcome` and checked by the server, mirroring the original's
  * version-string check (CO_VERSION, Communicator.h:47; Communicator.cxx:192).
+ *
+ * v2: Phase 5 lobby — session tokens + W-L records on `hello`/`welcome`,
+ * `room_list` pushes, client-reported `result`, and the reconnect flow
+ * (`peer_dropped`/`peer_rejoined`/`match_resume`).
  */
-export const PROTOCOL_VERSION = 1;
+export const PROTOCOL_VERSION = 2;
 
 /**
  * How often (in ticks) each client submits state digests. 32 is a nod to the
@@ -65,14 +69,50 @@ export const MAX_PLAYER_NAME_LENGTH = 32;
 export const ROOM_CODE_LENGTH = 5;
 export const ROOM_CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
 
+/** Session tokens: lowercase hex, fixed length (128 bits). */
+export const SESSION_TOKEN_LENGTH = 32;
+
+/**
+ * How long a dropped player may reconnect to an in-progress match before it
+ * forfeits. 30 s, a nod to the original's server timeout (CO_SERVER_TIME_OUT,
+ * Communicator.h:38). The server is authoritative; this is the default.
+ */
+export const DEFAULT_RECONNECT_GRACE_MS = 30_000;
+
+/**
+ * Upper bound on a `match_resume` input history (per player). 1M ticks is
+ * ~5.5 h of play at 50 Hz — far beyond any real match; purely a codec sanity
+ * bound so a hostile server can't feed the client an unbounded array.
+ */
+export const MAX_MATCH_FRAMES = 1_000_000;
+
+/** A player's persistent win/loss record. */
+export interface PlayerRecord {
+  wins: number;
+  losses: number;
+}
+
+/** One lobby room as shown in the room list. */
+export interface RoomSummary {
+  code: string;
+  state: 'waiting' | 'playing';
+  players: { name: string; record: PlayerRecord }[];
+}
+
 // --- Client → Server --------------------------------------------------------
 
 /** First message on a connection; the server replies `welcome` or `error`. */
 export interface HelloMessage {
   type: 'hello';
   protocolVersion: number;
-  /** Display name, 1..{@link MAX_PLAYER_NAME_LENGTH} chars. */
+  /** Display name, 1..{@link MAX_PLAYER_NAME_LENGTH} chars. Updates the stored name. */
   name: string;
+  /**
+   * Session token from a previous `welcome`, to reclaim identity (records,
+   * and any in-progress match within the reconnect grace). Omitted on first
+   * connect; an unknown token just mints a fresh identity.
+   */
+  token?: string;
 }
 
 /** Ask the server to create a room; it replies `room_created`. */
@@ -114,6 +154,17 @@ export interface DigestMessage {
   digests: [number, number];
 }
 
+/**
+ * Report the deterministic outcome of the current game (both clients compute
+ * it from both sims). The server cross-checks the two reports; agreement
+ * records the W-L result, disagreement is treated like a desync. `winner` is
+ * a player index, or null for a same-tick draw.
+ */
+export interface ResultMessage {
+  type: 'result';
+  winner: number | null;
+}
+
 /** Concede the current match. The server broadcasts `match_end`. */
 export interface ConcedeMessage {
   type: 'concede';
@@ -131,15 +182,30 @@ export type ClientMessage =
   | ReadyMessage
   | InputsMessage
   | DigestMessage
+  | ResultMessage
   | ConcedeMessage
   | LeaveRoomMessage;
 
 // --- Server → Client --------------------------------------------------------
 
-/** Successful `hello`. */
+/** Successful `hello`: the player's (possibly fresh) identity and record. */
 export interface WelcomeMessage {
   type: 'welcome';
   protocolVersion: number;
+  /** Session token to present on future `hello`s (store client-side). */
+  token: string;
+  /** Canonical display name (the hello name, as stored). */
+  name: string;
+  record: PlayerRecord;
+}
+
+/**
+ * Lobby snapshot: every open room. Pushed to all connected players after any
+ * change (create/join/leave/start/end) and immediately after `welcome`.
+ */
+export interface RoomListMessage {
+  type: 'room_list';
+  rooms: RoomSummary[];
 }
 
 /** The room was created; share `code` with the opponent. */
@@ -196,6 +262,38 @@ export interface DesyncMessage {
   tick: number;
 }
 
+/**
+ * The opponent's connection dropped mid-match. The match holds for up to
+ * `graceMs` awaiting their reconnect; expiry forfeits it to the survivor.
+ */
+export interface PeerDroppedMessage {
+  type: 'peer_dropped';
+  name: string;
+  graceMs: number;
+}
+
+/** The dropped opponent reconnected; the match resumes. */
+export interface PeerRejoinedMessage {
+  type: 'peer_rejoined';
+  name: string;
+}
+
+/**
+ * Sent to a player who reconnected (hello with a token that has an in-progress
+ * match): everything needed to rebuild the lockstep session and catch up.
+ * `frames` are both players' full input histories from tick 0, indexed by
+ * player index — the server's ledgers are authoritative, including for the
+ * rejoiner's own stream (anything it scheduled but never sent is gone).
+ */
+export interface MatchResumeMessage {
+  type: 'match_resume';
+  seed: number;
+  playerIndex: number;
+  inputDelay: number;
+  players: [string, string];
+  frames: [number[], number[]];
+}
+
 /** Reasons a match can end that the deterministic sims cannot decide. */
 export type MatchEndReason = 'concession' | 'disconnect' | 'desync';
 
@@ -222,6 +320,10 @@ export interface ErrorMessage {
 
 export type ServerMessage =
   | WelcomeMessage
+  | RoomListMessage
+  | PeerDroppedMessage
+  | PeerRejoinedMessage
+  | MatchResumeMessage
   | RoomCreatedMessage
   | RoomJoinedMessage
   | PeerJoinedMessage

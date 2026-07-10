@@ -17,30 +17,81 @@ import {
 } from './index.js';
 
 const CODE = 'ABC23';
+const TOKEN = 'a'.repeat(32);
+const RECORD = { wins: 3, losses: 1 };
 
 const clientMessages: ClientMessage[] = [
   { type: 'hello', protocolVersion: PROTOCOL_VERSION, name: 'misha' },
+  { type: 'hello', protocolVersion: PROTOCOL_VERSION, name: 'misha', token: TOKEN },
   { type: 'create_room' },
   { type: 'join_room', code: CODE },
   { type: 'ready' },
   { type: 'inputs', startTick: 96, frames: [0, CC_LEFT, CC_LEFT | CC_SWAP, CC_ADVANCE] },
   { type: 'digest', tick: 32, digests: [0xdeadbeef, 0] },
+  { type: 'result', winner: 1 },
+  { type: 'result', winner: null },
   { type: 'concede' },
   { type: 'leave_room' },
 ];
 
 const serverMessages: ServerMessage[] = [
-  { type: 'welcome', protocolVersion: PROTOCOL_VERSION },
+  {
+    type: 'welcome',
+    protocolVersion: PROTOCOL_VERSION,
+    token: TOKEN,
+    name: 'misha',
+    record: RECORD,
+  },
+  { type: 'room_list', rooms: [] },
+  {
+    type: 'room_list',
+    rooms: [
+      {
+        code: CODE,
+        state: 'waiting',
+        players: [{ name: 'misha', record: RECORD }],
+      },
+      {
+        code: 'XYZ99',
+        state: 'playing',
+        players: [
+          { name: 'a', record: { wins: 0, losses: 0 } },
+          { name: 'b', record: { wins: 9, losses: 2 } },
+        ],
+      },
+    ],
+  },
   { type: 'room_created', code: CODE },
   { type: 'room_joined', code: CODE, players: ['misha', 'opponent'] },
   { type: 'peer_joined', name: 'opponent' },
   { type: 'peer_left', name: 'opponent' },
+  { type: 'peer_dropped', name: 'opponent', graceMs: 30000 },
+  { type: 'peer_rejoined', name: 'opponent' },
   {
     type: 'match_start',
     seed: 0x12345678,
     playerIndex: 1,
     inputDelay: 3,
     players: ['misha', 'opponent'],
+  },
+  {
+    type: 'match_resume',
+    seed: 0x12345678,
+    playerIndex: 0,
+    inputDelay: 3,
+    players: ['misha', 'opponent'],
+    frames: [
+      [0, CC_LEFT, CC_SWAP],
+      [0, 0, CC_ADVANCE],
+    ],
+  },
+  {
+    type: 'match_resume',
+    seed: 1,
+    playerIndex: 1,
+    inputDelay: 3,
+    players: ['a', 'b'],
+    frames: [[], []],
   },
   { type: 'peer_inputs', playerIndex: 0, startTick: 0, frames: [CC_SWAP] },
   { type: 'desync', tick: 64 },
@@ -113,6 +164,13 @@ describe('malformed input', () => {
     ['digest wrong arity', '{"type":"digest","tick":32,"digests":[1]}'],
     ['digest overflows uint32', '{"type":"digest","tick":32,"digests":[4294967296,0]}'],
     ['digest negative', '{"type":"digest","tick":32,"digests":[-1,0]}'],
+    ['hello short token', '{"type":"hello","protocolVersion":2,"name":"m","token":"abc"}'],
+    [
+      'hello non-hex token',
+      `{"type":"hello","protocolVersion":2,"name":"m","token":"${'Z'.repeat(32)}"}`,
+    ],
+    ['result winner out of range', '{"type":"result","winner":2}'],
+    ['result missing winner', '{"type":"result"}'],
   ];
 
   it.each(bad)('client rejects %s', (_name, text) => {
@@ -160,6 +218,32 @@ describe('malformed input', () => {
     ['match_end missing winner', '{"type":"match_end","reason":"concession"}'],
     ['error unknown code', '{"type":"error","code":"whoops","message":"m"}'],
     ['peer_inputs missing playerIndex', '{"type":"peer_inputs","startTick":0,"frames":[0]}'],
+    [
+      'welcome missing record',
+      `{"type":"welcome","protocolVersion":2,"token":"${'a'.repeat(32)}","name":"m"}`,
+    ],
+    [
+      'welcome record with negative wins',
+      `{"type":"welcome","protocolVersion":2,"token":"${'a'.repeat(32)}","name":"m","record":{"wins":-1,"losses":0}}`,
+    ],
+    ['room_list rooms not array', '{"type":"room_list","rooms":"nope"}'],
+    [
+      'room_list bad room state',
+      `{"type":"room_list","rooms":[{"code":"ABC23","state":"exploded","players":[]}]}`,
+    ],
+    [
+      'room_list player missing record',
+      `{"type":"room_list","rooms":[{"code":"ABC23","state":"waiting","players":[{"name":"m"}]}]}`,
+    ],
+    [
+      'match_resume frames wrong arity',
+      '{"type":"match_resume","seed":1,"playerIndex":0,"inputDelay":3,"players":["a","b"],"frames":[[]]}',
+    ],
+    [
+      'match_resume frame out of mask',
+      '{"type":"match_resume","seed":1,"playerIndex":0,"inputDelay":3,"players":["a","b"],"frames":[[999],[]]}',
+    ],
+    ['peer_dropped missing grace', '{"type":"peer_dropped","name":"m"}'],
   ];
 
   it.each(badServer)('server rejects %s', (_name, text) => {
