@@ -24,6 +24,7 @@ import { BF_NUMBER_SPECIAL } from './constants.js';
 import { isColorlessFlavor } from './flavors.js';
 import type { Block } from './block.js';
 import type { SignSink } from './signs.js';
+import type { StateHasher } from './digest.js';
 
 export class ComboTabulator {
   /** Free-store id. `ComboTabulator.h:46` */
@@ -53,6 +54,24 @@ export class ComboTabulator {
   y = 0;
   /** Tally of eliminated special blocks, indexed by special-flavor code. `ComboTabulator.h:82` */
   readonly special: number[] = new Array<number>(BF_NUMBER_SPECIAL).fill(0);
+
+  /** Feed every gameplay field into the sim digest (digest.ts). Pure. */
+  hashState(h: StateHasher): void {
+    h.add(this.id);
+    h.add(this.time_stamp);
+    h.add(this.creation_time_stamp);
+    h.add(this.involvement_count);
+    h.add(this.magnitude);
+    h.add(this.special_magnitude);
+    h.add(this.multiplier);
+    h.add(this.n_multipliers_this_step);
+    h.add(this.base_accumulated_score);
+    h.add(this.base_score_this_step);
+    h.add(this.latest_magnitude);
+    h.add(this.x);
+    h.add(this.y);
+    for (const s of this.special) h.add(s);
+  }
 
   /**
    * Reset for reuse from the pool. Mirrors `ComboTabulator::initialize`

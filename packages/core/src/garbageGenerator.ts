@@ -47,6 +47,7 @@ import {
   mapBlockCodeToGarbageFlavor,
 } from './flavors.js';
 import type { Rng } from './rng.js';
+import type { StateHasher } from './digest.js';
 
 /** One pending garbage drop. Mirrors `GarbageQueueElement` (GarbageQueueElement.h). */
 export class GarbageQueueElement {
@@ -102,6 +103,20 @@ export class GarbageGenerator {
   /** Pending drops not yet placed (inspection/test helper). */
   get waitingCount(): number {
     return this.waiting_count;
+  }
+
+  /** Feed the drop queue into the sim digest (digest.ts). Pure. */
+  hashState(h: StateHasher): void {
+    h.add(this.waiting_count);
+    for (let n = 0; n < GC_GARBAGE_QUEUE_SIZE; n++) {
+      const e = this.garbage_queue[n]!;
+      h.addBool(e.active);
+      if (!e.active) continue;
+      h.add(e.alarm);
+      h.add(e.height);
+      h.add(e.width);
+      h.add(e.flavor);
+    }
   }
 
   /**

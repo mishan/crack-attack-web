@@ -34,6 +34,7 @@ import {
   GC_STEPS_PER_GRID,
 } from './constants.js';
 import type { ComboTabulator } from './combo.js';
+import { HASH_NONE, type StateHasher } from './digest.js';
 import { GF_BLACK, GF_GRAY, GF_NORMAL, GF_SHATTER_TO_NORMAL_GARBAGE } from './flavors.js';
 import {
   GR_BLOCK,
@@ -113,6 +114,25 @@ export class Garbage {
   pop_color = 0;
   /** Combo to pass on upon awakening. `Garbage.h:137` */
   awaking_combo: ComboTabulator | null = null;
+
+  /**
+   * Feed every gameplay field into the sim digest (digest.ts). Pure. Excluded
+   * as cosmetic: `pop_direction`, `pop_color`, and the TS-only `generation`.
+   */
+  hashState(h: StateHasher): void {
+    h.add(this.flavor);
+    h.add(this.x);
+    h.add(this.y);
+    h.add(this.height);
+    h.add(this.width);
+    h.add(this.f_y);
+    h.add(this.state);
+    h.add(this.alarm);
+    h.add(this.sections_popped);
+    h.addBool(this.initial_fall);
+    h.add(this.pop_alarm);
+    h.add(this.awaking_combo ? this.awaking_combo.id : HASH_NONE);
+  }
 
   /**
    * Initialize as resting garbage and stamp all covered cells into the grid.
@@ -499,6 +519,15 @@ export class GarbageManager {
   readonly garbageStore: Garbage[];
   /** Occupancy map over the store. `GarbageManager.h:97` */
   readonly storeMap: boolean[];
+
+  /** Feed the store occupancy and every live slab into the sim digest. Pure. */
+  hashState(h: StateHasher): void {
+    h.add(this.garbage_count);
+    for (let n = 0; n < GC_GARBAGE_STORE_SIZE; n++) {
+      h.addBool(this.storeMap[n]!);
+      if (this.storeMap[n]) this.garbageStore[n]!.hashState(h);
+    }
+  }
 
   constructor(
     private readonly grid: Grid,

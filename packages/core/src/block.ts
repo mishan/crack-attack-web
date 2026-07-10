@@ -36,6 +36,7 @@ import {
 } from './constants.js';
 import type { Clock } from './clock.js';
 import type { ComboTabulator } from './combo.js';
+import { HASH_NONE, type StateHasher } from './digest.js';
 import type { Garbage } from './garbage.js';
 import type { Rng } from './rng.js';
 import {
@@ -138,6 +139,23 @@ export class Block {
   pop_color = 0;
   /** Extreme-mode scratch (X-mode; deferred). `Block.h:108` */
   X = 0;
+
+  /**
+   * Feed every gameplay field into the sim digest (digest.ts). Pure. Excluded
+   * as cosmetic: `axis_x`/`axis_y` (cosmetic RNG), `pop_direction`, `pop_color`,
+   * and the TS-only `generation`.
+   */
+  hashState(h: StateHasher): void {
+    h.add(this.flavor);
+    h.add(this.x);
+    h.add(this.y);
+    h.add(this.f_y);
+    h.add(this.state);
+    h.add(this.pop_alarm);
+    h.add(this.alarm);
+    h.add(this.X);
+    h.add(this.current_combo ? this.current_combo.id : HASH_NONE);
+  }
 
   /**
    * Initialize as a plain resting block and register it in the grid.
@@ -427,6 +445,31 @@ export class BlockManager {
    * standard path; the X-mode special-block generation is deferred (Phase 6).
    */
   xMode = false;
+
+  /**
+   * Feed the store occupancy, every live block, and the creep/awaking flavor
+   * histories (they steer future RNG-driven generation) into the sim digest.
+   * Pure. Excluded as cosmetic: `next_pop_direction` (drives death spin only).
+   */
+  hashState(h: StateHasher): void {
+    h.add(this.block_count);
+    for (let n = 0; n < GC_BLOCK_STORE_SIZE; n++) {
+      h.addBool(this.storeMap[n]!);
+      if (this.storeMap[n]) this.blockStore[n]!.hashState(h);
+    }
+    h.add(this.last_flavor_c);
+    h.add(this.second_to_last_flavor_c);
+    h.add(this.last_flavor_a);
+    h.add(this.second_to_last_flavor_a);
+    for (let x = 0; x < GC_PLAY_WIDTH; x++) {
+      h.add(this.last_row_c[x]!);
+      h.add(this.second_to_last_row_c[x]!);
+      h.add(this.last_row_a[x]!);
+      h.add(this.second_to_last_row_a[x]!);
+    }
+    h.add(this.special_block_location);
+    h.addBool(this.xMode);
+  }
 
   constructor(
     private readonly grid: BlockGridSink,

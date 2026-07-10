@@ -33,6 +33,7 @@ import type { Block, BlockSimContext } from './block.js';
 import type { ComboManager } from './comboManager.js';
 import type { Garbage, GarbageManager } from './garbage.js';
 import type { ComboTabulator } from './combo.js';
+import { HASH_NONE, type StateHasher } from './digest.js';
 import type { SignSink } from './signs.js';
 import { GF_BLACK, flavorMatch, isColorlessFlavor } from './flavors.js';
 
@@ -294,6 +295,36 @@ export class Grid implements BlockGridSink, GarbageGridSink {
   /** Registry entry for a block id (test/inspection helper). */
   checkRegistryOf(id: number): CheckRegistryElement {
     return this.registryOf(id);
+  }
+
+  /**
+   * Feed the playfield into the sim digest (digest.ts): every cell's state,
+   * resident type, and resident identity; the top-row trackers; and the
+   * check registry (marks pending next tick are gameplay state). Pure.
+   * The shatter scratch fields (`shatter_*`, `gray_shatter`) are excluded:
+   * they are reset at the start of each elimination, so their values between
+   * ticks never influence future behavior.
+   */
+  hashState(h: StateHasher): void {
+    h.add(this.top_occupied_row);
+    h.add(this.top_effective_row);
+    for (let x = 0; x < GC_PLAY_WIDTH; x++) {
+      for (let y = 0; y < GC_PLAY_HEIGHT; y++) {
+        const e = this.elements[this.index(x, y)]!;
+        h.add(e.state);
+        h.add(e.resident_type);
+        h.add(e.resident ? e.resident.id : HASH_NONE);
+      }
+    }
+    h.add(this.check_count);
+    for (let n = 0; n < this.check_registry.length; n++) {
+      const c = this.check_registry[n]!;
+      h.addBool(c.mark);
+      // Only a *marked* entry's combo is gameplay state: `timeStep` clears the
+      // mark when draining but leaves `combo` behind, and that stale reference
+      // is never read again. Hashing it would raise false desyncs.
+      h.add(c.mark && c.combo ? c.combo.id : HASH_NONE);
+    }
   }
 
   /** Whether the effective top has reached the safe height. Mirrors `Grid::checkSafeHeightViolation` (Grid.h:183). */
