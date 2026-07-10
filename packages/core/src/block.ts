@@ -86,6 +86,13 @@ export interface BlockSimContext {
    * Draws no RNG, never enters the digest; optional so headless runs skip it.
    */
   notifyCosmeticImpact?(y: number, height: number, width: number): void;
+  /**
+   * Cosmetic: a dying block popped — the render layer's death sparks feed on
+   * this (SparkleManager::createBlockDeathSpark, Block.cxx:213; `count` is the
+   * combo magnitude the block stashed in `pop_alarm`). Same contract as
+   * {@link notifyCosmeticImpact}.
+   */
+  notifyCosmeticSpark?(x: number, y: number, flavor: number, count: number): void;
 }
 
 // --- Block states (Block.h:33-38) ------------------------------------------
@@ -325,7 +332,10 @@ export class Block {
 
         // a dying block always has a combo (set in startDying)
         this.current_combo!.decrementInvolvement();
-        // SparkleManager death sparks + X-mode deactivation omitted (cosmetic).
+        // Death sparks: "pop_alarm stores the number" (Block.cxx:211-216).
+        // Cosmetic hook — draws no RNG, never enters the digest.
+        ctx.notifyCosmeticSpark?.(this.x, this.y, this.flavor, this.pop_alarm);
+        // X-mode deactivation omitted (deferred with X-mode).
         ctx.blocks.deleteBlock(this);
       } else if (this.alarm === GC_DYING_DELAY - 1) {
         // grab the elimination magnitude from our combo (used for spark count)

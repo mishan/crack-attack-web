@@ -30,6 +30,7 @@ import { HudView } from './render/hudView.js';
 import { LevelLightsView } from './render/levelLightsView.js';
 import { SignsView } from './render/signsView.js';
 import { MessageOverlay } from './render/messageOverlay.js';
+import { SparklesView } from './render/sparklesView.js';
 import { FixedTimestep } from './sim/fixedTimestep.js';
 import { deriveViewModel } from './view/boardViewModel.js';
 import {
@@ -63,6 +64,7 @@ interface BoardBundle {
   decals: GarbageDecalView;
   levelLights: LevelLightsView;
   spring: Spring;
+  sparkles: SparklesView;
 }
 
 type Phase = 'connecting' | 'lobby' | 'room' | 'playing' | 'ended' | 'spectating';
@@ -474,6 +476,7 @@ export function bootNetplay(
         decals: new GarbageDecalView(view.scene, halfW, halfH),
         levelLights,
         spring: new Spring(),
+        sparkles: new SparklesView(view.scene, halfW, halfH),
       };
     };
     // Local board left, opponent right, regardless of player index.
@@ -529,6 +532,7 @@ export function bootNetplay(
       b.interp.reset();
       b.signs.clear();
       b.decals.clear();
+      b.sparkles.clear();
       b.spring.gameStart();
       b.view.setShake(0);
       const vm = deriveViewModel(sims[i]!);
@@ -655,6 +659,13 @@ export function bootNetplay(
         for (const imp of impacts[i]!) b.spring.notifyImpact(imp.height, imp.width);
         for (let t = 0; t < steppedTicks; t++) b.spring.timeStep();
         b.view.setShake(b.spring.offsetCells);
+        const sim = w.sims[i]!;
+        for (const ev of sim.drainSparkEvents())
+          b.sparkles.spawnSparks(ev.x, ev.y, ev.flavor, ev.count);
+        for (const ev of sim.drainMoteEvents())
+          b.sparkles.spawnMote(ev.x, ev.y, ev.level, ev.sibling);
+        b.sparkles.advance(steppedTicks);
+        b.sparkles.sync();
         const vm = b.interp.sample(alpha);
         b.view.update(vm);
         b.decals.update(vm.garbage);
@@ -765,11 +776,19 @@ export function bootNetplay(
       const dtTicks = Math.min(MAX_SIGN_DT_TICKS, (nowMs - lastMs) / MS_PER_TICK);
       bigMessage.update(dtTicks);
       const alpha = s.outcome ? 1 : clock.alpha;
+      const simsByBoard = [localSim, remoteSim];
       boards.forEach((b, i) => {
         b.signs.update(dtTicks);
         for (const imp of impacts[i]!) b.spring.notifyImpact(imp.height, imp.width);
         for (let t = 0; t < steppedTicks; t++) b.spring.timeStep();
         b.view.setShake(b.spring.offsetCells);
+        const sim = simsByBoard[i]!;
+        for (const ev of sim.drainSparkEvents())
+          b.sparkles.spawnSparks(ev.x, ev.y, ev.flavor, ev.count);
+        for (const ev of sim.drainMoteEvents())
+          b.sparkles.spawnMote(ev.x, ev.y, ev.level, ev.sibling);
+        b.sparkles.advance(steppedTicks);
+        b.sparkles.sync();
         const vm = b.interp.sample(alpha);
         b.view.update(vm);
         b.decals.update(vm.garbage);

@@ -125,9 +125,11 @@ export class ComboTabulator {
     if (timeStep !== this.creation_time_stamp) {
       this.multiplier++;
       this.n_multipliers_this_step++;
-      // Cosmetic multiplier sign (ComboTabulator.cxx:67); SparkleManager reward
-      // mote is still deferred. `multiplier - 2` so the first chain (×2) is level 0.
+      // Cosmetic multiplier sign + reward mote (ComboTabulator.cxx:67-68).
+      // `multiplier - 2` so the first chain (×2) is level 0; the mote uses the
+      // C++'s `multiplier + 9` (the multiplier band of the mote-level tables).
       signSink?.createSign(this.x, this.y, 'multiplier', this.multiplier - 2);
+      signSink?.createMote?.(this.x, this.y, this.multiplier + 9, 0);
     }
 
     if (isColorlessFlavor(kernel.flavor)) {

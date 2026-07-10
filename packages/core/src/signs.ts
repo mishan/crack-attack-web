@@ -48,4 +48,12 @@ export interface SignEvent {
  */
 export interface SignSink {
   createSign(gridX: number, gridY: number, kind: SignKind, level: number): void;
+  /**
+   * Cosmetic reward mote (SparkleManager::createRewardMote): the star that
+   * flies off when a combo pays out. Fired at the exact C++ call sites
+   * (ComboTabulator.cxx:68, GarbageGenerator.cxx:74-133), which sit beside the
+   * sign emissions — hence it rides this sink. Same contract as signs: no
+   * gameplay RNG, never in the digest, optional.
+   */
+  createMote?(gridX: number, gridY: number, level: number, sibling: number): void;
 }
