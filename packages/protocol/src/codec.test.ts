@@ -32,6 +32,7 @@ const clientMessages: ClientMessage[] = [
   { type: 'result', winner: null },
   { type: 'concede' },
   { type: 'leave_room' },
+  { type: 'spectate', code: CODE },
 ];
 
 const serverMessages: ServerMessage[] = [
@@ -50,6 +51,7 @@ const serverMessages: ServerMessage[] = [
         code: CODE,
         state: 'waiting',
         players: [{ name: 'misha', record: RECORD }],
+        spectators: [],
       },
       {
         code: 'XYZ99',
@@ -58,9 +60,22 @@ const serverMessages: ServerMessage[] = [
           { name: 'a', record: { wins: 0, losses: 0 } },
           { name: 'b', record: { wins: 9, losses: 2 } },
         ],
+        spectators: ['carol', 'dave'],
       },
     ],
   },
+  { type: 'spectate_joined', code: CODE, players: ['a', 'b'], spectators: ['carol'] },
+  { type: 'spectate_joined', code: CODE, players: [], spectators: ['carol'] },
+  {
+    type: 'spectate_start',
+    seed: 0x12345678,
+    inputDelay: 3,
+    players: ['a', 'b'],
+    frames: [[0, CC_LEFT], []],
+  },
+  { type: 'spectators', names: ['carol', 'dave'] },
+  { type: 'spectators', names: [] },
+  { type: 'room_closed' },
   { type: 'room_created', code: CODE },
   { type: 'room_joined', code: CODE, players: ['misha', 'opponent'] },
   { type: 'peer_joined', name: 'opponent' },
@@ -246,6 +261,20 @@ describe('malformed input', () => {
       '{"type":"match_resume","seed":1,"playerIndex":0,"inputDelay":3,"players":["a","b"],"frames":[[999],[]]}',
     ],
     ['peer_dropped missing grace', '{"type":"peer_dropped","name":"m"}'],
+    [
+      'room_list room missing spectators',
+      `{"type":"room_list","rooms":[{"code":"ABC23","state":"waiting","players":[]}]}`,
+    ],
+    [
+      'spectate_joined too many players',
+      `{"type":"spectate_joined","code":"ABC23","players":["a","b","c"],"spectators":[]}`,
+    ],
+    [
+      'spectate_start frames wrong arity',
+      '{"type":"spectate_start","seed":1,"inputDelay":3,"players":["a","b"],"frames":[[]]}',
+    ],
+    ['spectators names not array', '{"type":"spectators","names":"carol"}'],
+    ['spectators empty name', '{"type":"spectators","names":[""]}'],
   ];
 
   it.each(badServer)('server rejects %s', (_name, text) => {
