@@ -33,6 +33,7 @@ const clientMessages: ClientMessage[] = [
   { type: 'concede' },
   { type: 'leave_room' },
   { type: 'spectate', code: CODE },
+  { type: 'rename', name: 'misha2' },
 ];
 
 const serverMessages: ServerMessage[] = [
@@ -188,6 +189,11 @@ describe('malformed input', () => {
     ],
     ['result winner out of range', '{"type":"result","winner":2}'],
     ['result missing winner', '{"type":"result"}'],
+    ['rename empty name', '{"type":"rename","name":""}'],
+    [
+      'rename name too long',
+      JSON.stringify({ type: 'rename', name: 'x'.repeat(MAX_PLAYER_NAME_LENGTH + 1) }),
+    ],
   ];
 
   it.each(bad)('client rejects %s', (_name, text) => {

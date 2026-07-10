@@ -183,6 +183,18 @@ export interface ResultMessage {
   winner: number | null;
 }
 
+/**
+ * Change display name mid-session. Takes effect immediately: the stored
+ * identity, any seat, and the lobby/room rosters update, visible to everyone
+ * via the ensuing `room_list`/`spectators` pushes. Names inside a running
+ * match (`match_start.players`) refresh at the next game.
+ */
+export interface RenameMessage {
+  type: 'rename';
+  /** New display name, 1..{@link MAX_PLAYER_NAME_LENGTH} chars. */
+  name: string;
+}
+
 /** Concede the current match. The server broadcasts `match_end`. */
 export interface ConcedeMessage {
   type: 'concede';
@@ -202,6 +214,7 @@ export type ClientMessage =
   | InputsMessage
   | DigestMessage
   | ResultMessage
+  | RenameMessage
   | ConcedeMessage
   | LeaveRoomMessage;
 

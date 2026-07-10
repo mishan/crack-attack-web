@@ -113,9 +113,19 @@ export function bootNetplay(app: HTMLElement, hudEl: HTMLElement | null, relayUr
 
   // --- persistent identity ------------------------------------------------------
   nameInput.value = localStorage.getItem(STORAGE_NAME) ?? 'player';
+  let record = { wins: 0, losses: 0 };
+  const showSelf = (name: string): void => {
+    selfEl.textContent = `${name} — ${record.wins}W / ${record.losses}L`;
+  };
   nameInput.onchange = (): void => {
-    localStorage.setItem(STORAGE_NAME, nameInput.value.trim() || 'player');
-    setStatus('name change applies on the next connection');
+    const name = nameInput.value.trim() || 'player';
+    nameInput.value = name;
+    localStorage.setItem(STORAGE_NAME, name);
+    // Live rename: takes effect immediately, no reconnect needed. (Names shown
+    // inside a running match refresh at the next game.)
+    net?.send({ type: 'rename', name });
+    showSelf(name);
+    setStatus(net ? 'name updated' : 'name saved — applies when connected');
   };
 
   // Small fixed chrome for the watcher roster + spectated-match title.
@@ -212,7 +222,8 @@ export function bootNetplay(app: HTMLElement, hudEl: HTMLElement | null, relayUr
     switch (msg.type) {
       case 'welcome':
         localStorage.setItem(STORAGE_TOKEN, msg.token);
-        selfEl.textContent = `${msg.name} — ${msg.record.wins}W / ${msg.record.losses}L`;
+        record = msg.record;
+        showSelf(msg.name);
         if (phase === 'connecting') {
           phase = 'lobby';
           setStatus('connected');

@@ -225,6 +225,9 @@ export class RelayServer {
       case 'result':
         await this.handleResult(session, msg.winner);
         return;
+      case 'rename':
+        await this.handleRename(session, msg.name);
+        return;
       case 'concede':
         await this.handleConcede(session);
         return;
@@ -650,6 +653,26 @@ export class RelayServer {
     const peer = room.seats.find((s) => s !== seat);
     if (peer) await this.recordDecisive(peer, seat);
     this.endMatch(room, 'concession', peer ? peer.match_index : 1 - seat.match_index);
+    this.broadcastRoomList();
+  }
+
+  /**
+   * Live display-name change. The store's lookup-updates-name contract does
+   * the persistence; the session, any seat, and every roster follow. Names
+   * baked into a running match (`match_start.players`) refresh next game.
+   */
+  private async handleRename(session: Session, name: string): Promise<void> {
+    // Persist (getPlayer updates the stored name as a side effect of lookup).
+    await this.store.getPlayer(session.identity.token, name);
+    session.identity.name = name;
+    if (session.seat) session.seat.name = name;
+
+    // Everyone sees names through the lobby list; rooms with watchers also
+    // carry names in the spectator roster.
+    const room = session.room ?? session.watching;
+    if (room && (room.spectators.length > 0 || session.watching)) {
+      this.broadcastSpectators(room);
+    }
     this.broadcastRoomList();
   }
 

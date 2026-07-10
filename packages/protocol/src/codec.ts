@@ -240,6 +240,7 @@ const CLIENT_TYPES: ReadonlySet<string> = new Set([
   'inputs',
   'digest',
   'result',
+  'rename',
   'concede',
   'leave_room',
 ]);
@@ -290,6 +291,8 @@ function decodeAny(m: Record<string, unknown>): Message {
       return { type, startTick: uint32(m, 'startTick'), frames: inputFrames(m, 'frames') };
     case 'digest':
       return { type, tick: uint32(m, 'tick'), digests: digestPair(m, 'digests') };
+    case 'rename':
+      return { type, name: playerName(m, 'name') };
     case 'result': {
       const w = m['winner'];
       if (w !== null && (typeof w !== 'number' || !Number.isInteger(w) || w < 0 || w > 1))

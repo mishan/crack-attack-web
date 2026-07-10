@@ -361,6 +361,44 @@ describe('results + records', () => {
   });
 });
 
+describe('rename', () => {
+  it('takes effect live: rosters, room list, seat, and persistence', async () => {
+    const store = new MemoryStore();
+    const relay = new RelayServer({ store });
+    const a = await client(relay, 'alice');
+    const tokenA = a.lastOf('welcome').token;
+    const b = await client(relay, 'bob');
+    const code = await createRoom(relay, a);
+    await say(relay, b, { type: 'join_room', code });
+    const carol = await client(relay, 'carol');
+    await say(relay, carol, { type: 'spectate', code });
+
+    await say(relay, a, { type: 'rename', name: 'alicia' });
+    // Everyone's lobby list shows the new name immediately...
+    expect(b.lastOf('room_list').rooms[0]!.players[0]!.name).toBe('alicia');
+    expect(carol.lastOf('room_list').rooms[0]!.players[0]!.name).toBe('alicia');
+
+    // ...spectator renames update the roster pushes...
+    await say(relay, carol, { type: 'rename', name: 'carlotta' });
+    expect(a.lastOf('spectators').names).toEqual(['carlotta']);
+    expect(b.lastOf('room_list').rooms[0]!.spectators).toEqual(['carlotta']);
+
+    // ...and the change persists in the store across sessions.
+    relay.disconnect(a);
+    const a2 = await client(relay, 'alicia', tokenA);
+    expect(a2.lastOf('welcome').name).toBe('alicia');
+  });
+
+  it('a renamed seat carries into the next match_start', async () => {
+    const relay = new RelayServer();
+    const [a, b] = await startedMatch(relay);
+    await say(relay, a, { type: 'rename', name: 'alicia' });
+    await say(relay, a, { type: 'ready' });
+    await say(relay, b, { type: 'ready' });
+    expect(a.lastOf('match_start').players).toEqual(['alicia', 'bob']);
+  });
+});
+
 describe('spectators', () => {
   it('attaches to a waiting room and gets spectate_start at match start', async () => {
     const relay = new RelayServer();
