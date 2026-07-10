@@ -6,15 +6,12 @@ File:line references are into `crack-attack/src/`.
 
 ## Confirmed missing (the visible seven)
 
-1. **3-2-1-GO countdown** — `CountDownManager.{h,cxx}`, `Game.cxx:399-408`.
-   While `start_pause_alarm != 0` (GC_START_PAUSE_DELAY = 150 ticks = 3 s,
-   Game.h:220) the _entire_ gameplay step is skipped (`continue`), the clock
-   holds, and concession is blocked (Game.cxx:186); only the communicator and
-   meta systems tick. The message switches every 50 ticks: 3 → 2 → 1, then GO
-   shows as play begins (MS_COUNT_DOWN_* MessageManager.h:37-40; art:
-   `data/count_down_{3,2,1,go}.png`). Port note: a pure meta gate — the client
-   drivers hold sim stepping for 150 ticks after match start; lockstep is
-   unaffected (both sides gate identically, buffering absorbs skew).
+1. ~~**3-2-1-GO countdown**~~ **DONE** — `view/messages.ts` (pure, tested)
+   carries the CountDownManager timeline: the client drivers hold sim stepping
+   (and, in netplay, sending) for GC_START_PAUSE_DELAY = 150 ticks while 3/2/1
+   swap every 50; GO rides the first 50 ticks of play. Esc-concede is blocked
+   during the gate (as Game.cxx:186 blocks concession). Resumes and mid-match
+   spectates skip the gate; from-the-start spectates mirror it by wall clock.
 
 2. **Stylized danger bar (LoseBar)** — `LoseBar.{h,cxx}`, `DrawLoseBar.cxx`.
    A textured horizontal tube under the board (length 7.0, 128×16 texture,
@@ -52,12 +49,15 @@ File:line references are into `crack-attack/src/`.
    SignSink events fire at the right places; audit `render/signsView.ts`'s
    texture table — the bonus sign appears unwired.
 
-7. **Big GAME OVER / winner / loser overlays** — `MessageManager.{h,cxx}`:
-   full-screen pulsing textured messages (MS_GAME_OVER solo, MS_WINNER /
-   MS_LOSER netplay, MS_WAITING, MS_PAUSED, MS_ANYKEY; MessageManager.h:37-46;
-   art: `data/message_*.png`). We show DOM text banners; swapping in the
-   textured sprites (SignsView pattern) or styling the banner to match is a
-   taste call.
+7. ~~**Big GAME OVER / winner / loser overlays**~~ **DONE** (PAUSED/ANYKEY
+   excepted — they belong to items 12 and the solo pre-game flow) —
+   `render/messageOverlay.ts` draws the original textures as a centered DOM
+   overlay with the faithful cos² alpha pulse (obj_messages.cxx:166). GAME
+   OVER on solo loss and netplay draws, WINNER/LOSER at any match end,
+   WAITING for lockstep stalls (replacing the text banner). Note: the
+   reference loads these PNGs as pure _alpha masks_ painted white
+   (TextureLoader::loadImageAlpha) — their RGB is black — so the overlay
+   whitens via `filter: brightness(0) invert(1)`.
 
 ## Also missing (smaller / adjacent)
 
@@ -97,7 +97,6 @@ File:line references are into `crack-attack/src/`.
 ## Suggested order
 
 Cheap and high-impact first: ~~(5) light flashes + (8) dying flash + (4)
-screen shake~~ (done); next (1) countdown and (7) message overlays (shared
-textured-overlay plumbing); then (2) lose bar, (3) sparkles, (6) bonus sign
-audit; then (10)/(11) score + stars, (9) celebration, (12) pause, (13) audio,
-(14) glyph rendering.
+screen shake~~, ~~(1) countdown and (7) message overlays~~ (done); next
+(2) lose bar, (3) sparkles, (6) bonus sign audit; then (10)/(11) score +
+stars, (9) celebration, (12) pause, (13) audio, (14) glyph rendering.
