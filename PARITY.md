@@ -20,12 +20,17 @@ File:line references are into `crack-attack/src/`.
    DC_LOSEBAR_FADE_TIME = 20). Our current bar is a plain HUD div; the states
    map cleanly onto the existing `view/hud.ts` thresholds.
 
-3. **Sparkles from dying blocks** — `SparkleManager.{h,cxx}` (pooled
-   `spark_count` sparks + reward "motes", SparkleManager.h:71-78). Sparks
-   spawn at block death (count scales with the combo's `latest_magnitude` —
-   already ported into ComboTabulator for exactly this), flavor-colored, with
-   gravity/tumble physics. This is the flagship use of the reserved
-   `cosmeticRng`. Reward motes also fly toward the level lights on combos.
+3. ~~**Sparkles from dying blocks**~~ **DONE** — `view/sparkles.ts` (pure,
+   tested) ports SparkleManager verbatim: death sparks (upward [π/4, 3π/4]
+   fan, triangular velocity/spin/life distributions, gravity, end-of-life
+   white pulse; count = the `pop_alarm`-stashed combo magnitude) and reward
+   motes (level tables for color/type/size/inverse-mass, hold-then-launch
+   with sibling staggering, upward force + center/twist springs, multiplier
+   cross-fade). Core emits SparkEvent/MoteEvent at the exact C++ call sites;
+   the render layer runs its own throwaway RNG (the C++ shared these ~20
+   draws with the gameplay stream — the original reason for the cosmetic RNG
+   split). Divergence: one procedural 5-point star stands in for the seven
+   mote textures.
 
 4. ~~**Screen shake on garbage impact**~~ **DONE** — `view/spring.ts` (pure,
    tested) ports `Spring.{h,cxx}` exactly; the core emits a cosmetic
@@ -43,11 +48,17 @@ File:line references are into `crack-attack/src/`.
    live). Colors come from the DrawLevelLights.cxx math (sqrt crossfade,
    whitening), boosted ×1.35 for our black background.
 
-6. **Bonus/sign coverage** — `SignManager.{h,cxx}`; art exists for magnitude
-   4-12 (`sign_4..12`), multipliers ×2-×12 (`sign_x2..x12`), and
-   `sign_bonus.tga` (eliminations beyond the table / special blocks). The
-   SignSink events fire at the right places; audit `render/signsView.ts`'s
-   texture table — the bonus sign appears unwired.
+6. ~~**Bonus/sign coverage**~~ **DONE (audited)** — the survey's "appears
+   unwired" was wrong: all 21 sign textures are converted (including
+   `sign_bonus`), `signTextureKey` maps every kind, the level clamps match
+   the C++ `maximum_levels` {8, 10, 8} exactly, and the emission sites are
+   1:1 (ComboTabulator.cxx:67, GarbageGenerator.cxx:67/82/99). The one real
+   gap found: the C++ tints ST_SPECIAL signs per matched flavor
+   (`sign.color = level` → `sign_colors`, DrawCandy.cxx:51-60) where the port
+   used one fixed orange — now faithful. Why bonus signs are rarely _seen_:
+   they require eliminating a pattern of special blocks (at most one spawns
+   per creep row at 1-in-GC_NO_SPECIAL_BLOCK_CHANCE_IN), which is uncommon in
+   casual play — same as the original.
 
 7. ~~**Big GAME OVER / winner / loser overlays**~~ **DONE** (PAUSED/ANYKEY
    excepted — they belong to items 12 and the solo pre-game flow) —
@@ -97,6 +108,6 @@ File:line references are into `crack-attack/src/`.
 ## Suggested order
 
 Cheap and high-impact first: ~~(5) light flashes + (8) dying flash + (4)
-screen shake~~, ~~(1) countdown and (7) message overlays~~ (done); next
-(2) lose bar, (3) sparkles, (6) bonus sign audit; then (10)/(11) score +
+screen shake~~, ~~(1) countdown and (7) message overlays~~, ~~(3) sparkles,
+(6) bonus sign audit~~ (done); next (2) lose bar; then (10)/(11) score +
 stars, (9) celebration, (12) pause, (13) audio, (14) glyph rendering.

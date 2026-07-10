@@ -40,10 +40,18 @@ describe('signTextureKey', () => {
 });
 
 describe('sign colour', () => {
-  it('tints each kind distinctly', () => {
+  it('keeps the cosmetic magnitude/multiplier tints', () => {
     expect(signColor('magnitude')).toBe(0xffffff);
     expect(signColor('multiplier')).toBe(0xffe24a);
-    expect(signColor('special')).toBe(0xff8a3d);
+    expect(signColor('multiplier', 5)).toBe(0xffe24a); // level-independent
+  });
+
+  it('tints specials per matched flavor (sign_colors, DrawCandy.cxx:51-60)', () => {
+    expect(signColor('special', 0)).toBe(0xffffff); // generic gray-branch bonus
+    expect(signColor('special', 1)).toBe(0x333333); // black
+    expect(signColor('special', 3)).toBe(0xeebfee); // purple
+    expect(signColor('special', 7)).toBe(0xffd9bf); // orange
+    expect(signColor('special', 99)).toBe(0xffd9bf); // clamped
   });
 });
 
