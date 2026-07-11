@@ -93,7 +93,7 @@ File:line references are into `crack-attack/src/`.
     ticks), and the speed-ramping backlog drip (`timeStepPlay`). Records are the
     pure, tested `view/scoreRecords.ts` (top-30 scores + top-10 multipliers,
     faithful ascending insertion) persisted to localStorage (`score/
-    scoreStore.ts`, replacing `~/.crack-attack/`), using the saved player name.
+scoreStore.ts`, replacing `~/.crack-attack/`), using the saved player name.
     The HUD shows the zero-padded drip score + BEST, and a new-high-score rank
     line on game over. Solo-only, matching the C++ `CM_SOLO` gate. Deferred: the
     textured 7-segment digit rendering (item 14) and a modal name-entry prompt
