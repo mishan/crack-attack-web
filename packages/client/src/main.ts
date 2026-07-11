@@ -34,6 +34,15 @@ import { Spring } from './view/spring.js';
 import { ViewInterpolator } from './view/viewInterpolator.js';
 import { AudioManager } from './audio/audioManager.js';
 import { mountAudioControls } from './audio/audioControls.js';
+import { ScoreState } from './view/score.js';
+import { humanRank, insertMult, insertScore } from './view/scoreRecords.js';
+import {
+  loadMultRecords,
+  loadPlayerName,
+  loadScoreRecords,
+  saveMultRecords,
+  saveScoreRecords,
+} from './score/scoreStore.js';
 
 const SEED = 0x1a2b3c4d;
 const MS_PER_TICK = 1000 / GC_STEPS_PER_SECOND;
@@ -164,6 +173,40 @@ function bootSolo(
   audio.fadeoutMusic(3000);
   levelLights.reset(initial.hud.topEffectiveRow);
 
+  // --- solo scoring (display layer; Score.cxx) -----------------------------
+  const score = new ScoreState();
+  let scoreSubmitted = false;
+  /** The current best (top) high score, for the "BEST" readout. */
+  const bestScore = (): number => {
+    const table = loadScoreRecords();
+    return table[table.length - 1]?.score ?? 0;
+  };
+  const showBest = (): void => hud?.setScoreRecord(`BEST ${bestScore()}`);
+  hud?.updateScore(score.formatted());
+  showBest();
+
+  /** On a loss, fold points into the score and record any new high score / multiplier. */
+  const submitScore = (): void => {
+    if (scoreSubmitted) return;
+    scoreSubmitted = true;
+    score.flush();
+    hud?.updateScore(score.formatted());
+
+    const name = loadPlayerName();
+    const scoreRes = insertScore(loadScoreRecords(), name, score.score);
+    if (scoreRes.rank >= 0) saveScoreRecords(scoreRes.records);
+    const multRes = insertMult(loadMultRecords(), name, score.topMultiplier);
+    if (multRes.rank >= 0) saveMultRecords(multRes.records);
+
+    if (scoreRes.rank >= 0) {
+      hud?.setScoreRecord(
+        `NEW HIGH SCORE — rank #${humanRank(scoreRes.rank, scoreRes.records.length)}`,
+      );
+    } else {
+      showBest();
+    }
+  };
+
   // Temporary lighting/material tuner — open with `?tune` in the URL.
   if (new URLSearchParams(globalThis.location.search).has('tune')) {
     mountRenderTuner(view, DEFAULT_RENDER_TUNING);
@@ -202,6 +245,11 @@ function bootSolo(
     endMusicOn = false;
     audio.resetCountdown();
     audio.fadeoutMusic(3000);
+    // Reset scoring for the new game.
+    score.reset();
+    scoreSubmitted = false;
+    hud?.updateScore(score.formatted());
+    showBest();
   };
 
   const onKeyDown = (e: KeyboardEvent): void => {
@@ -278,6 +326,13 @@ function bootSolo(
       endMusicOn = true;
       audio.playGameOver();
     }
+
+    // Scoring: fold in this frame's eliminations, then drip the backlog into the
+    // shown total on the ticks that actually played (Score::timeStepPlay).
+    for (const ev of sim.drainScoreEvents()) score.report(ev);
+    score.timeStep(stepped);
+    hud?.updateScore(score.formatted());
+    if (sim.lost) submitScore();
 
     // Cosmetic garbage-landing impacts: kick the shake spring and flash the
     // lights; both tick with the sim (they freeze when it does).

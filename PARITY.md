@@ -80,11 +80,24 @@ File:line references are into `crack-attack/src/`.
    Replaces the port's previous blended approximation in `BoardView`.
 9. **Win/loss celebration** — `CelebrationManager.{h,cxx}`: end-of-match
    dancing-squares animation behind the WINNER/LOSER message.
-10. **Score** — `Score.{h,cxx}`: per-elimination scoring with a backlog that
-    drips into the displayed total (Score.h:77), multiplier records, and the
-    hall-of-fame persistence (`~/.crack-attack/`, `data/default_record`).
-    Deliberately deferred out of core; a display-layer port reading the
-    ComboTabulator fields (`base_accumulated_score` is already maintained).
+10. ~~**Score**~~ **DONE** (solo) — `Score.{h,cxx}` ported to the display
+    layer. The core emits a cosmetic `ScoreEvent` snapshot of the reporting
+    combo at the exact `ComboManager::timeStep` elimination point
+    (ComboManager.cxx:73) via `core/score.ts` + `GameSim.drainScoreEvents` —
+    RNG-free and out of the digest, so determinism is untouched. The client
+    `view/score.ts` (pure, tested) reproduces the C++ math: per-elimination
+    points (magnitude / gray / special-block bonuses), the ComboManager base_*
+    bookkeeping + `reportMultiplier` chain bonus (reconstructed per-combo from
+    the snapshot, keyed on id + creation stamp for pool reuse; the per-step
+    multiplier count is the monotonic `nMultipliers` diffed across report
+    ticks), and the speed-ramping backlog drip (`timeStepPlay`). Records are the
+    pure, tested `view/scoreRecords.ts` (top-30 scores + top-10 multipliers,
+    faithful ascending insertion) persisted to localStorage (`score/
+scoreStore.ts`, replacing `~/.crack-attack/`), using the saved player name.
+    The HUD shows the zero-padded drip score + BEST, and a new-high-score rank
+    line on game over. Solo-only, matching the C++ `CM_SOLO` gate. Deferred: the
+    textured 7-segment digit rendering (item 14) and a modal name-entry prompt
+    (the saved name is used).
 11. **WinRecord stars** — per-game stars across a best-of-3 match
     (`WinRecord.{h,cxx}`); pairs with the deferred `GC_GAMES_PER_MATCH`
     lifecycle.
@@ -126,5 +139,5 @@ File:line references are into `crack-attack/src/`.
 
 Cheap and high-impact first: ~~(5) light flashes + (8) dying flash + (4)
 screen shake~~, ~~(1) countdown and (7) message overlays~~, ~~(3) sparkles,
-(6) bonus sign audit~~, ~~(13) audio~~ (done); next (2) lose bar; then
-(10)/(11) score + stars, (9) celebration, (12) pause, (14) glyph rendering.
+(6) bonus sign audit~~, ~~(13) audio~~, ~~(10) score~~ (done); next (2) lose bar; then
+(11) stars, (9) celebration, (12) pause, (14) glyph rendering.

@@ -284,3 +284,53 @@ describe('GameSim cosmetic sound buffer', () => {
     expect(typeof sim.notifyCosmeticSound).toBe('function');
   });
 });
+
+describe('GameSim cosmetic score buffer', () => {
+  const snap = (id: number) => ({
+    id,
+    creationTimeStamp: 0,
+    magnitude: 3,
+    specialMagnitude: 0,
+    multiplier: 1,
+    nMultipliers: 0,
+    special: [0, 0, 0, 0, 0, 0, 0],
+  });
+
+  it('is wired as the combo manager score sink', () => {
+    const sim = new GameSim(1);
+    expect(sim.combos.scoreSink).toBe(sim);
+  });
+
+  it('drains score snapshots once, then reports empty', () => {
+    const sim = new GameSim(1);
+    sim.reportComboElimination(snap(0));
+    sim.reportComboElimination(snap(1));
+    expect(sim.drainScoreEvents().map((e) => e.id)).toEqual([0, 1]);
+    expect(sim.drainScoreEvents()).toEqual([]);
+  });
+
+  it('clears the score buffer on restart', () => {
+    const sim = new GameSim(1);
+    sim.reportComboElimination(snap(0));
+    sim.gameStart();
+    expect(sim.drainScoreEvents()).toEqual([]);
+  });
+
+  it('does not drop score events at cosmetic-buffer scale (records need every point)', () => {
+    // Far more than the cosmetic caps (128/256): the score buffer holds a large
+    // margin so a heavy drain interval never loses points.
+    const sim = new GameSim(1);
+    for (let i = 0; i < 1000; i++) sim.reportComboElimination(snap(i));
+    expect(sim.drainScoreEvents().length).toBe(1000);
+  });
+
+  it('still caps eventually for a never-drained run, keeping the newest', () => {
+    const sim = new GameSim(1);
+    const CAP = 4096;
+    for (let i = 0; i < CAP + 200; i++) sim.reportComboElimination(snap(i));
+    const events = sim.drainScoreEvents();
+    expect(events.length).toBe(CAP);
+    expect(events[events.length - 1]!.id).toBe(CAP + 200 - 1);
+    expect(events[0]!.id).toBe(200);
+  });
+});

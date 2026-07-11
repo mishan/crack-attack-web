@@ -88,6 +88,26 @@ describe('Grid elimination — horizontal', () => {
   });
 });
 
+describe('Grid elimination — score snapshot', () => {
+  it('emits a combo score snapshot at the reporting tick', () => {
+    const ctx = new Ctx();
+    const captured: { magnitude: number; multiplier: number; special: readonly number[] }[] = [];
+    ctx.combos.scoreSink = { reportComboElimination: (e) => captured.push(e) };
+
+    place(ctx, 1, 1, BF_NORMAL_1);
+    place(ctx, 2, 1, BF_NORMAL_1);
+    place(ctx, 3, 1, BF_NORMAL_1);
+
+    gridTick(ctx); // detector reports the elimination onto a fresh combo
+    ctx.combos.timeStep(); // ComboManager sees time_stamp === now → emits
+
+    expect(captured).toHaveLength(1);
+    expect(captured[0]!.magnitude).toBe(3);
+    expect(captured[0]!.multiplier).toBe(1); // no chain
+    expect(captured[0]!.special.every((n) => n === 0)).toBe(true);
+  });
+});
+
 describe('Grid elimination — vertical', () => {
   it('detects a vertical run of three', () => {
     const ctx = new Ctx();

@@ -31,6 +31,8 @@ export class HudView {
   private readonly clock: HTMLElement;
   private readonly barFill: HTMLElement;
   private readonly status: HTMLElement;
+  private readonly score: HTMLElement;
+  private readonly record: HTMLElement;
 
   constructor(container: HTMLElement) {
     const root = el('div', {
@@ -41,9 +43,18 @@ export class HudView {
     });
 
     const left = el('div', { display: 'flex', flexDirection: 'column', gap: '6px' });
+    // Solo score readout (hidden until updateScore is called), above the clock.
+    this.score = el('div', {
+      fontSize: '22px',
+      fontWeight: '700',
+      letterSpacing: '2px',
+      fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
+      display: 'none',
+    });
+    this.record = el('div', { fontSize: '12px', minHeight: '15px', opacity: '0.75' });
     this.clock = el('div', { fontSize: '20px', fontWeight: '600', letterSpacing: '0.5px' });
     this.status = el('div', { fontSize: '13px', minHeight: '16px', opacity: '0.9' });
-    left.append(this.clock, this.status);
+    left.append(this.score, this.record, this.clock, this.status);
 
     // Vertical lose bar: a track with a bottom-anchored fill that rises toward
     // the top (the safe-height line) as the stack climbs.
@@ -90,6 +101,17 @@ export class HudView {
     } else {
       this.set('', '#d7dce5', false);
     }
+  }
+
+  /** Show the solo score (zero-padded string from ScoreState.formatted()). */
+  updateScore(formatted: string): void {
+    this.score.style.display = 'block';
+    this.score.textContent = formatted;
+  }
+
+  /** Show a small record line under the score (best score, or a new-record note). */
+  setScoreRecord(line: string): void {
+    this.record.textContent = line;
   }
 
   private set(text: string, color: string, bold: boolean): void {
