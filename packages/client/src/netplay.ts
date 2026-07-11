@@ -32,6 +32,8 @@ import { LoseBarView } from './render/loseBarView.js';
 import { SignsView } from './render/signsView.js';
 import { MessageOverlay } from './render/messageOverlay.js';
 import { SparklesView } from './render/sparklesView.js';
+import { BitmapLabel } from './render/bitmapText.js';
+import { FONT0 } from './view/bitmapFont.js';
 import { FixedTimestep } from './sim/fixedTimestep.js';
 import { deriveViewModel } from './view/boardViewModel.js';
 import {
@@ -68,6 +70,8 @@ interface BoardBundle {
   loseBar: LoseBarView;
   spring: Spring;
   sparkles: SparklesView;
+  /** Player name shown above the board, in the original bitmap font. */
+  nameLabel: BitmapLabel;
 }
 
 type Phase = 'connecting' | 'lobby' | 'room' | 'playing' | 'ended' | 'spectating';
@@ -496,6 +500,14 @@ export function bootNetplay(
       const halfH = (vm.visibleHeight - 1) / 2;
       const levelLights = new LevelLightsView(view.scene, halfW, halfH);
       levelLights.reset(vm.hud.topEffectiveRow);
+      // Player name above the board, in the original bitmap font.
+      const nameLabel = new BitmapLabel(FONT0, { height: 24, color: '#e7ebf3' });
+      const nameBar = document.createElement('div');
+      nameBar.style.cssText =
+        'position:absolute;top:10px;left:0;right:0;display:flex;justify-content:center;' +
+        'pointer-events:none;z-index:2';
+      nameBar.append(nameLabel.element);
+      container.append(nameBar);
       return {
         container,
         view,
@@ -506,6 +518,7 @@ export function bootNetplay(
         loseBar: new LoseBarView(view.scene, halfW, halfH),
         spring: new Spring(),
         sparkles: new SparklesView(view.scene, halfW, halfH),
+        nameLabel,
       };
     };
     // Local board left, opponent right, regardless of player index.
@@ -551,6 +564,15 @@ export function bootNetplay(
       fitToWindow();
     }
     resetBoards(localSim, remoteSim, resume);
+    // Local board is on the left, opponent on the right.
+    applyBoardNames(names[localIndex] ?? '', names[1 - localIndex] ?? '');
+  }
+
+  /** Set the two per-board name labels (left, right). */
+  function applyBoardNames(left: string, right: string): void {
+    if (!boards) return;
+    boards[0].nameLabel.setText(left);
+    boards[1].nameLabel.setText(right);
   }
 
   /**
@@ -600,6 +622,8 @@ export function bootNetplay(
       fitToWindow();
     }
     resetBoards(spectator.sims[0]!, spectator.sims[1]!, midMatch);
+    // Watcher view is "A vs B" in player order (no local/remote swap).
+    applyBoardNames(names[0], names[1]);
   }
 
   function resumeMatch(msg: MatchResumeMessage): void {

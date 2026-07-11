@@ -14,6 +14,8 @@
 import { GC_STEPS_PER_SECOND } from '@crack-attack/core';
 import type { Hud } from '../view/boardViewModel.js';
 import { type DangerTier, dangerTier, formatClock } from '../view/hud.js';
+import { BitmapLabel } from './bitmapText.js';
+import { CLOCK } from '../view/bitmapFont.js';
 
 const TIER_COLOR: Record<DangerTier, string> = {
   safe: '#46b24a',
@@ -28,10 +30,12 @@ const el = (tag: string, style: Partial<CSSStyleDeclaration>): HTMLElement => {
 };
 
 export class HudView {
-  private readonly clock: HTMLElement;
+  // Clock and score render with the original glyph fonts (clock digit set).
+  private readonly clock = new BitmapLabel(CLOCK, { height: 20, color: '#d7dce5' });
+  private readonly score = new BitmapLabel(CLOCK, { height: 30, color: '#f4f6fb' });
+  private readonly scoreWrap: HTMLElement;
   private readonly barFill: HTMLElement;
   private readonly status: HTMLElement;
-  private readonly score: HTMLElement;
   private readonly record: HTMLElement;
 
   constructor(container: HTMLElement) {
@@ -44,17 +48,11 @@ export class HudView {
 
     const left = el('div', { display: 'flex', flexDirection: 'column', gap: '6px' });
     // Solo score readout (hidden until updateScore is called), above the clock.
-    this.score = el('div', {
-      fontSize: '22px',
-      fontWeight: '700',
-      letterSpacing: '2px',
-      fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
-      display: 'none',
-    });
+    this.scoreWrap = el('div', { display: 'none' });
+    this.scoreWrap.append(this.score.element);
     this.record = el('div', { fontSize: '12px', minHeight: '15px', opacity: '0.75' });
-    this.clock = el('div', { fontSize: '20px', fontWeight: '600', letterSpacing: '0.5px' });
     this.status = el('div', { fontSize: '13px', minHeight: '16px', opacity: '0.9' });
-    left.append(this.score, this.record, this.clock, this.status);
+    left.append(this.scoreWrap, this.record, this.clock.element, this.status);
 
     // Vertical lose bar: a track with a bottom-anchored fill that rises toward
     // the top (the safe-height line) as the stack climbs.
@@ -84,7 +82,7 @@ export class HudView {
 
   /** Mirror `hud` onto the overlay. Call once per rendered frame. */
   update(hud: Hud): void {
-    this.clock.textContent = formatClock(hud.elapsedSeconds);
+    this.clock.setText(formatClock(hud.elapsedSeconds));
 
     const tier = dangerTier(hud.dangerFraction);
     this.barFill.style.height = `${Math.round(hud.dangerFraction * 100)}%`;
@@ -105,8 +103,8 @@ export class HudView {
 
   /** Show the solo score (zero-padded string from ScoreState.formatted()). */
   updateScore(formatted: string): void {
-    this.score.style.display = 'block';
-    this.score.textContent = formatted;
+    this.scoreWrap.style.display = 'block';
+    this.score.setText(formatted);
   }
 
   /** Show a small record line under the score (best score, or a new-record note). */
