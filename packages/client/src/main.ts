@@ -24,6 +24,7 @@ import { GarbageDecalView } from './render/garbageDecalView.js';
 import { HudView } from './render/hudView.js';
 import { mountRenderTuner } from './render/renderTuner.js';
 import { LevelLightsView } from './render/levelLightsView.js';
+import { LoseBarView } from './render/loseBarView.js';
 import { SignsView } from './render/signsView.js';
 import { MessageOverlay } from './render/messageOverlay.js';
 import { SparklesView } from './render/sparklesView.js';
@@ -154,6 +155,7 @@ function bootSolo(
   const signs = new SignsView(view.scene, halfW, halfH);
   const decals = new GarbageDecalView(view.scene, halfW, halfH);
   const levelLights = new LevelLightsView(view.scene, halfW, halfH);
+  const loseBar = new LoseBarView(view.scene, halfW, halfH);
   const sparkles = new SparklesView(view.scene, halfW, halfH);
   const spring = new Spring();
   const overlay = new MessageOverlay(app);
@@ -238,6 +240,7 @@ function bootSolo(
     spring.gameStart();
     view.setShake(0);
     levelLights.reset(fresh.hud.topEffectiveRow);
+    loseBar.reset();
     metaTicks = 0;
     // Fade the ending stinger over the new countdown, then game music at GO
     // (C++ gameStart → Music::fadeout(3000); GO → Music::play).
@@ -341,6 +344,10 @@ function bootSolo(
     for (let t = 0; t < stepped; t++) spring.timeStep();
     view.setShake(spring.offsetCells);
 
+    // Danger bar: tracks the Creep loss countdown, ticking with the sim (only in
+    // play, so pass `stepped`, not the gate ticks — LoseBar::timeStep is post-gate).
+    loseBar.update(stepped, sim.creep.creep_freeze, sim.creep.loss_alarm);
+
     // Death sparks + reward motes, ticking with the sim like the spring.
     for (const ev of sim.drainSparkEvents()) sparkles.spawnSparks(ev.x, ev.y, ev.flavor, ev.count);
     for (const ev of sim.drainMoteEvents()) sparkles.spawnMote(ev.x, ev.y, ev.level, ev.sibling);
@@ -383,6 +390,7 @@ function bootSolo(
       touch?.remove();
       onlineBtn.remove();
       overlay.dispose();
+      loseBar.dispose();
       view.dispose(); // release the WebGL context (browsers cap them)
     },
   };
