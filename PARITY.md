@@ -90,8 +90,25 @@ File:line references are into `crack-attack/src/`.
    two white strobe pulses (the folded triangle wave), then the quadratically
    accelerating tumble while shrinking to DC_DYING_SHRINK_MIN_SIZE = 0.1.
    Replaces the port's previous blended approximation in `BoardView`.
-9. **Win/loss celebration** — `CelebrationManager.{h,cxx}`: end-of-match
-   dancing-squares animation behind the WINNER/LOSER message.
+9. ~~**Win/loss celebration**~~ **DONE** — `view/celebration.ts` (pure,
+   tested) ports `CelebrationManager.{h,cxx}` + the `DrawMessages.cxx`
+   draw math: the board dims out over DC_CELEBRATION_FADE_TIME = 200, a WIN
+   message scales in from ×12 while its alpha fades (opacity = win_alpha⁴) then
+   strobes (the folded-triangle flash timers), and a LOSS / GAME OVER message
+   drops from DC_STARTING_LOSS_HEIGHT and bounces to rest under gravity/drag
+   with decaying elasticity. `render/messageOverlay.ts` grew a `setCelebration`
+   that applies scale / drop-translate / opacity to the message `<img>`, a
+   white-glow drop-shadow for the flash, and a black board-dim veil. A WIN also
+   throws fireworks: the five-source sputtering-rate algorithm
+   (`Celebration.drainSparkSpawns`) drives `Sparkles.createCelebrationSpark`
+   (faithful angle fans / velocities / life, sharing the death-spark pool +
+   gravity), launched on the winner's board. Wired into solo (loss → GAME OVER
+   bounce) and netplay-playing (win scale-in/flash + fireworks, loss bounce),
+   ticked on wall-clock after the sim freezes. Divergences: the exact
+   win-message tint isn't ported (flash is a white glow); the firework source
+   positions are placed around our single board (not the reference's two-board
+   screen); solo never "wins" so its top-rank fireworks aren't shown; and the
+   spectator view keeps its plain result message.
 10. ~~**Score**~~ **DONE** (solo) — `Score.{h,cxx}` ported to the display
     layer. The core emits a cosmetic `ScoreEvent` snapshot of the reporting
     combo at the exact `ComboManager::timeStep` elimination point
@@ -113,8 +130,13 @@ scoreStore.ts`, replacing `~/.crack-attack/`), using the saved player name.
 11. **WinRecord stars** — per-game stars across a best-of-3 match
     (`WinRecord.{h,cxx}`); pairs with the deferred `GC_GAMES_PER_MATCH`
     lifecycle.
-12. **Solo pause** — GS_PAUSED + MS_PAUSED overlay (netplay pause deliberately
-    retired with the sync-counter scheme; solo pause is trivial).
+12. ~~**Solo pause**~~ **DONE** — `P` toggles GS_PAUSED in solo: the sim
+    freezes (the frame loop drains wall-clock time without stepping, so
+    unpausing doesn't burst-catch-up), the `message_paused` overlay shows, and
+    music pauses/resumes. Faithful to `Game::buttonPause` — you can't pause when
+    the game is over, during the 3-2-1 countdown, or when you're about to lose
+    (`creep_freeze`). Netplay pause stays retired with the sync-counter scheme,
+    as noted.
 13. ~~**Audio**~~ **DONE** — `Sound.{h,cxx}`, `Music.{h,cxx}` ported to
     WebAudio. The core emits cosmetic `SoundEvent`s on the existing sink
     pattern (`core/sound.ts`, `GameSim.drainSoundEvents`) at the exact C++
@@ -165,5 +187,6 @@ scoreStore.ts`, replacing `~/.crack-attack/`), using the saved player name.
 
 Cheap and high-impact first: ~~(5) light flashes + (8) dying flash + (4)
 screen shake~~, ~~(1) countdown and (7) message overlays~~, ~~(3) sparkles,
-(6) bonus sign audit~~, ~~(13) audio~~, ~~(10) score~~ (done); next (2) lose bar; then
-(11) stars, (9) celebration, (12) pause, (14) glyph rendering.
+(6) bonus sign audit~~, ~~(13) audio~~, ~~(10) score~~, ~~(2) lose bar~~,
+~~(9) celebration~~, ~~(12) pause~~, ~~(14) glyph rendering~~ (done); remaining:
+(11) stars.

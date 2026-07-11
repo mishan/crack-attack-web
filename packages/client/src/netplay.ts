@@ -43,6 +43,7 @@ import {
   type MessageKind,
 } from './view/messages.js';
 import { Spring } from './view/spring.js';
+import { Celebration } from './view/celebration.js';
 import { ViewInterpolator } from './view/viewInterpolator.js';
 import { LockstepSession } from './net/lockstep.js';
 import { NetClient } from './net/session.js';
@@ -218,6 +219,11 @@ export function bootNetplay(
   const input = new KeyboardInput();
   const bigMessage = new MessageOverlay(app);
   const hud = hudEl ? new HudView(hudEl) : null;
+  // End-of-match celebration (WINNER scales in + flashes; LOSER / GAME OVER
+  // drops and bounces; the board dims). Runs on wall-clock ticks after the
+  // match is decided; `celebAccum` carries the fractional-tick remainder.
+  const celebration = new Celebration();
+  let celebAccum = 0;
 
   // The lobby plays the menu prelude (switching from any solo game music).
   audio.playPrelude();
@@ -226,6 +232,9 @@ export function bootNetplay(
   function clearOverlay(): void {
     resultKind = null;
     bigMessage.show(null);
+    celebration.stop();
+    celebAccum = 0;
+    bigMessage.setCelebration(null);
   }
 
   function connect(): void {
@@ -850,6 +859,7 @@ export function bootNetplay(
             if (winner === localIndex) audio.playYouWin();
             else audio.playGameOver();
           }
+          if (!celebration.active) celebration.start(winner === localIndex ? 'win' : 'loss');
           readyBtn.hidden = false;
           readyBtn.disabled = false;
           readyBtn.textContent = 'Rematch';
@@ -881,6 +891,25 @@ export function bootNetplay(
       const impacts = [localSim.drainImpactEvents(), remoteSim.drainImpactEvents()];
       const dtTicks = Math.min(MAX_SIGN_DT_TICKS, (nowMs - lastMs) / MS_PER_TICK);
       bigMessage.update(dtTicks);
+      // End-of-match celebration animation (started on the deciding tick above).
+      if (s.outcome) {
+        celebAccum += dtTicks;
+        let celebSteps = 0;
+        while (celebAccum >= 1) {
+          celebration.tick();
+          celebAccum -= 1;
+          celebSteps++;
+        }
+        bigMessage.setCelebration(celebration.view);
+        // Fireworks on the winner's (local, left) board: spawn the drained
+        // sparks and advance the board's sparkle sim (the sim itself is frozen).
+        if (boards) {
+          for (const spawn of celebration.drainSparkSpawns()) {
+            boards[0].sparkles.spawnCelebrationSpark(spawn.source, spawn.color);
+          }
+          boards[0].sparkles.advance(celebSteps);
+        }
+      }
       const alpha = s.outcome ? 1 : clock.alpha;
       const simsByBoard = [localSim, remoteSim];
       boards.forEach((b, i) => {

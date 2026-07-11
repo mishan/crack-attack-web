@@ -118,6 +118,11 @@ export class SparklesView {
     this.system.createRewardMote(x, y, level, sibling);
   }
 
+  /** Celebration firework spark from a source (0..4) in a block colour (0..4). */
+  spawnCelebrationSpark(source: number, color: number): void {
+    this.system.createCelebrationSpark(source, color);
+  }
+
   /** Advance the particle sim by the frame's stepped ticks (freezes with the sim). */
   advance(ticks: number): void {
     for (let t = 0; t < ticks; t++) this.system.timeStep();

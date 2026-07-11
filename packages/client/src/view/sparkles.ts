@@ -34,6 +34,9 @@ const DC_SPARK_GRAVITY = 0.001;
 const DC_SPARK_DRAG = 0.001;
 const DC_MIN_SPARK_VELOCITY = 0.02;
 const DC_MAX_SPARK_VELOCITY = 0.15;
+// Celebration (firework) spark launch velocity (Displayer.h:199-200).
+const DC_MIN_CSPARK_VELOCITY = 0.05;
+const DC_SPREAD_CSPARK_VELOCITY = 0.05;
 const DC_MIN_SPARK_ANGULAR_VELOCITY = 1.0;
 const DC_MAX_SPARK_ANGULAR_VELOCITY = 15.0;
 const DC_MIN_SPARK_SIZE = 0.4;
@@ -329,6 +332,91 @@ export class Sparkles {
           rng.number(DC_SPREAD_SPARK_LIFE_TIME) +
           (DC_MEDIUM_SPARK_LIFE_TIME - DC_SPREAD_SPARK_LIFE_TIME);
       }
+    }
+  }
+
+  /**
+   * Launch one celebration firework spark from `source` (0..4) in block `color`
+   * (0..4). Faithful to `SparkleManager::createCelebrationSpark`: sources 0-3
+   * fan up-and-out (angle range [3π/16, 3π/16+π/8]); source 4 shoots nearly
+   * straight up ([7π/16, 7π/16+π/8]) at double velocity; the right-hand sources
+   * mirror their x-velocity so they arc inward. Same pool + gravity/drag physics
+   * as the death sparks. Divergence: the five source *positions* are placed
+   * around our single board rather than the reference's two-board screen.
+   */
+  createCelebrationSpark(source: number, color: number): void {
+    if (this.spark_count === DC_MAX_SPARK_NUMBER) return;
+    let i = 0;
+    while (this.sparks[i]!.active) i++;
+    const spark = this.sparks[i]!;
+    const rng = this.rng;
+
+    this.spark_count++;
+    spark.active = true;
+
+    let angle: number;
+    let v: number;
+    if (source !== 4) {
+      angle = (3 * Math.PI) / 16 + (Math.PI / 8) * rng.numberFloat();
+      v = DC_MIN_CSPARK_VELOCITY + DC_SPREAD_CSPARK_VELOCITY * rng.numberFloat();
+    } else {
+      angle = (7 * Math.PI) / 16 + (Math.PI / 8) * rng.numberFloat();
+      v = 2 * DC_MIN_CSPARK_VELOCITY + 2 * DC_SPREAD_CSPARK_VELOCITY * rng.numberFloat();
+    }
+    spark.v_x = Math.cos(angle) * v;
+    spark.v_y = Math.sin(angle) * v;
+
+    // Source positions in world units around the board; right sources fire inward.
+    const W = this.halfW * DC_GRID_ELEMENT_LENGTH;
+    const H = this.halfH * DC_GRID_ELEMENT_LENGTH;
+    switch (source) {
+      case 0:
+        spark.x = -W;
+        spark.y = 0;
+        break;
+      case 1:
+        spark.x = -W;
+        spark.y = 0.6 * H;
+        break;
+      case 2:
+        spark.x = W;
+        spark.y = 0;
+        spark.v_x = -spark.v_x;
+        break;
+      case 3:
+        spark.x = W;
+        spark.y = 0.6 * H;
+        spark.v_x = -spark.v_x;
+        break;
+      default: // 4: bottom-centre, straight up
+        spark.x = 0;
+        spark.y = -0.8 * H;
+        break;
+    }
+
+    spark.a = rng.number(360);
+    spark.v_a =
+      DC_MIN_SPARK_ANGULAR_VELOCITY +
+      (rng.numberFloat() + rng.numberFloat()) *
+        (0.5 * (DC_MAX_SPARK_ANGULAR_VELOCITY - DC_MIN_SPARK_ANGULAR_VELOCITY));
+    if (rng.chanceIn2(2)) spark.v_a = -spark.v_a;
+
+    if (rng.chanceIn(3))
+      spark.size = DC_MIN_SPARK_SIZE + rng.numberFloat() * (1 - DC_MIN_SPARK_SIZE);
+    else spark.size = DC_MIN_SPARK_SIZE;
+
+    spark.color = color;
+
+    if (rng.chanceIn(DC_CHANCE_LONG_SPARK_LIFE_TIME)) {
+      spark.life_time =
+        rng.number(10 * DC_SPREAD_SPARK_LIFE_TIME) +
+        rng.number(10 * DC_SPREAD_SPARK_LIFE_TIME) +
+        10 * (DC_MEDIUM_SPARK_LIFE_TIME - DC_SPREAD_SPARK_LIFE_TIME);
+    } else {
+      spark.life_time =
+        rng.number(DC_SPREAD_SPARK_LIFE_TIME) +
+        rng.number(DC_SPREAD_SPARK_LIFE_TIME) +
+        (DC_MEDIUM_SPARK_LIFE_TIME - DC_SPREAD_SPARK_LIFE_TIME);
     }
   }
 

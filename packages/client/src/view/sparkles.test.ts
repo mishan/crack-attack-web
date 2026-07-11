@@ -61,6 +61,33 @@ describe('death sparks', () => {
   });
 });
 
+describe('celebration (firework) sparks', () => {
+  it('launches from source positions with the requested colour, arcing upward', () => {
+    const s = make();
+    const W = HALF_W * 2;
+    // sources 0-3 fan up-and-out; source 4 shoots nearly straight up
+    s.createCelebrationSpark(0, 3);
+    s.createCelebrationSpark(2, 3);
+    s.createCelebrationSpark(4, 1);
+    const active = s.sparks.filter((p) => p.active);
+    expect(active).toHaveLength(3);
+    for (const spark of active) {
+      expect(spark.v_y).toBeGreaterThan(0); // both angle fans launch upward
+      expect(spark.life_time).toBeGreaterThan(0);
+    }
+    // source 0 launches from the left edge, source 2 from the right (mirrored in).
+    expect(s.sparks.find((p) => p.active && p.x === -W)).toBeTruthy();
+    expect(s.sparks.find((p) => p.active && p.x === W)).toBeTruthy();
+    expect(active.find((p) => p.color === 1)).toBeTruthy(); // source 4's colour
+  });
+
+  it('caps at the pool size', () => {
+    const s = make();
+    for (let i = 0; i < DC_MAX_SPARK_NUMBER + 20; i++) s.createCelebrationSpark(i % 5, i % 5);
+    expect(s.spark_count).toBe(DC_MAX_SPARK_NUMBER);
+  });
+});
+
 describe('reward motes', () => {
   it('maps levels through the C++ tables (type, size, color)', () => {
     const s = make();
