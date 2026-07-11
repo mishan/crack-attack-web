@@ -137,9 +137,23 @@ scoreStore.ts`, replacing `~/.crack-attack/`), using the saved player name.
     dual GPL / Crystal-Stacker-freeware licensing. Deferred: the commented-out
     shatter-to-garbage cue (Garbage.cxx:106, disabled upstream) and the X-mode
     extreme sound variants.
-14. **Textured clock/name rendering** — `data/clock_*.tga`, `font0_*.tga`
-    glyph textures for names/scores above the boards. We render DOM text;
-    parity here is cosmetic taste.
+14. ~~**Textured clock/name rendering**~~ **DONE** — the original bitmap glyph
+    fonts now render the clock, the score, and player names, replacing the DOM
+    text. The `clock_*.tga` (digits + `clock_extra` separator) and all 86
+    `font0_*.tga` glyphs are converted to two white-on-alpha PNG strip atlases
+    (`public/textures/font/{clock,font0}.png`). `view/bitmapFont.ts` (pure,
+    tested) ports the `String.cxx` metrics — the char→glyph map, the
+    `letter_widths` advances, `DC_SPACE_WIDTH`, and the `fillStringTexture`
+    cursor layout (glyphs are left-aligned 32-cells; the pen advances by the
+    glyph width; unmapped chars are skipped). `render/bitmapText.ts`
+    (`BitmapLabel`) loads an atlas once, composites a string onto a `<canvas>`,
+    and tints it (the atlas is a white alpha mask, painted through with
+    `source-in`), with a plain-text fallback until the atlas loads. Wired into
+    the HUD clock + score (clock digit set) and per-board player names in
+    netplay/spectator (font0, shown above each board). Divergences: the C++
+    per-pixel diagonal brightness gradient and the `~` colour/font escape codes
+    are dropped (flat tint, plain text); the lobby's DOM name list stays DOM
+    (it's menu chrome, not above a board).
 
 ## Known and planned elsewhere
 
