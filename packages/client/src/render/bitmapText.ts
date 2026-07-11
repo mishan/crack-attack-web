@@ -24,6 +24,10 @@ function loadAtlas(name: string): Promise<HTMLImageElement> {
       img.onerror = reject;
       img.src = new URL(`textures/font/${name}.png`, document.baseURI).href;
     });
+    // Don't cache a transient failure permanently: evict on rejection so a later
+    // label can retry the load (a brief offline/cache hiccup shouldn't blank the
+    // font until a full page reload).
+    p.catch(() => atlasCache.delete(name));
     atlasCache.set(name, p);
   }
   return p;
@@ -113,6 +117,9 @@ export class BitmapLabel {
     const ctx = this.canvas.getContext('2d');
     if (!ctx) return;
     ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
+    // Keep the pixel-art glyphs crisp — no smoothing when the 32px cells scale
+    // to the label height (especially non-integer / high-DPI scales).
+    ctx.imageSmoothingEnabled = false;
     ctx.scale(dpr * scale, dpr * scale);
     const cell = this.font.cell;
     for (const g of glyphs) {
