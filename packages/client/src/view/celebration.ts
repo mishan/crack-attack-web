@@ -66,11 +66,21 @@ export interface CelebrationView {
   readonly opacity: number;
   /** Result-message scale multiplier (win scales 12→1; loss stays 1). */
   readonly scale: number;
-  /** Downward drop offset as a fraction of the start height, 0..1 (loss bounce). */
+  /**
+   * Fraction of the loss drop still remaining, 0..1: 1 = fully raised at the top
+   * (start), 0 = landed at rest (centre). The render layer translates the
+   * message *up* from centre by this fraction (it falls as the value shrinks,
+   * bouncing back up on each rebound). Always 0 for a win.
+   */
   readonly dropFraction: number;
   /** Extra brightness pulse, 0..1 (win strobes). */
   readonly flash: number;
-  /** True once the celebration has fully settled (user may restart). */
+  /**
+   * True once the fixed celebration timer (CELEBRATION_TIME) elapses — the point
+   * the reference lets the user dismiss the celebration (MetaState::
+   * celebrationComplete). It is a wall-clock timer, *not* tied to the loss
+   * bounce having physically settled (which may still be in progress).
+   */
   readonly complete: boolean;
 }
 
