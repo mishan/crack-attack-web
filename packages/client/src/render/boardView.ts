@@ -233,7 +233,11 @@ export class BoardView {
         specular: new Color(0.5, 0.5, 0.5),
         shininess: 12,
         side: DoubleSide,
+        // Always-on-top overlay: skip depth test *and* depth write, so the
+        // reticle neither is occluded by blocks nor writes depth that could make
+        // other renderOrder-5 overlays (sparkles/decals) fail their depth test.
         depthTest: false,
+        depthWrite: false,
       }),
     );
     this.cursor.renderOrder = 5; // above the level-light arrows (4)
