@@ -41,7 +41,15 @@ export class ComboTabulator {
   special_magnitude = 0;
   /** Chain multiplier. `ComboTabulator.h:64` */
   multiplier = 1;
-  /** Multipliers gained this time step. `ComboTabulator.h:67` */
+  /**
+   * Multipliers gained. `ComboTabulator.h:67`. NOTE: the C++ name says "this
+   * time step" and the solo `Score::reportMultiplier` zeroes it each step, but
+   * that reset is display-only and lives in the client Score port here — so in
+   * this core it is only ever reset at {@link initialize} and is effectively a
+   * *monotonic* count over the combo's life. The client diffs it per report tick
+   * to recover the per-step value; don't add a per-tick reset without updating
+   * that reconstruction (and note it's in the digest).
+   */
   n_multipliers_this_step = 0;
   /** Base score accumulated on this multiplier (Score display; deferred). `ComboTabulator.h:70` */
   base_accumulated_score = 0;

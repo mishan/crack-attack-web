@@ -146,6 +146,12 @@ export class ComboManager {
           magnitude: combo.magnitude,
           specialMagnitude: combo.special_magnitude,
           multiplier: combo.multiplier,
+          // NOTE: despite its name, `n_multipliers_this_step` is *monotonic* in
+          // this port — it's only reset at combo creation (the C++ solo-only
+          // reset lives in Score::reportMultiplier, which we don't run here). The
+          // client Score port relies on that: it diffs this value across a
+          // combo's report ticks to recover the per-step multiplier count. Do not
+          // "fix" it to reset per tick without updating that reconstruction.
           nMultipliers: combo.n_multipliers_this_step,
           special: combo.special.slice(),
         });

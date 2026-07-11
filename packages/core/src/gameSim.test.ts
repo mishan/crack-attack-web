@@ -316,12 +316,21 @@ describe('GameSim cosmetic score buffer', () => {
     expect(sim.drainScoreEvents()).toEqual([]);
   });
 
-  it('caps the buffer for a never-drained run, keeping the newest', () => {
+  it('does not drop score events at cosmetic-buffer scale (records need every point)', () => {
+    // Far more than the cosmetic caps (128/256): the score buffer holds a large
+    // margin so a heavy drain interval never loses points.
     const sim = new GameSim(1);
-    for (let i = 0; i < 500; i++) sim.reportComboElimination(snap(i));
+    for (let i = 0; i < 1000; i++) sim.reportComboElimination(snap(i));
+    expect(sim.drainScoreEvents().length).toBe(1000);
+  });
+
+  it('still caps eventually for a never-drained run, keeping the newest', () => {
+    const sim = new GameSim(1);
+    const CAP = 4096;
+    for (let i = 0; i < CAP + 200; i++) sim.reportComboElimination(snap(i));
     const events = sim.drainScoreEvents();
-    expect(events.length).toBe(128);
-    expect(events[events.length - 1]!.id).toBe(499);
-    expect(events[0]!.id).toBe(500 - 128);
+    expect(events.length).toBe(CAP);
+    expect(events[events.length - 1]!.id).toBe(CAP + 200 - 1);
+    expect(events[0]!.id).toBe(200);
   });
 });

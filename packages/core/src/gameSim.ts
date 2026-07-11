@@ -59,8 +59,16 @@ const MOTE_BUFFER_CAP = 64;
 /** Cap on undrained cosmetic sound cues (same rationale as signs). */
 const SOUND_BUFFER_CAP = 128;
 
-/** Cap on undrained score snapshots (same rationale as signs). */
-const SCORE_BUFFER_CAP = 128;
+/**
+ * Cap on undrained score snapshots. Set much higher than the cosmetic buffers:
+ * dropping a score event corrupts the displayed total *and the persisted record*
+ * (a correctness bug, not a missed sparkle). In practice the solo driver — the
+ * only consumer — drains every frame and its `FixedTimestep` caps catch-up at
+ * `maxCatchUpSteps`, so this is never approached; the headroom just guarantees a
+ * future/heavier driver can't silently lose points. (Netplay never drains this,
+ * but doesn't score either, so its buffer simply caps and is ignored.)
+ */
+const SCORE_BUFFER_CAP = 4096;
 
 /** A dying block popped: spawn its death sparks (cosmetic). */
 export interface SparkEvent {
