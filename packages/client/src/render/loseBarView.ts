@@ -68,6 +68,11 @@ export class LoseBarView {
       vertexShader: VERTEX,
       fragmentShader: FRAGMENT,
       transparent: true,
+      // The rounded-cap mask makes fragments fully transparent; don't let them
+      // write depth (that would occlude things behind the bar's rectangle).
+      // Matches the other transparent renderables (SparklesView). depthTest stays
+      // on, so the bar is still correctly occluded by anything in front of it.
+      depthWrite: false,
       uniforms: {
         uColor1: { value: new Vector3(0, 0, 1) },
         uColor2: { value: new Vector3(0, 0, 1) },

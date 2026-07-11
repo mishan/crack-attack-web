@@ -98,6 +98,18 @@ describe('LoseBarState — fades', () => {
     for (let i = 0; i < LOSEBAR_FADE_TIME - 1; i++) lb.tick(true, GC_LOSS_DELAY_ELIMINATION);
     expect(lb.state).toBe(LB_HIGH_ALERT);
   });
+
+  it('keeps the fill tracking loss_alarm during the reset flash (not frozen)', () => {
+    const lb = new LoseBarState();
+    lb.tick(true, GC_LOSS_DELAY);
+    lb.tick(true, GC_LOSS_DELAY_ELIMINATION);
+    lb.tick(true, 20); // high alert, bar = (50-20)/50 = 0.6
+    expect(lb.bar).toBeCloseTo(0.6);
+    lb.tick(true, GC_LOSS_DELAY_ELIMINATION); // reset flash: loss_alarm back to 50
+    expect(lb.state).toBe(LB_FADE_RESET_HIGH);
+    // bar reflects the live loss_alarm (empty), not the frozen 0.6
+    expect(lb.bar).toBe(0);
+  });
 });
 
 describe('LoseBarState — gameStart', () => {

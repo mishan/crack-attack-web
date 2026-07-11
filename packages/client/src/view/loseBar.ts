@@ -109,7 +109,12 @@ export class LoseBarState {
     }
 
     // --- bar value (LoseBar.cxx:110-117) ---
-    if ((this.state & (LB_LOW_ALERT | LB_HIGH_ALERT)) !== 0) {
+    // Divergence from the C++: it recomputes `bar` only in LOW/HIGH alert, so
+    // during the reset re-flash the fill would freeze at its pre-reset value even
+    // though `loss_alarm` has jumped back to the elimination floor. We include
+    // LB_FADE_RESET_HIGH (a high-alert sub-state) in the update so the fill always
+    // tracks the live `loss_alarm` and the timer never disagrees with reality.
+    if ((this.state & (LB_LOW_ALERT | LB_HIGH_ALERT | LB_FADE_RESET_HIGH)) !== 0) {
       if ((this.state & LB_LOW_ALERT) !== 0) {
         this.bar = (GC_LOSS_DELAY - lossAlarm) / (GC_LOSS_DELAY - GC_LOSS_DELAY_ELIMINATION);
       } else {
