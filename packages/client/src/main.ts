@@ -31,6 +31,7 @@ import { SparklesView } from './render/sparklesView.js';
 import { FixedTimestep } from './sim/fixedTimestep.js';
 import { deriveViewModel } from './view/boardViewModel.js';
 import { COUNTDOWN_GATE_TICKS, countdownMessage } from './view/messages.js';
+import { Celebration } from './view/celebration.js';
 import { Spring } from './view/spring.js';
 import { ViewInterpolator } from './view/viewInterpolator.js';
 import { AudioManager } from './audio/audioManager.js';
@@ -50,7 +51,7 @@ const MS_PER_TICK = 1000 / GC_STEPS_PER_SECOND;
 /** Cap sign advance per frame so a long stall (tab refocus) doesn't warp them away. */
 const MAX_SIGN_DT_TICKS = 10;
 
-const SOLO_HELP = '←→↑↓ move · Z / Space swap · X raise · R restart · M mute';
+const SOLO_HELP = '←→↑↓ move · Z / Space swap · X raise · R restart · P pause · M mute';
 const NET_HELP =
   '←→↑↓ move · Z / Space swap · X raise · R ready/rematch · Esc concede/stop watching · M mute';
 
@@ -164,6 +165,13 @@ function bootSolo(
   let rafId = 0;
   /** Ticks since game start, counting the held countdown gate. */
   let metaTicks = 0;
+  /** Solo pause (GS_PAUSED): the sim freezes and a PAUSED overlay shows. */
+  let paused = false;
+  // End-of-match celebration: on a loss the board dims and GAME OVER drops in
+  // and bounces (CelebrationManager). Runs on wall-clock ticks after the sim
+  // freezes; `celebAccum` carries the fractional-tick remainder between frames.
+  const celebration = new Celebration();
+  let celebAccum = 0;
   // Audio lifecycle for this game: game music starts at GO, the game-over stinger
   // on loss (each fired once). Mirrors the C++ CountDownManager/CelebrationManager
   // music transitions.
@@ -248,6 +256,10 @@ function bootSolo(
     endMusicOn = false;
     audio.resetCountdown();
     audio.fadeoutMusic(3000);
+    paused = false;
+    celebration.stop();
+    celebAccum = 0;
+    overlay.setCelebration(null);
     // Reset scoring for the new game.
     score.reset();
     scoreSubmitted = false;
@@ -258,6 +270,20 @@ function bootSolo(
   const onKeyDown = (e: KeyboardEvent): void => {
     if (e.code === 'KeyR') {
       restart();
+      return;
+    }
+    if (e.code === 'KeyP' && !e.repeat) {
+      // Toggle solo pause (Game::buttonPause). You can't pause once the game is
+      // over, during the 3-2-1 countdown, or when you're about to lose
+      // (creep_freeze) — Game.cxx:214.
+      if (!paused) {
+        if (sim.lost || sim.creep.creep_freeze || metaTicks < COUNTDOWN_GATE_TICKS) return;
+        paused = true;
+        audio.pauseMusic();
+      } else {
+        paused = false;
+        audio.resumeMusic();
+      }
       return;
     }
     if (input.handles(e.code)) {
@@ -293,7 +319,11 @@ function bootSolo(
     // until the player restarts.
     let stepped = 0;
     let gateTicks = 0; // wall ticks the countdown gate consumed this frame
-    if (!sim.lost) {
+    if (paused) {
+      // Freeze the sim, but consume wall-clock time so unpausing doesn't
+      // burst-catch-up. Everything below renders the frozen board + PAUSED.
+      clock.sample(nowMs);
+    } else if (!sim.lost) {
       const steps = clock.sample(nowMs);
       for (let s = 0; s < steps; s++) {
         // Countdown gate: the whole gameplay step is held for the first
@@ -361,11 +391,25 @@ function bootSolo(
 
     // After a loss show the frozen final tick (alpha 1) rather than interpolating
     // toward a state the sim will never reach.
-    // Big overlay: GAME OVER once lost, else the countdown / GO sequence.
-    overlay.show(sim.lost ? 'message_game_over' : countdownMessage(metaTicks));
+    // Big overlay: GAME OVER once lost, PAUSED while paused, else countdown / GO.
+    overlay.show(
+      sim.lost ? 'message_game_over' : paused ? 'message_paused' : countdownMessage(metaTicks),
+    );
     overlay.update(dtTicks);
 
-    const vm = interp.sample(sim.lost ? 1 : clock.alpha);
+    // End-of-match celebration: dim the board and bounce GAME OVER in on a loss.
+    if (sim.lost) {
+      if (!celebration.active) celebration.start('loss');
+      celebAccum += dtTicks;
+      while (celebAccum >= 1) {
+        celebration.tick();
+        celebAccum -= 1;
+      }
+      overlay.setCelebration(celebration.view);
+    }
+
+    // Freeze the board on the latest tick while paused (or lost); else interpolate.
+    const vm = interp.sample(sim.lost || paused ? 1 : clock.alpha);
     view.update(vm);
     decals.update(vm.garbage);
     // Lights tick through the countdown gate too (Game.cxx:389 runs before

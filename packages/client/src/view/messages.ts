@@ -30,7 +30,8 @@ export type MessageKind =
   | 'message_game_over'
   | 'message_winner'
   | 'message_loser'
-  | 'message_waiting';
+  | 'message_waiting'
+  | 'message_paused';
 
 /**
  * The countdown message for `metaTicks` ticks since game start (the first
