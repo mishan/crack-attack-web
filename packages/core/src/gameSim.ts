@@ -38,6 +38,7 @@ import { GR_BLOCK, GR_EMPTY, Grid } from './grid.js';
 import { Rng } from './rng.js';
 import type { SignEvent, SignKind, SignSink } from './signs.js';
 import type { SoundEvent, SoundId } from './sound.js';
+import type { ScoreEvent, ScoreSink } from './score.js';
 import { Swapper } from './swapper.js';
 import { GC_PLAY_HEIGHT, GC_PLAY_WIDTH } from './constants.js';
 
@@ -57,6 +58,9 @@ const MOTE_BUFFER_CAP = 64;
 
 /** Cap on undrained cosmetic sound cues (same rationale as signs). */
 const SOUND_BUFFER_CAP = 128;
+
+/** Cap on undrained score snapshots (same rationale as signs). */
+const SCORE_BUFFER_CAP = 128;
 
 /** A dying block popped: spawn its death sparks (cosmetic). */
 export interface SparkEvent {
@@ -88,7 +92,7 @@ export interface ImpactEvent {
   width: number;
 }
 
-export class GameSim implements CreepSimContext, SignSink {
+export class GameSim implements CreepSimContext, SignSink, ScoreSink {
   /** Shared tick counter (mirrors `Game::time_step`). */
   readonly clock = new Clock();
   /** The seed this sim was created with; `gameStart` reseeds from it. */
@@ -132,6 +136,8 @@ export class GameSim implements CreepSimContext, SignSink {
   private readonly moteBuffer: MoteEvent[] = [];
   /** Cosmetic sound cues emitted since the last {@link drainSoundEvents}. */
   private readonly soundBuffer: SoundEvent[] = [];
+  /** Cosmetic score snapshots emitted since the last {@link drainScoreEvents}. */
+  private readonly scoreBuffer: ScoreEvent[] = [];
 
   constructor(seed: number) {
     this.seed = seed >>> 0;
@@ -142,6 +148,7 @@ export class GameSim implements CreepSimContext, SignSink {
     this.garbageGenerator = new GarbageGenerator(this.clock, this.rng, this.garbageStore);
     this.garbageGenerator.signSink = this;
     this.combos = new ComboManager(this.clock, this.garbageGenerator);
+    this.combos.scoreSink = this;
     this.gameStart();
   }
 
@@ -164,6 +171,7 @@ export class GameSim implements CreepSimContext, SignSink {
     this.sparkBuffer.length = 0;
     this.moteBuffer.length = 0;
     this.soundBuffer.length = 0;
+    this.scoreBuffer.length = 0;
 
     // Reseed both RNGs so a restart is fully deterministic and does not depend
     // on draws made during the previous game.
@@ -327,6 +335,21 @@ export class GameSim implements CreepSimContext, SignSink {
   drainSoundEvents(): SoundEvent[] {
     if (this.soundBuffer.length === 0) return [];
     return this.soundBuffer.splice(0, this.soundBuffer.length);
+  }
+
+  /**
+   * {@link ScoreSink.reportComboElimination}: buffer a combo score snapshot for
+   * the display layer (solo scoring). Cosmetic: draws no RNG, never in the digest.
+   */
+  reportComboElimination(event: ScoreEvent): void {
+    if (this.scoreBuffer.length >= SCORE_BUFFER_CAP) this.scoreBuffer.shift();
+    this.scoreBuffer.push(event);
+  }
+
+  /** Remove and return score snapshots since the last drain (see {@link drainSignEvents}). */
+  drainScoreEvents(): ScoreEvent[] {
+    if (this.scoreBuffer.length === 0) return [];
+    return this.scoreBuffer.splice(0, this.scoreBuffer.length);
   }
 
   /**

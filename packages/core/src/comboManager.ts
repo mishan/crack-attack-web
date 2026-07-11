@@ -5,9 +5,11 @@
  * have completed (no blocks left involved) or that eliminated this tick, driving
  * the garbage generator accordingly. Ported from `ComboManager.{h,cxx}`.
  *
- * Score reporting (`Score::reportElimination`/`reportMultiplier` and the
- * `base_*_score` bookkeeping) is display-only and deferred — it does not affect
- * garbage generation, so omitting it keeps the gameplay path faithful.
+ * Score reporting is display-only: the points math and `base_*_score`
+ * bookkeeping (`Score::reportElimination`/`reportMultiplier`) live in the
+ * client's Score port. The core only emits a cosmetic {@link ScoreEvent}
+ * snapshot of the reporting combo at the elimination point — no RNG, not in the
+ * digest — so the gameplay path stays faithful and deterministic.
  *
  * Instance-based (owns its store) rather than a static singleton.
  *
@@ -21,11 +23,19 @@ import { ComboTabulator } from './combo.js';
 import type { GarbageGenerator } from './garbageGenerator.js';
 import { isBaseFlavor, mapSpecialFlavorToCode } from './flavors.js';
 import type { StateHasher } from './digest.js';
+import type { ScoreSink } from './score.js';
 
 export class ComboManager {
   private readonly tabulatorStore: ComboTabulator[];
   private readonly storeMap: boolean[];
   private combo_count = 0;
+
+  /**
+   * Optional cosmetic score-snapshot destination (solo display scoring). Set by
+   * GameSim; null in a headless run. Emitting draws no RNG and never enters the
+   * digest, so it can't affect determinism.
+   */
+  scoreSink: ScoreSink | null = null;
 
   constructor(
     private readonly clock: Clock,
@@ -126,7 +136,19 @@ export class ComboManager {
         // circumvent deleteComboTabulator(), matching the C++
         this.freeId(n);
       } else if (combo.time_stamp === this.clock.time_step) {
-        // Score::reportElimination / reportMultiplier — display-only, deferred.
+        // Emit a cosmetic score snapshot at the exact C++ Score::reportElimination
+        // call point (ComboManager.cxx:73). Display-only: no RNG, not in the
+        // digest. The base_* bookkeeping and points math live in the client's
+        // Score port, which reads these accumulated fields.
+        this.scoreSink?.reportComboElimination({
+          id: combo.id,
+          creationTimeStamp: combo.creation_time_stamp,
+          magnitude: combo.magnitude,
+          specialMagnitude: combo.special_magnitude,
+          multiplier: combo.multiplier,
+          nMultipliers: combo.n_multipliers_this_step,
+          special: combo.special.slice(),
+        });
         this.garbageGenerator.comboElimination(combo);
       }
     }

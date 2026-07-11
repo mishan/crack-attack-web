@@ -24,4 +24,5 @@ export * from './swapper.js';
 export * from './creep.js';
 export * from './signs.js';
 export * from './sound.js';
+export * from './score.js';
 export * from './gameSim.js';
