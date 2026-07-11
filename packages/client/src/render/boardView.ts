@@ -17,12 +17,10 @@ import {
   Color,
   DataTexture,
   DirectionalLight,
-  EdgesGeometry,
+  DoubleSide,
   Fog,
   type IUniform,
   InstancedMesh,
-  LineBasicMaterial,
-  LineSegments,
   Matrix4,
   Mesh,
   MeshPhongMaterial,
@@ -50,6 +48,7 @@ import {
 import type { BoardViewModel } from '../view/boardViewModel.js';
 import { dyingPose } from '../view/dyingAnim.js';
 import { blockColor, garbageColor } from './palette.js';
+import { swapperCursorGeometry } from './cursorGeometry.js';
 
 const CELL = 1;
 const BLOCK_SIZE = 0.92;
@@ -99,7 +98,7 @@ export class BoardView {
 
   private readonly blocks: InstancedMesh;
   private readonly garbage: InstancedMesh;
-  private readonly cursor: LineSegments;
+  private readonly cursor: Mesh;
 
   // Lights + tunable materials, kept as fields so the temporary render tuner can
   // adjust them live (see `applyRenderTuning`).
@@ -224,9 +223,20 @@ export class BoardView {
     this.garbage.count = 0;
     this.scene.add(this.garbage);
 
-    // Swap cursor: a bright 2×1 wire frame drawn in front of the blocks.
-    const frame = new EdgesGeometry(new BoxGeometry(2 * CELL + 0.12, CELL + 0.12, CELL + 0.12));
-    this.cursor = new LineSegments(frame, new LineBasicMaterial({ color: 0xffffff }));
+    // Swap cursor: the reference's four beveled corner brackets (obj_swapper),
+    // white and lit by the headlight, always drawn on top of the blocks (a
+    // reticle overlays). depthTest off + a high renderOrder keeps it visible.
+    this.cursor = new Mesh(
+      swapperCursorGeometry(),
+      new MeshPhongMaterial({
+        color: 0xffffff,
+        specular: new Color(0.5, 0.5, 0.5),
+        shininess: 12,
+        side: DoubleSide,
+        depthTest: false,
+      }),
+    );
+    this.cursor.renderOrder = 5; // above the level-light arrows (4)
     this.scene.add(this.cursor);
 
     this.renderer = new WebGLRenderer({ antialias: true });
