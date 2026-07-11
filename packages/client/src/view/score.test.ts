@@ -46,12 +46,14 @@ describe('ScoreState.report — backlog + multiplier bonus', () => {
 
   it('a chain applies the reportMultiplier bonus from accumulated base score', () => {
     const s = new ScoreState();
-    // step 1: 3-run, no chain
+    // Each report carries only that tick's magnitude (the core zeroes it after).
+    // step 1: 3-run, no chain → 2 pts
     s.report(ev({ id: 0, creationTimeStamp: 0, magnitude: 3, multiplier: 1, nMultipliers: 0 }));
-    // step 2 (chain): magnitude now 7, multiplier 2, one new multiplier
-    s.report(ev({ id: 0, creationTimeStamp: 0, magnitude: 7, multiplier: 2, nMultipliers: 1 }));
-    // backlog: 2 (step1) + 7 (step2 points) + [7*(2-1-1) + 9*1] = 2 + 7 + 9 = 18
-    expect(s.backlog).toBe(18);
+    // step 2 (chain): a 4-run this tick, multiplier 2, one new multiplier
+    s.report(ev({ id: 0, creationTimeStamp: 0, magnitude: 4, multiplier: 2, nMultipliers: 1 }));
+    // base_accumulated is the cross-tick sum: 2 + 4 = 6; base_step this tick = 4.
+    // backlog: 2 (step1) + 4 (step2 points) + [4*(2-1-1) + 6*1] = 2 + 4 + 6 = 12
+    expect(s.backlog).toBe(12);
     expect(s.topMultiplier).toBe(2);
   });
 

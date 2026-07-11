@@ -8,6 +8,7 @@
  * browser) still works.
  */
 
+import { GC_SCORE_MULT_LENGTH, GC_SCORE_REC_LENGTH } from '@crack-attack/core';
 import {
   type MultRecord,
   type ScoreRecord,
@@ -37,12 +38,16 @@ function saveJson(key: string, value: unknown): void {
   }
 }
 
-/** Shape-validate a loaded score table, else fall back to defaults. */
+/**
+ * Shape-validate a loaded score table, else fall back to defaults. The exact
+ * length is required (not just non-empty): a truncated/corrupt table would break
+ * the top-30 invariants and make rank/best readings inconsistent.
+ */
 export function loadScoreRecords(): ScoreRecord[] {
   const data = loadJson<ScoreRecord[]>(SCORES_KEY);
   if (
     Array.isArray(data) &&
-    data.length > 0 &&
+    data.length === GC_SCORE_REC_LENGTH &&
     data.every((r) => typeof r?.name === 'string' && Number.isFinite(r?.score))
   ) {
     return data;
@@ -54,7 +59,7 @@ export function loadMultRecords(): MultRecord[] {
   const data = loadJson<MultRecord[]>(MULTS_KEY);
   if (
     Array.isArray(data) &&
-    data.length > 0 &&
+    data.length === GC_SCORE_MULT_LENGTH &&
     data.every((r) => typeof r?.name === 'string' && Number.isFinite(r?.multiplier))
   ) {
     return data;

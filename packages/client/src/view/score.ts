@@ -41,8 +41,10 @@ export const SPECIAL_BLOCK_SCORES = [30, 30, 5, 5, 8, 15, 10] as const;
 
 /**
  * Points for one elimination snapshot — `Score::reportElimination` (Score.h:120)
- * without the `backlog +=` side effect (the caller adds it). Reads the combo's
- * *accumulated* fields, exactly as the C++ does each report tick.
+ * without the `backlog +=` side effect (the caller adds it). The snapshot's
+ * magnitude / special tally are this report tick's totals (the core zeroes them
+ * after each report tick), exactly what the C++ reads at the same point; the
+ * cross-tick running sum lives in {@link ScoreState} as `base_accumulated_score`.
  */
 export function scorePoints(e: ScoreEvent): number {
   let points = 0;
