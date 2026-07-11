@@ -55,6 +55,13 @@ const FONT0_WIDTHS = [
 ];
 
 function buildFont0(): Font {
+  // The char list, the width list, and the atlas cells must stay 1:1. Fail fast
+  // (at module load, so a test catches it) rather than produce undefined widths.
+  if (FONT0_CHARS.length !== FONT0_WIDTHS.length) {
+    throw new Error(
+      `font0 metrics out of sync: ${FONT0_CHARS.length} chars vs ${FONT0_WIDTHS.length} widths`,
+    );
+  }
   const glyphs = new Map<string, Glyph>();
   for (let i = 0; i < FONT0_CHARS.length; i++) {
     glyphs.set(FONT0_CHARS[i]!, { index: i, width: FONT0_WIDTHS[i]! });

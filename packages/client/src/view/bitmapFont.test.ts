@@ -17,6 +17,13 @@ describe('font metrics', () => {
     expect(FONT0.glyphs.get('i')!.width).toBe(8);
   });
 
+  it('every font0 glyph has a defined positive width (chars/widths in sync)', () => {
+    for (const [ch, g] of FONT0.glyphs) {
+      expect(Number.isInteger(g.width), `width for ${ch}`).toBe(true);
+      expect(g.width).toBeGreaterThan(0);
+    }
+  });
+
   it('clock maps digits to cells 0-9 and the colon to the extra cell (10)', () => {
     expect(CLOCK.glyphs.get('7')!.index).toBe(7);
     expect(CLOCK.glyphs.get(':')!.index).toBe(10);

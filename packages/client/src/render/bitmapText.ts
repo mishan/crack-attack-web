@@ -63,6 +63,9 @@ export class BitmapLabel {
     this.canvas.style.display = 'none';
     this.canvas.style.height = `${this.height}px`;
     this.canvas.style.imageRendering = 'auto';
+    // The canvas has no intrinsic text, so expose the string to assistive tech.
+    this.canvas.setAttribute('role', 'img');
+    this.canvas.setAttribute('aria-label', '');
 
     // Plain-text stand-in until the atlas is ready (also the graceful fallback
     // if the atlas fails to load).
@@ -75,10 +78,15 @@ export class BitmapLabel {
     wrap.append(this.canvas, this.fallback);
     this.element = wrap;
 
-    void loadAtlas(this.font.atlas).then((img) => {
-      this.atlas = img;
-      this.render();
-    });
+    loadAtlas(this.font.atlas)
+      .then((img) => {
+        this.atlas = img;
+        this.render();
+      })
+      .catch(() => {
+        // Atlas failed to load (missing asset / offline): keep the plain-text
+        // fallback rather than surfacing an unhandled rejection.
+      });
   }
 
   setText(text: string): void {
@@ -88,6 +96,8 @@ export class BitmapLabel {
   }
 
   private render(): void {
+    // Keep the accessible name in sync whichever branch renders.
+    this.canvas.setAttribute('aria-label', this.text);
     if (!this.atlas) {
       this.fallback.textContent = this.text;
       return;
