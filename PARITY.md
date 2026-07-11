@@ -13,12 +13,24 @@ File:line references are into `crack-attack/src/`.
    during the gate (as Game.cxx:186 blocks concession). Resumes and mid-match
    spectates skip the gate; from-the-start spectates mirror it by wall clock.
 
-2. **Stylized danger bar (LoseBar)** — `LoseBar.{h,cxx}`, `DrawLoseBar.cxx`.
-   A textured horizontal tube under the board (length 7.0, 128×16 texture,
-   Displayer.h:504-515) with a state machine: LB_INACTIVE / LB_LOW_ALERT /
-   LB_HIGH_ALERT plus three fade transitions (LoseBar.h:33-38,
-   DC_LOSEBAR_FADE_TIME = 20). Our current bar is a plain HUD div; the states
-   map cleanly onto the existing `view/hud.ts` thresholds.
+2. ~~**Stylized danger bar (LoseBar)**~~ **DONE** — `view/loseBar.ts` (pure,
+   tested) ports the full `LoseBar.{h,cxx}` state machine: LB_INACTIVE /
+   LB_LOW_ALERT / LB_HIGH_ALERT plus the three fade transitions
+   (DC_LOSEBAR_FADE_TIME = 20), the two-phase fill (blue → magenta over the
+   7s→1s low alert, then a reset to red over the 1s→0s high alert; bar value
+   from Creep's `loss_alarm`), and the high-alert reset re-flash (detected as
+   `loss_alarm` rising to the elimination floor, mirroring the
+   `LoseBar::highAlertReset` Creep triggers at Creep.cxx:89). Colours are the
+   DrawExternalCandy.cxx switch (INACTIVE/LOW/HIGH + the per-state fade lerps).
+   `render/loseBarView.ts` draws it as a horizontal tube under each board — a
+   small `ShaderMaterial` paints the two-colour sweep (alert colour filling in
+   from the left over the lower colour, boundary at `bar`) with a cylindrical
+   highlight and rounded caps. One per board, ticking with the sim, wired into
+   solo + both netplay boards + spectator (like `LevelLightsView`). The plain
+   vertical HUD height div stays — it and the LoseBar show different things
+   (stack height vs. loss-countdown timer), as the original's level lights and
+   losebar do. Divergence: a procedural shader tube stands in for the reference's
+   baked 128×16 losebar texture.
 
 3. ~~**Sparkles from dying blocks**~~ **DONE** — `view/sparkles.ts` (pure,
    tested) ports SparkleManager verbatim: death sparks (upward [π/4, 3π/4]

@@ -28,6 +28,7 @@ import { BoardView } from './render/boardView.js';
 import { GarbageDecalView } from './render/garbageDecalView.js';
 import { HudView } from './render/hudView.js';
 import { LevelLightsView } from './render/levelLightsView.js';
+import { LoseBarView } from './render/loseBarView.js';
 import { SignsView } from './render/signsView.js';
 import { MessageOverlay } from './render/messageOverlay.js';
 import { SparklesView } from './render/sparklesView.js';
@@ -64,6 +65,7 @@ interface BoardBundle {
   signs: SignsView;
   decals: GarbageDecalView;
   levelLights: LevelLightsView;
+  loseBar: LoseBarView;
   spring: Spring;
   sparkles: SparklesView;
 }
@@ -501,6 +503,7 @@ export function bootNetplay(
         signs: new SignsView(view.scene, halfW, halfH),
         decals: new GarbageDecalView(view.scene, halfW, halfH),
         levelLights,
+        loseBar: new LoseBarView(view.scene, halfW, halfH),
         spring: new Spring(),
         sparkles: new SparklesView(view.scene, halfW, halfH),
       };
@@ -567,6 +570,7 @@ export function bootNetplay(
       const vm = deriveViewModel(sims[i]!);
       b.interp.push(vm);
       b.levelLights.reset(vm.hud.topEffectiveRow, instant);
+      b.loseBar.reset();
     });
   }
 
@@ -721,6 +725,7 @@ export function bootNetplay(
         b.view.update(vm);
         b.decals.update(vm.garbage);
         b.levelLights.update(lightsTicks, vm.hud.topEffectiveRow, !w.outcome, impacts[i]!);
+        b.loseBar.update(steppedTicks, sim.creep.creep_freeze, sim.creep.loss_alarm);
         b.view.render();
       });
       lastMs = nowMs;
@@ -870,6 +875,7 @@ export function bootNetplay(
         b.view.update(vm);
         b.decals.update(vm.garbage);
         b.levelLights.update(lightsTicks, vm.hud.topEffectiveRow, !s.outcome, impacts[i]!);
+        b.loseBar.update(steppedTicks, sim.creep.creep_freeze, sim.creep.loss_alarm);
         b.view.render();
         if (i === 0) hud?.update(vm.hud);
       });
@@ -903,6 +909,7 @@ export function bootNetplay(
       globalThis.removeEventListener('resize', fitToWindow);
       if (boards) {
         for (const b of boards) {
+          b.loseBar.dispose();
           b.view.dispose(); // release the WebGL contexts (browsers cap them)
           b.container.remove();
         }
