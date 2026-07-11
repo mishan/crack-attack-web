@@ -98,12 +98,17 @@ File:line references are into `crack-attack/src/`.
    drops from DC_STARTING_LOSS_HEIGHT and bounces to rest under gravity/drag
    with decaying elasticity. `render/messageOverlay.ts` grew a `setCelebration`
    that applies scale / drop-translate / opacity to the message `<img>`, a
-   white-glow drop-shadow for the flash, and a black board-dim veil. Wired into
-   solo (loss → GAME OVER bounce) and netplay-playing (win scale-in/flash, loss
-   bounce), ticked on wall-clock after the sim freezes. Divergences: the
-   sputtering firework "celebration sparks" (`createCelebrationSpark`) and the
-   exact win-message tint are not ported (flash is a white glow); the spectator
-   view keeps its plain result message (no celebration).
+   white-glow drop-shadow for the flash, and a black board-dim veil. A WIN also
+   throws fireworks: the five-source sputtering-rate algorithm
+   (`Celebration.drainSparkSpawns`) drives `Sparkles.createCelebrationSpark`
+   (faithful angle fans / velocities / life, sharing the death-spark pool +
+   gravity), launched on the winner's board. Wired into solo (loss → GAME OVER
+   bounce) and netplay-playing (win scale-in/flash + fireworks, loss bounce),
+   ticked on wall-clock after the sim freezes. Divergences: the exact
+   win-message tint isn't ported (flash is a white glow); the firework source
+   positions are placed around our single board (not the reference's two-board
+   screen); solo never "wins" so its top-rank fireworks aren't shown; and the
+   spectator view keeps its plain result message.
 10. ~~**Score**~~ **DONE** (solo) — `Score.{h,cxx}` ported to the display
     layer. The core emits a cosmetic `ScoreEvent` snapshot of the reporting
     combo at the exact `ComboManager::timeStep` elimination point

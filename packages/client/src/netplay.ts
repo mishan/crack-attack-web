@@ -894,11 +894,21 @@ export function bootNetplay(
       // End-of-match celebration animation (started on the deciding tick above).
       if (s.outcome) {
         celebAccum += dtTicks;
+        let celebSteps = 0;
         while (celebAccum >= 1) {
           celebration.tick();
           celebAccum -= 1;
+          celebSteps++;
         }
         bigMessage.setCelebration(celebration.view);
+        // Fireworks on the winner's (local, left) board: spawn the drained
+        // sparks and advance the board's sparkle sim (the sim itself is frozen).
+        if (boards) {
+          for (const spawn of celebration.drainSparkSpawns()) {
+            boards[0].sparkles.spawnCelebrationSpark(spawn.source, spawn.color);
+          }
+          boards[0].sparkles.advance(celebSteps);
+        }
       }
       const alpha = s.outcome ? 1 : clock.alpha;
       const simsByBoard = [localSim, remoteSim];

@@ -9,10 +9,14 @@
  * layer applies the returned transforms to the message overlay and dims the
  * board. The driver still chooses *which* message (winner / loser / game over).
  *
- * Divergence: the reference's sputtering firework "celebration sparks"
- * (SparkleManager::createCelebrationSpark) and the exact win-message tint are
- * not ported — the win flash is reproduced as a brightness pulse on the white
- * message.
+ * A WIN also throws fireworks: five spark "sources" whose emission rate
+ * sputters (decays, with random boosts) — this module runs that rate algorithm
+ * and emits per-tick spawn requests ({@link drainSparkSpawns}); the render layer
+ * turns them into real sparks (`Sparkles.createCelebrationSpark`).
+ *
+ * Divergence: the exact win-message tint is not ported (the flash is a white
+ * brightness pulse over the white message), and the spark source positions are
+ * placed around our single board rather than the reference's two-board layout.
  *
  * Original work Copyright (C) 2000 Daniel Nelson. GPL-2.0-or-later.
  */
@@ -35,7 +39,24 @@ const LOSS_MIN_VELOCITY = 10 * LOSS_GRAVITY;
 const LOSS_BOUNCE_ELASTICITY = 0.5;
 const LOSS_END_BOUNCE_ELASTICITY = 0.1;
 
+// Celebration spark ("firework") rate algorithm (Displayer.h + CelebrationManager).
+const CSPARK_SOURCE_NUMBER = 5;
+const CSPARK_COLOR_NUMBER = 5;
+const CSPARK_STARTING_RATE = 270;
+const CSPARK_FULL_RATE = 600;
+const CSPARK_LOW_RATE = 150;
+const CSPARK_QUICK_RATE_DROP = 3;
+const CSPARK_BOOST_CHANCE_IN = 40;
+const CSPARK_RATE_BOOST = 90;
+const CSPARK_COLOR_CHANGE_CHANCE_IN = 5;
+
 export type CelebrationOutcome = 'win' | 'loss';
+
+/** A request to launch one firework spark from `source` (0..4) in `color` (0..4). */
+export interface CelebrationSparkSpawn {
+  readonly source: number;
+  readonly color: number;
+}
 
 /** What the render layer needs to draw the celebration for a frame. */
 export interface CelebrationView {
@@ -53,10 +74,18 @@ export interface CelebrationView {
   readonly complete: boolean;
 }
 
-/** A 1-in-`n` chance; default uses `Math.random` (cosmetic — never gameplay). */
-export type ChanceFn = (n: number) => boolean;
+/** The random draws the celebration needs (cosmetic — never gameplay). */
+export interface CelebrationRng {
+  /** 1-in-`n` chance. */
+  chanceIn(n: number): boolean;
+  /** Integer in [0, n). */
+  number(n: number): number;
+}
 
-const defaultChance: ChanceFn = (n) => Math.floor(Math.random() * n) === 0;
+const defaultRng: CelebrationRng = {
+  chanceIn: (n) => Math.floor(Math.random() * n) === 0,
+  number: (n) => Math.floor(Math.random() * n),
+};
 
 /**
  * The celebration animation. Call {@link start} with the outcome at match end,
@@ -81,7 +110,13 @@ export class Celebration {
   private lossVelocity = 0;
   private lossBounce = STARTING_BOUNCE_COUNT;
 
-  constructor(private readonly chance: ChanceFn = defaultChance) {}
+  // firework spark sources (win only): per-source emission rate + colour, and
+  // the spawn requests produced this tick (drained by the render layer).
+  private readonly sparkRate = new Array<number>(CSPARK_SOURCE_NUMBER).fill(0);
+  private readonly sparkColor = new Array<number>(CSPARK_SOURCE_NUMBER).fill(0);
+  private sparkSpawns: CelebrationSparkSpawn[] = [];
+
+  constructor(private readonly rng: CelebrationRng = defaultRng) {}
 
   /** Whether a celebration is currently running. */
   get active(): boolean {
@@ -102,11 +137,22 @@ export class Celebration {
     this.lossHeight = STARTING_LOSS_HEIGHT;
     this.lossVelocity = 0;
     this.lossBounce = STARTING_BOUNCE_COUNT;
+    this.sparkRate.fill(0);
+    this.sparkColor.fill(0);
+    this.sparkSpawns = [];
   }
 
   /** Reset to idle (no celebration). */
   stop(): void {
     this.running = false;
+  }
+
+  /** Take the firework spawn requests emitted since the last drain (render layer). */
+  drainSparkSpawns(): CelebrationSparkSpawn[] {
+    if (this.sparkSpawns.length === 0) return [];
+    const out = this.sparkSpawns;
+    this.sparkSpawns = [];
+    return out;
   }
 
   /** Advance one tick (CelebrationManager::timeStep). No-op when not running. */
@@ -138,21 +184,44 @@ export class Celebration {
       this.winScale = 1;
       this.winFlash1 = WIN_FLASH_1_TIME;
       this.winFlash2 = WIN_FLASH_2_TIME;
+      // Seed the firework sources: one starts at full rate, the rest ramping.
+      this.sparkRate[CSPARK_SOURCE_NUMBER - 1] = CSPARK_FULL_RATE;
+      this.sparkColor[CSPARK_SOURCE_NUMBER - 1] = this.rng.number(CSPARK_COLOR_NUMBER);
+      for (let n = 0; n < CSPARK_SOURCE_NUMBER - 1; n++) {
+        this.sparkRate[n] = CSPARK_STARTING_RATE;
+        this.sparkColor[n] = this.rng.number(CSPARK_COLOR_NUMBER);
+      }
     } else {
       // strobe: count down, and randomly re-arm / fold the flash timers
       if (this.winFlash1) this.winFlash1--;
-      if (this.chance(WIN_FLASH_1_CHANCE_IN)) {
+      if (this.rng.chanceIn(WIN_FLASH_1_CHANCE_IN)) {
         if (this.winFlash1) {
           if (this.winFlash1 < WIN_FLASH_1_TIME / 2)
             this.winFlash1 = WIN_FLASH_1_TIME / 2 - this.winFlash1;
         } else this.winFlash1 = WIN_FLASH_1_TIME;
       }
       if (this.winFlash2) this.winFlash2--;
-      if (this.chance(WIN_FLASH_2_CHANCE_IN)) {
+      if (this.rng.chanceIn(WIN_FLASH_2_CHANCE_IN)) {
         if (this.winFlash2) {
           if (this.winFlash2 < WIN_FLASH_2_TIME / 2)
             this.winFlash2 = WIN_FLASH_2_TIME / 2 - this.winFlash2;
         } else this.winFlash2 = WIN_FLASH_2_TIME;
+      }
+      // Fireworks: each source's rate sputters (decays with random boosts); when
+      // a random draw falls under the rate, launch a spark (CelebrationManager).
+      for (let n = 0; n < CSPARK_SOURCE_NUMBER; n++) {
+        if (this.sparkRate[n]! > CSPARK_LOW_RATE) this.sparkRate[n]! -= CSPARK_QUICK_RATE_DROP;
+        else if (this.sparkRate[n]! > 0) this.sparkRate[n]!--;
+
+        if (this.rng.chanceIn(CSPARK_BOOST_CHANCE_IN)) {
+          this.sparkRate[n]! += CSPARK_RATE_BOOST;
+          if (this.rng.chanceIn(CSPARK_COLOR_CHANGE_CHANCE_IN))
+            this.sparkColor[n] = this.rng.number(CSPARK_COLOR_NUMBER);
+        }
+
+        if (this.rng.number(CSPARK_FULL_RATE) < this.sparkRate[n]!) {
+          this.sparkSpawns.push({ source: n, color: this.sparkColor[n]! });
+        }
       }
     }
   }

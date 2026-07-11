@@ -1,7 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import { Celebration } from './celebration.js';
+import { Celebration, type CelebrationRng } from './celebration.js';
 
-const noFlash = (): boolean => false; // deterministic: never re-arm the strobe
+// Deterministic RNG: never fires a chance (no strobe re-arm, no firework boosts,
+// and `number` returns 0 so the spawn threshold `number(600) < rate` always emits).
+const noFlash: CelebrationRng = { chanceIn: () => false, number: () => 0 };
+const always: CelebrationRng = { chanceIn: () => true, number: () => 0 };
 
 describe('Celebration — board fade', () => {
   it('dims the board from 0 to 1 over the fade time and marks complete', () => {
@@ -43,10 +46,31 @@ describe('Celebration — win', () => {
   });
 
   it('flashes after the fade when the strobe re-arms', () => {
-    const c = new Celebration(() => true); // always re-arm
+    const c = new Celebration(always); // always re-arm
     c.start('win');
     for (let i = 0; i < 55; i++) c.tick();
     expect(c.view.flash).toBeGreaterThan(0);
+  });
+
+  it('emits firework spark spawns only after the fade, across all sources', () => {
+    const c = new Celebration(noFlash); // number()==0 → spawn threshold always met
+    c.start('win');
+    // Ticks process t=0..50; the fade fills t<50 and t===50 seeds the source
+    // rates (no emission on the seed tick).
+    for (let i = 0; i < 51; i++) c.tick();
+    expect(c.drainSparkSpawns()).toEqual([]);
+    // The next tick (t=51) is the first in the emission loop: every source fires.
+    c.tick();
+    const spawns = c.drainSparkSpawns();
+    expect(spawns.map((s) => s.source).sort((a, b) => a - b)).toEqual([0, 1, 2, 3, 4]);
+    expect(c.drainSparkSpawns()).toEqual([]); // drained
+  });
+
+  it('a loss never emits fireworks', () => {
+    const c = new Celebration(noFlash);
+    c.start('loss');
+    for (let i = 0; i < 200; i++) c.tick();
+    expect(c.drainSparkSpawns()).toEqual([]);
   });
 });
 
