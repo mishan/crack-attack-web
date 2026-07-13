@@ -17,6 +17,8 @@
  */
 
 import { GameSim, GC_STEPS_PER_SECOND } from '@crack-attack/core';
+import { bootAiMatch } from './aiMatch.js';
+import { pickAiDifficulty } from './render/aiDifficultyPicker.js';
 import { KeyboardInput } from './input/keyboard.js';
 import { mountTouchControls } from './input/touchControls.js';
 import { BoardView, DEFAULT_RENDER_TUNING } from './render/boardView.js';
@@ -120,17 +122,31 @@ function boot(): void {
   });
 
   let current: ModeHandle | null = null;
-  const enter = (mode: 'solo' | 'net'): void => {
+  // Chosen from the difficulty modal; drives an `enter('ai')`.
+  let aiDifficulty: import('@crack-attack/core').AiDifficulty = 'medium';
+
+  // Open the difficulty modal, then boot a vs-AI match (or stay put if cancelled).
+  const playAi = (): void => {
+    void pickAiDifficulty().then((diff) => {
+      if (!diff) return;
+      aiDifficulty = diff;
+      enter('ai');
+    });
+  };
+
+  const enter = (mode: 'solo' | 'net' | 'ai'): void => {
     current?.dispose();
     current = null;
     if (hudEl) hudEl.textContent = '';
-    if (help) help.textContent = mode === 'net' ? NET_HELP : SOLO_HELP;
+    if (help) help.textContent = mode === 'solo' ? SOLO_HELP : NET_HELP;
     if (mode === 'net') {
       void import('./netplay.js').then((m) => {
         current = m.bootNetplay(app, hudEl, relayUrl, () => enter('solo'), audio);
       });
+    } else if (mode === 'ai') {
+      current = bootAiMatch(app, hudEl, aiDifficulty, audio, () => enter('solo'));
     } else {
-      current = bootSolo(app, hudEl, () => enter('net'), audio);
+      current = bootSolo(app, hudEl, () => enter('net'), playAi, audio);
     }
   };
 
@@ -141,6 +157,7 @@ function bootSolo(
   app: HTMLElement,
   hudEl: HTMLElement | null,
   onPlayOnline: () => void,
+  onPlayAi: () => void,
   audio: AudioManager,
 ): ModeHandle {
   let sim = new GameSim(SEED);
@@ -233,6 +250,14 @@ function bootSolo(
     'position:fixed;top:12px;right:12px;z-index:5;padding:6px 12px;opacity:.85';
   onlineBtn.onclick = onPlayOnline;
   document.body.appendChild(onlineBtn);
+
+  // Mode switch into a local vs-AI match (two visible boards).
+  const aiBtn = document.createElement('button');
+  aiBtn.textContent = 'Play vs AI';
+  aiBtn.style.cssText =
+    'position:fixed;top:12px;right:120px;z-index:5;padding:6px 12px;opacity:.85';
+  aiBtn.onclick = onPlayAi;
+  document.body.appendChild(aiBtn);
 
   // --- input ---------------------------------------------------------------
   const restart = (): void => {
@@ -433,6 +458,7 @@ function bootSolo(
       globalThis.removeEventListener('blur', onBlur);
       touch?.remove();
       onlineBtn.remove();
+      aiBtn.remove();
       overlay.dispose();
       loseBar.dispose();
       view.dispose(); // release the WebGL context (browsers cap them)
