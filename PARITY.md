@@ -179,9 +179,36 @@ scoreStore.ts`, replacing `~/.crack-attack/`), using the saved player name.
 
 ## Known and planned elsewhere
 
-- **AI opponent** (Phase 3), **X-mode**, **replays** (ActionRecorder /
-  CM_REPLAY), **custom garbage-flavor image exchange** — tracked in
-  BROWSER_PORT_PLAN.md phases/stretch.
+- ~~**AI opponent** (Phase 3)~~ **DONE** (this branch) — two flavours. The
+  reference's gridless `ComputerPlayer` (a timed garbage state machine) is
+  ported faithfully for parity in `core/computerPlayer.ts` (+ `GarbageQueue`,
+  the Easy/Medium/Hard attack cadences and loss heights) and kept, but the
+  _visible_ opponent is a real grid-playing bot: `core/aiController.ts`
+  `AiController.decide(sim)` reads the board + swap cursor each tick and returns
+  the next `ActionState` — a pure, deterministic function of sim state plus a
+  tiny plan/timer (no clocks, no RNG), so all clients/spectators reproduce its
+  moves identically. Easy plays reactively (clears what's one swap away); medium
+  also digs blocks into gaps to churn matches; **hard is strategic** — it
+  look-ahead-plans via a pure cascade evaluator (`core/aiPlanner.ts`: apply a
+  candidate swap to a lightweight board copy, settle gravity, remove 3+ runs,
+  repeat; counts chain depth ≈ multiplier, cleared ≈ magnitude, garbage
+  shattered) and _banks_ small clears while safe, firing only chains / 4+ combos
+  / garbage shatters (a plain 3-match sends no garbage, so those are what
+  actually attack), dropping to survival clears when the stack tops out.
+  Measured attack output escalates easy<medium<hard. **Solo vs AI**
+  (`client/aiMatch.ts`) shows two real boards side by side (you + the bot's
+  `GameSim`), cross-wired through the garbage seam like netplay, entered via a
+  difficulty picker. **Netplay vs AI** (protocol v4) seats the bot as a
+  deterministic _client-side seat_: its inputs never cross the wire — every
+  client and spectator regenerates them locally from the same controller over
+  the lockstep-identical AI sim, so `match_start`/`spectate_start` carry only an
+  `aiOpponent` descriptor (difficulty + seat index). The relay hosts the "1
+  human + 1 bot" room (single-ready start; human drop tears it down; not
+  persisted to W-L). A "vs AI" lobby button opens the picker; spectators see the
+  identical AI. Deferred within Phase 3: the abstract-AI's own visible UI (the
+  `ComputerPlayer` core is retained but not surfaced).
+- **X-mode**, **replays** (ActionRecorder / CM_REPLAY), **custom garbage-flavor
+  image exchange** — tracked in BROWSER_PORT_PLAN.md phases/stretch.
 
 ## Suggested order
 
