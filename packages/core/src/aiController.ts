@@ -264,6 +264,7 @@ export class AiController {
     const H = board.height;
     let bestFire: SwapPlan | null = null;
     let bestFireScore = -1;
+    let bestFireDist = Infinity;
     let bestClear: SwapPlan | null = null;
     let bestClearDist = Infinity;
 
@@ -283,9 +284,11 @@ export class AiController {
           cascade.chainDepth >= 2 || cascade.maxRound >= 4 || cascade.garbageShattered > 0;
         if (worthFiring) {
           const score = attackValue(cascade) + cascade.garbageShattered * 3;
-          // Highest value wins; nearest breaks ties (lands before the creep shifts).
-          if (score > bestFireScore || (score === bestFireScore && dist < bestClearDist)) {
+          // Highest value wins; the nearest *fire* candidate breaks ties (lands
+          // before the creep shifts).
+          if (score > bestFireScore || (score === bestFireScore && dist < bestFireDist)) {
             bestFireScore = score;
+            bestFireDist = dist;
             bestFire = { x, y: gy };
           }
         }

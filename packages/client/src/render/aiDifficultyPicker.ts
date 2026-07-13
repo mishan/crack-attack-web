@@ -1,17 +1,19 @@
 /**
  * aiDifficultyPicker.ts — a small modal to choose the AI difficulty before a
- * vs-AI match. Resolves to the chosen {@link AiDifficulty}, or null if cancelled.
+ * vs-AI match. Resolves to the chosen {@link AiDifficultyLevel}, or null if
+ * cancelled. The opponent is the grid-playing `AiController`, so the blurbs
+ * describe its behavioural tiers (not the old gridless ComputerPlayer).
  */
 
-import type { AiDifficulty } from '@crack-attack/core';
+import type { AiDifficultyLevel } from '@crack-attack/core';
 
-const OPTIONS: { id: AiDifficulty; label: string; blurb: string }[] = [
-  { id: 'easy', label: 'Easy', blurb: 'attacks slowly · small capacity' },
-  { id: 'medium', label: 'Medium', blurb: 'steady pressure' },
-  { id: 'hard', label: 'Hard', blurb: 'fast attacks · big capacity' },
+const OPTIONS: { id: AiDifficultyLevel; label: string; blurb: string }[] = [
+  { id: 'easy', label: 'Easy', blurb: 'clears matches as they appear' },
+  { id: 'medium', label: 'Medium', blurb: 'digs to churn up more matches' },
+  { id: 'hard', label: 'Hard', blurb: 'plans combos & chains to attack' },
 ];
 
-export function pickAiDifficulty(): Promise<AiDifficulty | null> {
+export function pickAiDifficulty(): Promise<AiDifficultyLevel | null> {
   return new Promise((resolve) => {
     const overlay = document.createElement('div');
     overlay.style.cssText =
@@ -36,7 +38,7 @@ export function pickAiDifficulty(): Promise<AiDifficulty | null> {
     };
     document.addEventListener('keydown', onKeyDown);
 
-    const finish = (value: AiDifficulty | null): void => {
+    const finish = (value: AiDifficultyLevel | null): void => {
       document.removeEventListener('keydown', onKeyDown);
       overlay.remove();
       resolve(value);

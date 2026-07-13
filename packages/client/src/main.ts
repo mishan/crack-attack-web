@@ -124,7 +124,7 @@ function boot(): void {
 
   let current: ModeHandle | null = null;
   // Chosen from the difficulty modal; drives an `enter('ai')`.
-  let aiDifficulty: import('@crack-attack/core').AiDifficulty = 'medium';
+  let aiDifficulty: import('@crack-attack/core').AiDifficultyLevel = 'medium';
 
   // Open the difficulty modal, then boot a vs-AI match (or stay put if cancelled).
   const playAi = (): void => {
