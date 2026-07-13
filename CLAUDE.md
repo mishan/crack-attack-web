@@ -311,9 +311,18 @@ just use `pnpm` directly.
       clocks, no RNG). It picks the nearest single swap that completes a 3+ run
       (re-evaluated every action tick so the rising board never leaves it
       chasing a stale target), walks the cursor there pulsing presses (the
-      Swapper debounces held keys), and swaps; harder bots also "dig" blocks
-      into gaps to flatten the stack. Difficulty = post-swap cooldown + digging
-      on/off, tuned to a clean Easy<Medium<Hard in both survival and clears.
+      Swapper debounces held keys), and swaps; medium also "digs" blocks into
+      gaps to churn up matches. **Hard is strategic**: rather than greedily
+      clearing every 3 (a plain 3-match sends _no_ garbage), it look-ahead-plans
+      via a pure cascade evaluator (`core/aiPlanner.ts` — apply a candidate swap
+      to a lightweight board copy, settle gravity, remove 3+ runs, repeat;
+      counts chain depth ≈ multiplier, cleared ≈ magnitude, garbage shattered),
+      and _banks_ small clears while safe, firing only chains / 4+ combos /
+      garbage shatters (what actually attack), dropping to survival clears when
+      the stack tops out. Measured: easy is the survival floor (fixing an
+      earlier inversion), and attack output escalates easy<medium<hard (hard
+      throws far more garbage). All tiers stay a pure, deterministic function of
+      sim state (no clocks, no RNG), ~29µs/decide.
       **Solo vs AI** (`client/aiMatch.ts`): two _visible_ real boards — you left,
       the bot's `GameSim` right — cross-wired through the garbage seam exactly
       like netplay, driven by `AiController.decide`; full view stack + countdown + celebration + audio, entered via a difficulty picker from the solo

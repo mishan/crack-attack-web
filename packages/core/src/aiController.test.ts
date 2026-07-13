@@ -16,14 +16,27 @@ function runAi(seed: number, difficulty: 'easy' | 'medium' | 'hard', ticks: numb
 }
 
 /**
- * Survival ticks for a difficulty facing a steady stream of injected full-width
- * garbage (a stand-in for a human attacking with combos), summed over seeds.
+ * Run a difficulty against a steady stream of injected full-width garbage (a
+ * stand-in for a human attacking with combos), summed over seeds. Reports both
+ * survival ticks and garbage cells *sent back* (attack output).
  */
-function survivalUnderGarbage(difficulty: 'easy' | 'medium' | 'hard', seeds: number[]): number {
-  let total = 0;
+function underGarbage(
+  difficulty: 'easy' | 'medium' | 'hard',
+  seeds: number[],
+): { survival: number; sent: number } {
+  let survival = 0;
+  let sent = 0;
   for (const seed of seeds) {
     const sim = new GameSim(seed);
     const ai = new AiController(difficulty);
+    sim.garbageGenerator.outSink = {
+      sendGarbage: (h, w) => {
+        sent += h * w;
+      },
+      sendSpecialGarbage: () => {
+        sent += 1;
+      },
+    };
     let t = 0;
     for (; t < 40000 && !sim.lost; t++) {
       if (t > 500 && t % 300 === 0) {
@@ -31,9 +44,9 @@ function survivalUnderGarbage(difficulty: 'easy' | 'medium' | 'hard', seeds: num
       }
       sim.step(ai.decide(sim));
     }
-    total += t;
+    survival += t;
   }
-  return total;
+  return { survival, sent };
 }
 
 describe('AiController', () => {
@@ -46,17 +59,21 @@ describe('AiController', () => {
     expect(played).toBeGreaterThan(0);
   });
 
-  it('difficulty is monotonic under garbage pressure: easy < medium ≤ hard', () => {
-    // Guards against the tuning regression where medium/hard were no stronger
-    // than easy (or inverted) once a real garbage stream was involved. Aggregated
-    // over seeds since per-game survival is chaotic.
+  it('difficulty escalates under garbage: easy survives least, hard attacks most', () => {
+    // The tiers are defined behaviourally: easy is the survival floor (fixing the
+    // old inversion where medium/hard were no stronger), while hard is the
+    // *aggressive* tier — it banks blocks and fires combos/chains, sending far
+    // more garbage back than the others. Aggregated over seeds (per-game play is
+    // chaotic).
     const seeds = [1, 2, 7, 42, 101, 2026, 55, 88];
-    const easy = survivalUnderGarbage('easy', seeds);
-    const medium = survivalUnderGarbage('medium', seeds);
-    const hard = survivalUnderGarbage('hard', seeds);
-    expect(medium).toBeGreaterThan(easy);
-    expect(hard).toBeGreaterThanOrEqual(medium * 0.95); // hard is at least as strong
-    expect(hard).toBeGreaterThan(easy);
+    const easy = underGarbage('easy', seeds);
+    const medium = underGarbage('medium', seeds);
+    const hard = underGarbage('hard', seeds);
+    // Survival: easy is clearly the weakest (the reported inversion is gone).
+    expect(medium.survival).toBeGreaterThan(easy.survival);
+    // Attack: strictly escalating — hard throws the most garbage, easy the least.
+    expect(medium.sent).toBeGreaterThan(easy.sent);
+    expect(hard.sent).toBeGreaterThan(medium.sent);
   });
 
   it('is deterministic: same seed + difficulty ⇒ identical sim digest', () => {

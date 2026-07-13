@@ -19,24 +19,29 @@
  */
 
 import { ActionState, CC_DOWN, CC_LEFT, CC_RIGHT, CC_SWAP, CC_UP } from './controller.js';
-import { GC_PLAY_HEIGHT, GC_PLAY_WIDTH } from './constants.js';
+import { GC_PLAY_HEIGHT, GC_PLAY_WIDTH, GC_SAFE_HEIGHT } from './constants.js';
 import { GR_BLOCK, GR_EMPTY, GR_GARBAGE, type Grid } from './grid.js';
 import { flavorMatch } from './flavors.js';
 import { SS_SWAPPING, type Swapper } from './swapper.js';
+import { PLAN_GARBAGE, attackValue, canSwap, evaluateSwap, readPlanBoard } from './aiPlanner.js';
 
 export type AiDifficultyLevel = 'easy' | 'medium' | 'hard';
 
 interface DifficultyTuning {
   /** Ticks the bot pauses after each swap (reaction pacing). */
   readonly cooldown: number;
-  /** Whether it also digs blocks into gaps when no immediate match exists. */
+  /** Whether it digs blocks into gaps when no immediate match exists. */
   readonly flatten: boolean;
   /**
-   * Whether, when no clear exists, it makes a *constructive* swap that clusters
-   * same-flavour blocks (building toward future matches) instead of just
-   * digging. Strictly stronger than {@link flatten}; the top tier.
+   * The top tier: instead of greedily clearing every 3, it look-ahead-plans
+   * (see {@link AiController.planStrategic}) — banking small clears while safe
+   * and firing chains / 4+ combos / garbage shatters, which are what actually
+   * send garbage. Uses the {@link aiPlanner} cascade evaluator.
    */
-  readonly build?: boolean;
+  readonly strategic?: boolean;
+  /** Strategic only: switch to survival (clear anything) at this margin below the
+   * safe height. Larger = defends earlier (safer, banks less). Default {@link DANGER_MARGIN}. */
+  readonly dangerMargin?: number;
 }
 
 // Difficulty is behavioural, not just paced: reaction speed (cooldown) barely
@@ -51,8 +56,14 @@ interface DifficultyTuning {
 const TUNING: Record<AiDifficultyLevel, DifficultyTuning> = {
   easy: { cooldown: 20, flatten: false },
   medium: { cooldown: 12, flatten: true },
-  hard: { cooldown: 8, flatten: true, build: true },
+  hard: { cooldown: 8, flatten: false, strategic: true },
 };
+
+/**
+ * The bot enters "survival" mode (clear anything to stay alive, stop banking)
+ * once the stack tops out within this margin of the safe height.
+ */
+const DANGER_MARGIN = 3;
 
 /** What the controller needs from a sim: the grid and the swap cursor. */
 export interface AiSimView {
@@ -112,10 +123,10 @@ export class AiController {
     // The current nearest clearing swap (re-evaluated every action tick); if
     // none, a dig that shifts a block into a gap (harder AIs only) to flatten
     // the surface and open up new matches.
-    const target =
-      this.findSwap(grid, swapper.x, swapper.y) ??
-      (this.tuning.build ? this.findBuild(grid, swapper.x, swapper.y) : null) ??
-      (this.tuning.flatten ? this.findFlatten(grid, swapper.x, swapper.y) : null);
+    const target = this.tuning.strategic
+      ? this.planStrategic(grid, swapper.x, swapper.y)
+      : (this.findSwap(grid, swapper.x, swapper.y) ??
+        (this.tuning.flatten ? this.findFlatten(grid, swapper.x, swapper.y) : null));
     if (!target) return new ActionState(0); // nothing to do — idle
 
     // Walk the cursor toward it, one axis at a time, pulsing each press.
@@ -235,6 +246,62 @@ export class AiController {
     if (x + 1 < GC_PLAY_WIDTH) add(x + 1, y, 1);
     if (x - 1 >= 0) add(x - 1, y, 1);
     return score;
+  }
+
+  /**
+   * The strategic tier. Instead of greedily clearing every 3, it evaluates each
+   * candidate swap's full cascade ({@link aiPlanner}) and:
+   *  - always fires a swap that sends garbage — a chain (chainDepth ≥ 2), a 4+
+   *    combo (a run ≥ 4), or a garbage shatter — picking the highest-value one;
+   *  - otherwise, if the stack is getting dangerous, clears the nearest 3 to
+   *    survive;
+   *  - otherwise (safe, nothing worth firing) *banks*: makes a constructive
+   *    build move to set up a bigger combo/chain, rather than wasting the 3.
+   * Returns the grid cell to swap rightward, or null to idle. Deterministic.
+   */
+  private planStrategic(grid: Grid, cursorX: number, cursorY: number): SwapPlan | null {
+    const board = readPlanBoard(grid);
+    const H = board.height;
+    let bestFire: SwapPlan | null = null;
+    let bestFireScore = -1;
+    let bestClear: SwapPlan | null = null;
+    let bestClearDist = Infinity;
+
+    for (let by = 0; by < H; by++) {
+      for (let x = 0; x < board.width - 1; x++) {
+        if (!canSwap(board, x, by)) continue;
+        const a = board.cell[x * H + by]!;
+        const c = board.cell[(x + 1) * H + by]!;
+        if (a === c || a === PLAN_GARBAGE || c === PLAN_GARBAGE) continue; // no-op / illegal
+        const cascade = evaluateSwap(board, x, by);
+        if (cascade.chainDepth === 0) continue; // triggers nothing
+
+        const gy = by + 1; // plan rows are grid rows − 1
+        const dist = Math.abs(x - cursorX) + Math.abs(gy - cursorY);
+
+        const worthFiring =
+          cascade.chainDepth >= 2 || cascade.maxRound >= 4 || cascade.garbageShattered > 0;
+        if (worthFiring) {
+          const score = attackValue(cascade) + cascade.garbageShattered * 3;
+          // Highest value wins; nearest breaks ties (lands before the creep shifts).
+          if (score > bestFireScore || (score === bestFireScore && dist < bestClearDist)) {
+            bestFireScore = score;
+            bestFire = { x, y: gy };
+          }
+        }
+        if (dist < bestClearDist) {
+          bestClearDist = dist;
+          bestClear = { x, y: gy };
+        }
+      }
+    }
+
+    if (bestFire) return bestFire; // attack / defend — always fire a real payoff
+    const margin = this.tuning.dangerMargin ?? DANGER_MARGIN;
+    const danger = grid.top_effective_row >= GC_SAFE_HEIGHT - margin;
+    if (danger) return bestClear; // survive: clear anything (may be null if nothing)
+    // Safe and nothing worth firing: bank blocks — build toward a bigger combo.
+    return this.findBuild(grid, cursorX, cursorY);
   }
 
   /**
