@@ -28,7 +28,16 @@ export function pickAiDifficulty(): Promise<AiDifficulty | null> {
     title.style.fontSize = '15px';
     panel.append(title);
 
+    const onKeyDown = (e: KeyboardEvent): void => {
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        finish(null); // Escape dismisses the dialog, like the backdrop/Cancel
+      }
+    };
+    document.addEventListener('keydown', onKeyDown);
+
     const finish = (value: AiDifficulty | null): void => {
+      document.removeEventListener('keydown', onKeyDown);
       overlay.remove();
       resolve(value);
     };

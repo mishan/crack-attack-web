@@ -20,7 +20,8 @@
  * (retiring the C++'s hidden server-wins-ties quirk, Communicator.cxx:423).
  */
 
-import { ActionState, AiController, GameSim } from '@crack-attack/core';
+import { ActionState, GameSim } from '@crack-attack/core';
+import type { AiController } from '@crack-attack/core';
 import { ACTION_MASK, DIGEST_PERIOD, MAX_INPUT_FRAMES_PER_MESSAGE } from '@crack-attack/protocol';
 
 /**
