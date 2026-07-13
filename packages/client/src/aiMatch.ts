@@ -15,7 +15,6 @@
 
 import {
   AiController,
-  ComputerPlayer, // re-exported barrel keeps tree-shaking simple; unused here
   GameSim,
   GC_STEPS_PER_SECOND,
   generateSeed,
@@ -38,8 +37,6 @@ import { Celebration } from './view/celebration.js';
 import { Spring } from './view/spring.js';
 import { ViewInterpolator } from './view/viewInterpolator.js';
 import type { AudioManager } from './audio/audioManager.js';
-
-void ComputerPlayer;
 
 const MS_PER_TICK = 1000 / GC_STEPS_PER_SECOND;
 const MAX_SIGN_DT_TICKS = 10;

@@ -87,8 +87,15 @@ export class GarbageQueue {
 
   /**
    * Shatter: remove the leading run of one flavour up to the first block of the
-   * other (`removeWithSpecials` → `removeToFirst`). Returns the number of blocks
-   * removed (the reference's `last_shatter_height`).
+   * other (`removeWithSpecials` → `removeToFirst`, GarbageQueue.cxx:45-86).
+   *
+   * Returns the number of queue *elements* removed (the reference's
+   * `num_removed`) — NOT their total row height. The reference then uses this
+   * count as `last_shatter_height`, a row count, even though an element may span
+   * several rows; that mismatch is a known upstream quirk (its own height
+   * assertion at GarbageQueue.cxx:77-83 is disabled precisely because it doesn't
+   * hold). Kept element-for-element here for tick-for-tick fidelity — do not
+   * "correct" it to a row sum, which would diverge from the reference's timing.
    */
   removeWithSpecials(): number {
     if (this.elements.length === 0) return 0;

@@ -37,7 +37,14 @@ export function pickAiDifficulty(): Promise<AiDifficulty | null> {
       const btn = document.createElement('button');
       btn.type = 'button';
       btn.style.cssText = 'text-align:left;padding:10px 12px;cursor:pointer';
-      btn.innerHTML = `<strong>${opt.label}</strong> <span style="opacity:.65;font-size:12px">— ${opt.blurb}</span>`;
+      // Build nodes with textContent rather than innerHTML: no HTML-injection
+      // surface, even if a label/blurb ever becomes dynamic.
+      const label = document.createElement('strong');
+      label.textContent = opt.label;
+      const blurb = document.createElement('span');
+      blurb.style.cssText = 'opacity:.65;font-size:12px';
+      blurb.textContent = ` — ${opt.blurb}`;
+      btn.append(label, blurb);
       btn.onclick = () => finish(opt.id);
       panel.append(btn);
     }

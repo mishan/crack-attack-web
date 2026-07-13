@@ -54,6 +54,7 @@ const MS_PER_TICK = 1000 / GC_STEPS_PER_SECOND;
 const MAX_SIGN_DT_TICKS = 10;
 
 const SOLO_HELP = '←→↑↓ move · Z / Space swap · X raise · R restart · P pause · M mute';
+const AI_HELP = '←→↑↓ move · Z / Space swap · X raise · R restart · P pause · M mute · vs AI';
 const NET_HELP =
   '←→↑↓ move · Z / Space swap · X raise · R ready/rematch · Esc concede/stop watching · M mute';
 
@@ -138,7 +139,9 @@ function boot(): void {
     current?.dispose();
     current = null;
     if (hudEl) hudEl.textContent = '';
-    if (help) help.textContent = mode === 'solo' ? SOLO_HELP : NET_HELP;
+    // Netplay has its own controls (ready/concede); solo and vs-AI share the
+    // same ones (restart/pause), so a local AI match uses the solo hint.
+    if (help) help.textContent = mode === 'ai' ? AI_HELP : mode === 'net' ? NET_HELP : SOLO_HELP;
     if (mode === 'net') {
       void import('./netplay.js').then((m) => {
         current = m.bootNetplay(app, hudEl, relayUrl, () => enter('solo'), audio);

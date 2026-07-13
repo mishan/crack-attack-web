@@ -20,10 +20,13 @@ describe('GarbageQueue', () => {
 
   it('removeWithSpecials removes the leading run up to the other flavor', () => {
     const q = new GarbageQueue();
-    q.add(2, 6, GF_NORMAL); // leading normal
+    q.add(2, 6, GF_NORMAL); // leading normal, 2 rows tall
     q.add(1, 6, GF_GRAY);
     q.add(1, 6, GF_NORMAL);
-    // first is normal → remove leading normals up to the first gray (1 element)
+    // first is normal → remove leading normals up to the first gray. The count
+    // is of *elements* removed (1), NOT their row height (2) — faithful to the
+    // reference's `num_removed` (see removeWithSpecials' note). Even though the
+    // removed slab was 2 rows tall, the reference returns 1 here.
     expect(q.removeWithSpecials()).toBe(1);
     expect(q.height()).toBe(2); // gray(1) + normal(1) remain
   });
