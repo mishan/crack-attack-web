@@ -27,6 +27,8 @@ import {
   ProtocolError,
   decodeClientMessage,
   encodeMessage,
+  type AiDifficulty,
+  type AiOpponentInfo,
   type ClientMessage,
   type ErrorCode,
   type HelloMessage,
@@ -77,6 +79,13 @@ interface Seat {
   digests: Map<number, [number, number]>;
   /** Reported game result (player index or null = draw), awaiting the peer's. */
   reported_result: number | null | undefined;
+  /**
+   * Set iff this is a bot seat (no connection, no token). The bot plays a
+   * deterministic sim every client computes locally, so the relay only records
+   * its presence — it never sends match_start/inputs/digests, and its stream
+   * never crosses the wire.
+   */
+  ai?: AiDifficulty;
 }
 
 interface Room {
@@ -194,7 +203,10 @@ export class RelayServer {
     }
     if (!session.room || !session.seat) return;
 
-    if (session.room.state === 'playing') {
+    // Reconnect grace applies only to human-vs-human matches. In a vs-AI room
+    // the bot can't play on alone, so a human drop just tears the room down
+    // (handled by leaveRoom, whose sole-bot-remaining case closes the room).
+    if (session.room.state === 'playing' && this.aiSeatOf(session.room) === undefined) {
       this.dropSeat(session.room, session.seat);
     } else {
       this.leaveRoom(session);
@@ -228,7 +240,7 @@ export class RelayServer {
         this.error(conn, 'bad_message', 'already helloed');
         return;
       case 'create_room':
-        this.handleCreateRoom(session);
+        this.handleCreateRoom(session, msg.aiOpponent);
         return;
       case 'join_room':
         this.handleJoinRoom(session, msg.code);
@@ -394,16 +406,40 @@ export class RelayServer {
     };
   }
 
-  private handleCreateRoom(session: Session): void {
+  /** A bot seat: no connection or token; every client plays it deterministically. */
+  private newAiSeat(difficulty: AiDifficulty): Seat {
+    return {
+      conn: null,
+      token: '',
+      name: `CPU (${difficulty})`,
+      record: { wins: 0, losses: 0 },
+      ready: false,
+      match_index: 1,
+      frames: [],
+      digests: new Map(),
+      reported_result: undefined,
+      ai: difficulty,
+    };
+  }
+
+  /** The room's bot seat, if any. */
+  private aiSeatOf(room: Room): Seat | undefined {
+    return room.seats.find((s) => s.ai !== undefined);
+  }
+
+  private handleCreateRoom(session: Session, aiOpponent?: { difficulty: AiDifficulty }): void {
     if (session.room || session.watching) {
       this.error(session.conn, 'bad_message', 'already in a room');
       return;
     }
     const code = this.generateRoomCode();
     const seat = this.newSeat(session);
+    // A vs-AI room is created full: the human plus a bot seat, so a single
+    // ready starts the match (no second human awaited).
+    const seats = aiOpponent ? [seat, this.newAiSeat(aiOpponent.difficulty)] : [seat];
     const room: Room = {
       code,
-      seats: [seat],
+      seats,
       spectators: [],
       state: 'waiting',
       seed: 0,
@@ -466,12 +502,14 @@ export class RelayServer {
     });
     if (room.state === 'playing') {
       // Mid-match late-join: the same ledger mechanism as match_resume.
+      const ai = this.aiSeatOf(room);
       this.send(session.conn, {
         type: 'spectate_start',
         seed: room.seed,
         inputDelay: this.inputDelay,
         players: this.matchNames(room),
         frames: this.ledgers(room),
+        ...(ai ? { aiOpponent: { difficulty: ai.ai!, index: ai.match_index } } : {}),
       });
     }
     this.broadcastSpectators(room);
@@ -522,7 +560,8 @@ export class RelayServer {
       return;
     }
     seat.ready = true;
-    if (room.seats.length === 2 && room.seats.every((s) => s.ready)) {
+    // A bot seat is always ready; the match starts once every human is.
+    if (room.seats.length === 2 && room.seats.every((s) => s.ai !== undefined || s.ready)) {
       this.startMatch(room);
     }
   }
@@ -536,6 +575,11 @@ export class RelayServer {
     // Pin indices from the current seat order before deriving names.
     for (let i = 0; i < 2; i++) room.seats[i]!.match_index = i;
     const names = this.matchNames(room);
+    const ai = this.aiSeatOf(room);
+    // The bot descriptor everyone needs to reproduce its moves locally.
+    const aiInfo: AiOpponentInfo | undefined = ai
+      ? { difficulty: ai.ai!, index: ai.match_index }
+      : undefined;
     for (let i = 0; i < 2; i++) {
       const s = room.seats[i]!;
       s.ready = false;
@@ -549,6 +593,7 @@ export class RelayServer {
           playerIndex: i,
           inputDelay: this.inputDelay,
           players: names,
+          ...(aiInfo ? { aiOpponent: aiInfo } : {}),
         });
       }
     }
@@ -560,6 +605,7 @@ export class RelayServer {
         inputDelay: this.inputDelay,
         players: names,
         frames: [[], []],
+        ...(aiInfo ? { aiOpponent: aiInfo } : {}),
       });
     }
     this.broadcastRoomList();
@@ -611,7 +657,8 @@ export class RelayServer {
     // resume) fall at or below the floor; that window goes unverified.
     if (tick <= room.digest_floor) return;
     const peer = room.seats.find((s) => s !== seat);
-    if (!peer) return;
+    // A bot peer never submits digests, so there is nothing to compare against.
+    if (!peer || peer.ai !== undefined) return;
 
     const peerDigests = peer.digests.get(tick);
     if (peerDigests === undefined) {
@@ -648,6 +695,17 @@ export class RelayServer {
     }
     seat.reported_result = winner;
     const peer = room.seats.find((s) => s !== seat);
+
+    // Bot opponent: there is no second client to cross-check, and the outcome
+    // is deterministic, so accept the human's report directly. Vs-AI games are
+    // not persisted to W-L (the bot has no record). The room returns to waiting
+    // for a rematch.
+    if (peer && peer.ai !== undefined) {
+      this.endMatch(room, 'result', winner);
+      this.broadcastRoomList();
+      return;
+    }
+
     if (!peer || peer.reported_result === undefined) return;
 
     if (peer.reported_result !== winner) {
@@ -674,7 +732,8 @@ export class RelayServer {
       return;
     }
     const peer = room.seats.find((s) => s !== seat);
-    if (peer) await this.recordDecisive(peer, seat);
+    // A bot peer keeps no record; only persist against a real opponent.
+    if (peer && peer.ai === undefined) await this.recordDecisive(peer, seat);
     this.endMatch(room, 'concession', peer ? peer.match_index : 1 - seat.match_index);
     this.broadcastRoomList();
   }
@@ -738,7 +797,9 @@ export class RelayServer {
       clearTimeout(room.grace_timer);
       room.grace_timer = null;
     }
-    const orphaned = room.seats.filter((s) => s.conn === null);
+    // A bot seat also has no connection but is not an orphan — it persists
+    // across games so the human can rematch; only dropped humans are removed.
+    const orphaned = room.seats.filter((s) => s.conn === null && s.ai === undefined);
     for (const s of orphaned) {
       this.dropped.delete(s.token);
       removeItem(room.seats, s);
@@ -773,7 +834,9 @@ export class RelayServer {
     session.room = null;
     session.seat = null;
 
-    const peer = room.seats[0];
+    // The remaining *human* opponent, if any. A lone bot seat left behind is
+    // not a survivor: the room closes (a bot can't hold a room open).
+    const peer = room.seats.find((s) => s.ai === undefined);
     if (!peer) {
       this.closeRoom(room);
       return;

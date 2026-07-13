@@ -626,3 +626,70 @@ describe('reconnect grace', () => {
     expect(welcome.record).toEqual({ wins: 0, losses: 1 }); // the forfeit stuck
   });
 });
+
+describe('vs-AI rooms', () => {
+  it('creates a full room with a bot seat and starts on a single ready', async () => {
+    const relay = new RelayServer();
+    const a = await client(relay, 'alice');
+    await say(relay, a, { type: 'create_room', aiOpponent: { difficulty: 'medium' } });
+    const code = a.lastOf('room_created').code;
+
+    // The lobby shows a full room: alice + the bot.
+    const rooms = a.lastOf('room_list').rooms;
+    const room = rooms.find((r) => r.code === code)!;
+    expect(room.players.map((p) => p.name)).toEqual(['alice', 'CPU (medium)']);
+
+    // A single ready starts the match; match_start carries the bot descriptor.
+    await say(relay, a, { type: 'ready' });
+    const start = a.lastOf('match_start');
+    expect(start.playerIndex).toBe(0);
+    expect(start.aiOpponent).toEqual({ difficulty: 'medium', index: 1 });
+  });
+
+  it('rejects a human joining a full AI room but allows spectating it', async () => {
+    const relay = new RelayServer();
+    const a = await client(relay, 'alice');
+    await say(relay, a, { type: 'create_room', aiOpponent: { difficulty: 'hard' } });
+    const code = a.lastOf('room_created').code;
+
+    const b = await client(relay, 'bob');
+    await say(relay, b, { type: 'join_room', code });
+    expect(b.lastOf('error').code).toBe('room_full');
+
+    await say(relay, a, { type: 'ready' }); // match under way
+    await say(relay, b, { type: 'spectate', code });
+    const spec = b.lastOf('spectate_start');
+    expect(spec.aiOpponent).toEqual({ difficulty: 'hard', index: 1 });
+    expect(spec.frames).toEqual([[], []]); // bot stream never on the wire
+  });
+
+  it("accepts the human's result directly and returns to waiting for a rematch", async () => {
+    const relay = new RelayServer();
+    const a = await client(relay, 'alice');
+    await say(relay, a, { type: 'create_room', aiOpponent: { difficulty: 'easy' } });
+    const code = a.lastOf('room_created').code;
+    await say(relay, a, { type: 'ready' });
+    a.clear();
+
+    // Human reports a win over the bot (index 0); no peer report is awaited.
+    await say(relay, a, { type: 'result', winner: 0 });
+    expect(a.lastOf('match_end')).toEqual({ type: 'match_end', reason: 'result', winner: 0 });
+    // vs-AI is not persisted to W-L.
+    expect(a.lastOf('room_list').rooms.find((r) => r.code === code)!.state).toBe('waiting');
+
+    // Re-ready starts a rematch (the bot seat persisted).
+    await say(relay, a, { type: 'ready' });
+    expect(a.lastOf('match_start').aiOpponent).toEqual({ difficulty: 'easy', index: 1 });
+  });
+
+  it('closes the AI room when the human disconnects mid-match', async () => {
+    const relay = new RelayServer();
+    const a = await client(relay, 'alice');
+    await say(relay, a, { type: 'create_room', aiOpponent: { difficulty: 'medium' } });
+    await say(relay, a, { type: 'ready' });
+    expect(relay.roomCount).toBe(1);
+
+    relay.disconnect(a);
+    expect(relay.roomCount).toBe(0); // torn down, no reconnect grace
+  });
+});

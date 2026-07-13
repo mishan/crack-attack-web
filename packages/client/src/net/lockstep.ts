@@ -20,8 +20,20 @@
  * (retiring the C++'s hidden server-wins-ties quirk, Communicator.cxx:423).
  */
 
-import { ActionState, GameSim } from '@crack-attack/core';
+import { ActionState, AiController, GameSim } from '@crack-attack/core';
 import { ACTION_MASK, DIGEST_PERIOD, MAX_INPUT_FRAMES_PER_MESSAGE } from '@crack-attack/protocol';
+
+/**
+ * A bot seat: the deterministic controller that plays it and which player index
+ * it occupies. When present the opponent is an AI whose inputs are generated
+ * just-in-time from its own sim rather than received over the wire — so the
+ * session never waits on it, and (since the controller is a pure function of
+ * the identical AI sim) every client and spectator reproduces the same moves.
+ */
+export interface AiSeat {
+  controller: AiController;
+  index: number;
+}
 
 /** An outgoing contiguous input batch (the payload of an `inputs` message). */
 export interface OutgoingInputs {
@@ -67,6 +79,13 @@ export class LockstepSession {
 
   private readonly scratchActions = new ActionState(0);
 
+  /**
+   * When the opponent is a bot: its controller + seat index. The bot's frames
+   * are generated locally each tick (never received), so the session never
+   * stalls on it and no digests are queued (there is no peer to compare with).
+   */
+  private readonly aiOpponent: AiSeat | null;
+
   /** Set once a sim has lost; the session refuses to step further. */
   outcome: Outcome | null = null;
 
@@ -93,9 +112,11 @@ export class LockstepSession {
     localIndex: number,
     inputDelay: number,
     resumeHistories?: [number[], number[]],
+    aiOpponent?: AiSeat,
   ) {
     this.localIndex = localIndex;
     this.inputDelay = inputDelay;
+    this.aiOpponent = aiOpponent ?? null;
     this.sims = [new GameSim(seed), new GameSim(seed)];
 
     // Cross-wire the garbage ports: sim i's outbound garbage is queued on the
@@ -145,6 +166,8 @@ export class LockstepSession {
 
   /** True when the next tick is blocked on the opponent's input frames. */
   get waitingForRemote(): boolean {
+    // A bot opponent's frames are produced on demand, so we never wait on it.
+    if (this.aiOpponent) return false;
     return this.outcome === null && this.frames[1 - this.localIndex]!.length <= this.ticks;
   }
 
@@ -179,6 +202,14 @@ export class LockstepSession {
 
     while (stepped < maxSteps && this.outcome === null) {
       const t = this.ticks;
+
+      // Bot opponent: synthesize its frame for this tick from its own sim
+      // (read *before* stepping, exactly like a sampled human input), so the
+      // stream is never behind. Deterministic in the AI sim's state, which is
+      // identical on every client — the bot's play needs no wire traffic.
+      if (this.aiOpponent && remote.length <= t) {
+        remote.push(this.aiOpponent.controller.decide(this.sims[this.aiOpponent.index]!).state);
+      }
       if (remote.length <= t) break; // waiting for the opponent
 
       // Schedule local input so local[t] exists. Steady state pushes exactly
@@ -198,7 +229,9 @@ export class LockstepSession {
       this.ticks++;
       stepped++;
 
-      if (this.ticks % DIGEST_PERIOD === 0 && this.ticks > this.digestFloor) {
+      // Skip digests against a bot: its inputs never reach the relay, so there
+      // is no peer submission to compare them with (desync detection is moot).
+      if (!this.aiOpponent && this.ticks % DIGEST_PERIOD === 0 && this.ticks > this.digestFloor) {
         this.digestQueue.push({
           tick: this.ticks,
           digests: [this.sims[0]!.digest(), this.sims[1]!.digest()],

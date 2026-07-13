@@ -301,7 +301,39 @@ just use `pnpm` directly.
       watch view titles the boards "A vs B", catches up in chunks, and stays
       seated across rematches (Esc leaves). e2e: a mid-match watcher catches up
       and lands bit-identical sims and the same outcome as the players.
-- [ ] Phase 3 AI, Phase 6 stretch (X-mode, replays, WebRTC, binary codec if
+- [x] **Phase 3 AI landed** (two flavours). The reference's gridless
+      `ComputerPlayer` (timed garbage machine) is ported faithfully in
+      `core/computerPlayer.ts` (+ `GarbageQueue`, Easy/Medium/Hard cadences and
+      loss heights) and kept for parity, but the *visible* opponent is a real
+      grid-playing bot: `core/aiController.ts` `AiController.decide(sim)` reads
+      the board + swap cursor each tick and returns the next `ActionState` — a
+      pure, deterministic function of sim state plus its own tiny plan/timer (no
+      clocks, no RNG). It picks the nearest single swap that completes a 3+ run
+      (re-evaluated every action tick so the rising board never leaves it
+      chasing a stale target), walks the cursor there pulsing presses (the
+      Swapper debounces held keys), and swaps; harder bots also "dig" blocks
+      into gaps to flatten the stack. Difficulty = post-swap cooldown + digging
+      on/off, tuned to a clean Easy<Medium<Hard in both survival and clears.
+      **Solo vs AI** (`client/aiMatch.ts`): two *visible* real boards — you left,
+      the bot's `GameSim` right — cross-wired through the garbage seam exactly
+      like netplay, driven by `AiController.decide`; full view stack + countdown
+      + celebration + audio, entered via a difficulty picker from the solo
+      screen. **Netplay vs AI** (protocol v4, deterministic *client-side seat*):
+      a room may seat a bot instead of a second human (`create_room.aiOpponent`);
+      the bot's inputs never cross the wire — every client and spectator
+      regenerates them locally by running the same `AiController` over the
+      lockstep-identical AI sim, so `match_start`/`spectate_start` carry only an
+      `aiOpponent` descriptor (difficulty + seat index; the AI sim reuses the
+      match seed and the controller is RNG-free). `LockstepSession`/
+      `SpectatorSession` grow an optional `AiSeat`: they synthesize the bot's
+      frame each tick just-in-time (never stalling on it, no digests to compare),
+      and the relay hosts the "1 human + 1 bot" room (single-ready start, human
+      result accepted directly, human drop tears the room down — no grace/resume
+      for bots, not persisted to W-L). A "vs AI" lobby button opens the picker;
+      spectators see the identical AI moves. Tested: controller play/determinism/
+      reset, a spectator reproducing both boards *and* the AI from only the human
+      stream (bit-identical digests), and the full relay AI-room flow.
+- [ ] Phase 6 stretch (X-mode, replays, WebRTC, binary codec if
       measurements demand it)
 
 See `BROWSER_PORT_PLAN.md` for the full phase breakdown and suggested order of work.
