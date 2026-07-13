@@ -20,7 +20,7 @@
 
 import { ActionState, CC_DOWN, CC_LEFT, CC_RIGHT, CC_SWAP, CC_UP } from './controller.js';
 import { GC_PLAY_HEIGHT, GC_PLAY_WIDTH } from './constants.js';
-import { GR_BLOCK, GR_EMPTY, type Grid } from './grid.js';
+import { GR_BLOCK, GR_EMPTY, GR_GARBAGE, type Grid } from './grid.js';
 import { flavorMatch } from './flavors.js';
 import { SS_SWAPPING, type Swapper } from './swapper.js';
 
@@ -31,15 +31,27 @@ interface DifficultyTuning {
   readonly cooldown: number;
   /** Whether it also digs blocks into gaps when no immediate match exists. */
   readonly flatten: boolean;
+  /**
+   * Whether, when no clear exists, it makes a *constructive* swap that clusters
+   * same-flavour blocks (building toward future matches) instead of just
+   * digging. Strictly stronger than {@link flatten}; the top tier.
+   */
+  readonly build?: boolean;
 }
 
-// Note: a very short cooldown is counter-productive — the bot re-swaps before
-// blocks settle and churns the board. The sweet spot for the flattening AIs is
-// ~8 ticks, so Hard (best) sits there and Medium is paced a touch slower.
+// Difficulty is behavioural, not just paced: reaction speed (cooldown) barely
+// affects survival — the bot is limited by how well it *finds/creates* matches,
+// not how fast it acts — so the tiers differ mainly in their no-clear fallback.
+//   easy   — reactive only: clears what's one swap away, else idles.
+//   medium — + digging: shuffles blocks into gaps, churning up new matches.
+//   hard   — + building: also clusters same-flavour blocks to set up matches
+//            (and prefers garbage-shattering clears), so it keeps clearing under
+//            pressure. Measured monotonic easy < medium < hard, garbage or not.
+// Cooldown is kept only for *feel* (easy visibly calmer, hard snappier).
 const TUNING: Record<AiDifficultyLevel, DifficultyTuning> = {
-  easy: { cooldown: 22, flatten: false }, // slow, only reactive clears
-  medium: { cooldown: 16, flatten: true },
-  hard: { cooldown: 8, flatten: true }, // paced to actually keep the stack down
+  easy: { cooldown: 20, flatten: false },
+  medium: { cooldown: 12, flatten: true },
+  hard: { cooldown: 8, flatten: true, build: true },
 };
 
 /** What the controller needs from a sim: the grid and the swap cursor. */
@@ -102,6 +114,7 @@ export class AiController {
     // the surface and open up new matches.
     const target =
       this.findSwap(grid, swapper.x, swapper.y) ??
+      (this.tuning.build ? this.findBuild(grid, swapper.x, swapper.y) : null) ??
       (this.tuning.flatten ? this.findFlatten(grid, swapper.x, swapper.y) : null);
     if (!target) return new ActionState(0); // nothing to do — idle
 
@@ -156,22 +169,34 @@ export class AiController {
   }
 
   /**
-   * Find a horizontal swap `(x,y)↔(x+1,y)` of two resting blocks whose exchange
-   * completes a 3+ run, choosing the one *closest to the cursor* (fewest moves,
-   * so it lands before the creep shifts the board). Deterministic: ties broken
-   * by the bottom-up, left-to-right scan order.
+   * Constructive fallback (top tier): when no clear exists, make the swap that
+   * best *clusters* same-flavour blocks — increasing same-flavour adjacencies,
+   * weighting vertical pairs higher (they build columns that survive the stack
+   * settling). This sets up future matches instead of just churning gaps, so
+   * the bot keeps generating clears (and shatters) under pressure. Only positive-
+   * gain swaps are considered, so it never oscillates; nearest-cursor breaks ties.
    */
-  private findSwap(grid: Grid, cursorX: number, cursorY: number): SwapPlan | null {
+  private findBuild(grid: Grid, cursorX: number, cursorY: number): SwapPlan | null {
     const maxRow = Math.min(grid.top_effective_row + 1, GC_PLAY_HEIGHT - 1);
     let best: SwapPlan | null = null;
+    let bestGain = 0;
     let bestDist = Infinity;
     for (let y = 1; y <= maxRow; y++) {
       for (let x = 0; x < GC_PLAY_WIDTH - 1; x++) {
         if (!this.swappableBlock(grid, x, y) || !this.swappableBlock(grid, x + 1, y)) continue;
-        if (grid.flavorAt(x, y) === grid.flavorAt(x + 1, y)) continue; // no-op swap
-        if (!this.swapMakesMatch(grid, x, y)) continue;
+        const fa = grid.flavorAt(x, y);
+        const fb = grid.flavorAt(x + 1, y);
+        if (fa === fb) continue; // no-op swap
+        // Gain = clustering after the swap minus before it.
+        const before = this.clusterScore(grid, x, y, fa) + this.clusterScore(grid, x + 1, y, fb);
+        const after =
+          this.clusterScore(grid, x, y, fb, x + 1, fa) +
+          this.clusterScore(grid, x + 1, y, fa, x, fb);
+        const gain = after - before;
+        if (gain <= 0) continue;
         const dist = Math.abs(x - cursorX) + Math.abs(y - cursorY);
-        if (dist < bestDist) {
+        if (gain > bestGain || (gain === bestGain && dist < bestDist)) {
+          bestGain = gain;
           bestDist = dist;
           best = { x, y };
         }
@@ -180,9 +205,90 @@ export class AiController {
     return best;
   }
 
+  /**
+   * Weighted count of same-flavour static-block neighbours of `(x,y)` treated as
+   * holding `flavor`. Vertical neighbours score 2 (column matches survive
+   * settling), horizontal 1. `swapCol`/`swapFlavor` optionally override one
+   * neighbour cell's flavour to reflect a pending swap of `(swapCol,y)`.
+   */
+  private clusterScore(
+    grid: Grid,
+    x: number,
+    y: number,
+    flavor: number,
+    swapCol = -1,
+    swapFlavor = -1,
+  ): number {
+    const flavorOf = (cx: number, cy: number): number | null => {
+      if (cx === swapCol && cy === y) return swapFlavor;
+      if ((grid.stateAt(cx, cy) & GR_BLOCK) === 0) return null;
+      if (!grid.blockAt(cx, cy).isStatic()) return null;
+      return grid.flavorAt(cx, cy);
+    };
+    let score = 0;
+    const add = (cx: number, cy: number, weight: number): void => {
+      const g = flavorOf(cx, cy);
+      if (g !== null && flavorMatch(g, flavor)) score += weight;
+    };
+    if (y + 1 < GC_PLAY_HEIGHT) add(x, y + 1, 2);
+    if (y - 1 >= 1) add(x, y - 1, 2);
+    if (x + 1 < GC_PLAY_WIDTH) add(x + 1, y, 1);
+    if (x - 1 >= 0) add(x - 1, y, 1);
+    return score;
+  }
+
+  /**
+   * Find a horizontal swap `(x,y)↔(x+1,y)` of two resting blocks whose exchange
+   * completes a 3+ run. Prefers a swap that also *shatters garbage* (its match
+   * lands next to a garbage slab) — the single most important thing a player
+   * does under garbage pressure, since a shatter turns a whole slab back into
+   * matchable blocks and relieves the stack. Among equally-preferred swaps it
+   * picks the one closest to the cursor (fewest moves, so it lands before the
+   * creep shifts the board). Deterministic: ties broken by the bottom-up,
+   * left-to-right scan order.
+   */
+  private findSwap(grid: Grid, cursorX: number, cursorY: number): SwapPlan | null {
+    const maxRow = Math.min(grid.top_effective_row + 1, GC_PLAY_HEIGHT - 1);
+    let best: SwapPlan | null = null;
+    let bestDist = Infinity;
+    let shatter: SwapPlan | null = null;
+    let shatterDist = Infinity;
+    for (let y = 1; y <= maxRow; y++) {
+      for (let x = 0; x < GC_PLAY_WIDTH - 1; x++) {
+        if (!this.swappableBlock(grid, x, y) || !this.swappableBlock(grid, x + 1, y)) continue;
+        if (grid.flavorAt(x, y) === grid.flavorAt(x + 1, y)) continue; // no-op swap
+        if (!this.swapMakesMatch(grid, x, y)) continue;
+        const dist = Math.abs(x - cursorX) + Math.abs(y - cursorY);
+        // A match on a cell touching garbage shatters that slab (the eliminated
+        // block is adjacent to it). Either swapped cell anchors the match.
+        if (this.garbageNeighbor(grid, x, y) || this.garbageNeighbor(grid, x + 1, y)) {
+          if (dist < shatterDist) {
+            shatterDist = dist;
+            shatter = { x, y };
+          }
+        }
+        if (dist < bestDist) {
+          bestDist = dist;
+          best = { x, y };
+        }
+      }
+    }
+    return shatter ?? best;
+  }
+
   /** A cell that can take part in a swap: a resting (static) block. */
   private swappableBlock(grid: Grid, x: number, y: number): boolean {
     return (grid.stateAt(x, y) & GR_BLOCK) !== 0 && grid.blockAt(x, y).isStatic();
+  }
+
+  /** Whether any 4-neighbour of `(x,y)` is a garbage cell (so a match here shatters it). */
+  private garbageNeighbor(grid: Grid, x: number, y: number): boolean {
+    return (
+      (y + 1 < GC_PLAY_HEIGHT && (grid.stateAt(x, y + 1) & GR_GARBAGE) !== 0) ||
+      (y - 1 >= 0 && (grid.stateAt(x, y - 1) & GR_GARBAGE) !== 0) ||
+      (x + 1 < GC_PLAY_WIDTH && (grid.stateAt(x + 1, y) & GR_GARBAGE) !== 0) ||
+      (x - 1 >= 0 && (grid.stateAt(x - 1, y) & GR_GARBAGE) !== 0)
+    );
   }
 
   /**

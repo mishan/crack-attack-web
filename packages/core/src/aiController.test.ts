@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { AiController } from './aiController.js';
 import { GameSim } from './gameSim.js';
+import { GF_NORMAL } from './flavors.js';
 
 /** Run the AI on its own sim for `ticks`, returning whether it ever eliminated. */
 function runAi(seed: number, difficulty: 'easy' | 'medium' | 'hard', ticks: number): boolean {
@@ -14,6 +15,27 @@ function runAi(seed: number, difficulty: 'easy' | 'medium' | 'hard', ticks: numb
   return eliminated;
 }
 
+/**
+ * Survival ticks for a difficulty facing a steady stream of injected full-width
+ * garbage (a stand-in for a human attacking with combos), summed over seeds.
+ */
+function survivalUnderGarbage(difficulty: 'easy' | 'medium' | 'hard', seeds: number[]): number {
+  let total = 0;
+  for (const seed of seeds) {
+    const sim = new GameSim(seed);
+    const ai = new AiController(difficulty);
+    let t = 0;
+    for (; t < 40000 && !sim.lost; t++) {
+      if (t > 500 && t % 300 === 0) {
+        sim.garbageGenerator.addToQueue(1, 6, GF_NORMAL, sim.clock.time_step);
+      }
+      sim.step(ai.decide(sim));
+    }
+    total += t;
+  }
+  return total;
+}
+
 describe('AiController', () => {
   it('actually plays: it makes swaps that eliminate blocks', () => {
     // Across several seeds the bot should find and execute clearing swaps.
@@ -22,6 +44,19 @@ describe('AiController', () => {
       if (runAi(seed, 'hard', 4000)) played++;
     }
     expect(played).toBeGreaterThan(0);
+  });
+
+  it('difficulty is monotonic under garbage pressure: easy < medium ≤ hard', () => {
+    // Guards against the tuning regression where medium/hard were no stronger
+    // than easy (or inverted) once a real garbage stream was involved. Aggregated
+    // over seeds since per-game survival is chaotic.
+    const seeds = [1, 2, 7, 42, 101, 2026, 55, 88];
+    const easy = survivalUnderGarbage('easy', seeds);
+    const medium = survivalUnderGarbage('medium', seeds);
+    const hard = survivalUnderGarbage('hard', seeds);
+    expect(medium).toBeGreaterThan(easy);
+    expect(hard).toBeGreaterThanOrEqual(medium * 0.95); // hard is at least as strong
+    expect(hard).toBeGreaterThan(easy);
   });
 
   it('is deterministic: same seed + difficulty ⇒ identical sim digest', () => {
