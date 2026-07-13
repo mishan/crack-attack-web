@@ -254,11 +254,12 @@ function bootSolo(
   onlineBtn.onclick = onPlayOnline;
   document.body.appendChild(onlineBtn);
 
-  // Mode switch into a local vs-AI match (two visible boards).
+  // Mode switch into a local vs-AI match (two visible boards). Stacked directly
+  // below "Play online" on the far right; the audio controls live at right:120px,
+  // so the right:12px column stays clear of them.
   const aiBtn = document.createElement('button');
   aiBtn.textContent = 'Play vs AI';
-  aiBtn.style.cssText =
-    'position:fixed;top:12px;right:120px;z-index:5;padding:6px 12px;opacity:.85';
+  aiBtn.style.cssText = 'position:fixed;top:52px;right:12px;z-index:5;padding:6px 12px;opacity:.85';
   aiBtn.onclick = onPlayAi;
   document.body.appendChild(aiBtn);
 
