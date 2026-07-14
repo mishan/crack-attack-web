@@ -77,6 +77,30 @@ export function bootAiMatch(
   let ai = new AiController(difficulty);
   crossWire();
 
+  // --- Replay capture: the human's per-tick inputs (sparse — only nonzero
+  // commands), in the replay-check ActionEvent shape. The AI side needs no
+  // recording: it regenerates deterministically from (seed, difficulty).
+  let recTicks = 0;
+  let recActions: { tick: number; command: number }[] = [];
+
+  const saveReplay = (): void => {
+    const replay = {
+      kind: 'crack-attack-vs-ai-replay',
+      version: 1,
+      seed,
+      difficulty,
+      ticks: recTicks,
+      actions: recActions,
+    };
+    const blob = new Blob([JSON.stringify(replay)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `replay-vs-${difficulty}-${seed}.json`;
+    link.click();
+    URL.revokeObjectURL(url);
+  };
+
   const boards = [makeBoard(humanSim, 'YOU', 0), makeBoard(aiSim, `CPU · ${difficulty}`, 1)] as [
     Board,
     Board,
@@ -159,6 +183,8 @@ export function bootAiMatch(
     aiSim = new GameSim(seed);
     ai = new AiController(difficulty);
     crossWire();
+    recTicks = 0;
+    recActions = [];
     clock.reset();
     input.clear();
     resetBoard(boards[0], humanSim);
@@ -190,6 +216,16 @@ export function bootAiMatch(
     'position:fixed;top:12px;right:12px;z-index:7;padding:6px 12px;opacity:.85';
   exitBtn.onclick = onExit;
   document.body.appendChild(exitBtn);
+
+  // Appears once the match ends: download the game as a replay JSON (your
+  // inputs + the seed; the AI regenerates deterministically). Feed it to
+  // tools/replay-analyze to diff your play against the planner's.
+  const saveBtn = document.createElement('button');
+  saveBtn.textContent = 'Save replay';
+  saveBtn.style.cssText =
+    'position:fixed;top:12px;right:120px;z-index:7;padding:6px 12px;opacity:.85;display:none';
+  saveBtn.onclick = saveReplay;
+  document.body.appendChild(saveBtn);
 
   const onKeyDown = (e: KeyboardEvent): void => {
     if (e.code === 'KeyR') {
@@ -239,7 +275,10 @@ export function bootAiMatch(
           gateTicks++;
           continue;
         }
-        humanSim.step(input.actionState());
+        const act = input.actionState();
+        recTicks++;
+        if (act.state !== 0) recActions.push({ tick: recTicks, command: act.state });
+        humanSim.step(act);
         aiSim.step(ai.decide(aiSim));
         stepped++;
         metaTicks++;
@@ -267,6 +306,7 @@ export function bootAiMatch(
       if (outcome === 'win') audio.playYouWin();
       else audio.playGameOver();
     }
+    saveBtn.style.display = outcome ? '' : 'none';
 
     const dtTicks = Math.min(MAX_SIGN_DT_TICKS, (nowMs - lastMs) / MS_PER_TICK);
     lastMs = nowMs;
@@ -338,6 +378,7 @@ export function bootAiMatch(
       globalThis.removeEventListener('blur', onBlur);
       touch?.remove();
       exitBtn.remove();
+      saveBtn.remove();
       overlay.dispose();
       for (const b of boards) {
         b.loseBar.dispose();

@@ -1,0 +1,19 @@
+{
+  "name": "@crack-attack/replay-analyze",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Analyze a saved human-vs-AI replay: re-run it deterministically and diff the human's play against the AI planner's recommendations — fire conversion, missed opportunities, danger time, and a fire timeline.",
+  "license": "GPL-2.0-or-later",
+  "type": "module",
+  "main": "./dist/index.js",
+  "bin": {
+    "replay-analyze": "./dist/cli.js"
+  },
+  "scripts": {
+    "build": "tsc -b",
+    "clean": "rm -rf dist tsconfig.tsbuildinfo"
+  },
+  "dependencies": {
+    "@crack-attack/core": "workspace:*"
+  }
+}

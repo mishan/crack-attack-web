@@ -7,6 +7,7 @@
     { "path": "./packages/client" },
     { "path": "./tools/replay-check" },
     { "path": "./tools/obj2gltf" },
-    { "path": "./tools/ai-arena" }
+    { "path": "./tools/ai-arena" },
+    { "path": "./tools/replay-analyze" }
   ]
 }

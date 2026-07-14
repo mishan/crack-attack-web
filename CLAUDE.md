@@ -37,8 +37,10 @@ packages/
   client/    # Three.js renderer, input, HUD, audio (Vite app) — WIP
   server/    # lobby + lockstep relay (Node, ws) — WIP
 tools/
-  replay-check/  # golden-master harness: core vs C++ per-tick digests
-  obj2gltf/      # one-time Wavefront OBJ (+MTL) -> glTF 2.0 asset conversion
+  replay-check/    # golden-master harness: core vs C++ per-tick digests
+  obj2gltf/        # one-time Wavefront OBJ (+MTL) -> glTF 2.0 asset conversion
+  ai-arena/        # headless AI-vs-AI match runner (the AI's fitness function)
+  replay-analyze/  # analyze saved human-vs-AI replays (planner's-eye stats)
 crack-attack/    # upstream C++ reference source — local only, gitignored (port from it)
 ```
 
@@ -441,6 +443,30 @@ just use `pnpm` directly.
       (28-2; was a degenerate 20-0), and medium out-attacks the old digger 3×
       (0.26 vs 0.09 cells/s), beating it 18-12. Next candidates: easy-tier
       calibration vs new players, best-of-N arena mode.
+- [x] **Idle fix + replay capture/analysis landed**. Diagnosis first: the
+      "indecision" players see is *standing still* (220 three-second idle
+      episodes per 8 hard-vs-hard games; cursor pathing was fine at 17%
+      excess walk) — the strategic tier idled whenever no fire/setup/
+      undermine/build-gain existed. Fix: `findFlatten` (the dig-into-gaps
+      churn) is now the strategic tier's last fallback, in danger (digging
+      drops blocks — it lowers the stack) and when banking finds nothing;
+      `hard.flatten: true`. Measured: beats the idling hard 39-20-1 over 60
+      seeds, +73% swap activity, idles −26% (the rest are dense boards with
+      no legal dig); ladder holds (hard > medium 80%; medium re-sweeps easy
+      30-0 — driven by easy's passivity, and easy stays the beginner floor
+      by design). A `garbageDangerCells` knob (survival margin widens as
+      dead-weight garbage accumulates — the user's idea, worth testing)
+      measured neutral-to-negative (the defensive branches already act on
+      garbage in every mode) → defaults 0, kept for experiments. **Replay
+      capture**: the vs-AI screen saves `(seed, difficulty, ticks, sparse
+      human inputs)` as JSON at game end ("Save replay"; the AI seat
+      regenerates deterministically). **`tools/replay-analyze`**: reconstructs
+      both boards bit-exactly (same wiring/step order as `aiMatch`) and
+      reports each seat through the planner's own evaluator — swaps/tempo,
+      garbage throughput, chain/combo fires with bests, danger time, and the
+      sampled "worth-firing swap existed" opportunity rate — plus a
+      `--timeline` of every fire. The planner exports now ship from the core
+      barrel (`aiPlanner.js` in `index.ts`) for exactly this kind of tooling.
 - [ ] Phase 6 stretch (X-mode, replays, WebRTC, binary codec if
       measurements demand it)
 
