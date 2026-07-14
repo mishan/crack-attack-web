@@ -58,8 +58,11 @@ export function tuningFromJson(value: unknown): AiTuning {
         `unknown tuning key "${key}" (valid: ${Object.keys(TUNING_FIELDS).join(', ')})`,
       );
     }
-    if (typeof v !== expected || (expected === 'number' && !Number.isFinite(v))) {
+    if (typeof v !== expected) {
       throw new Error(`tuning key "${key}" must be a ${expected} (got ${JSON.stringify(v)})`);
+    }
+    if (typeof v === 'number' && !Number.isFinite(v)) {
+      throw new Error(`tuning key "${key}" must be a finite number (got ${JSON.stringify(v)})`);
     }
     tuning[key] = v;
   }

@@ -9,7 +9,8 @@
  * A side spec is a difficulty preset (`easy`/`medium`/`hard`, default
  * `hard` vs `medium`) or a path to a JSON tuning file (overrides over a
  * `base` preset — see config.ts). Seeds run S..S+N-1 (defaults 1..20), so any
- * series is reproducible by naming the same range. Exit code 0.
+ * series is reproducible by naming the same range. Exit code 0 on success,
+ * 2 on a usage/IO error (bad flag values, unreadable or invalid tuning file).
  *
  * Example tuning experiment:
  *   ai-arena --a candidate.json --b hard --seeds 50

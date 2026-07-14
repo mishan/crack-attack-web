@@ -32,7 +32,13 @@ import {
 import { GF_GRAY, GF_NORMAL } from './flavors.js';
 import type { Rng } from './rng.js';
 
-export type AiDifficulty = 'easy' | 'medium' | 'hard';
+/**
+ * Difficulty of the gridless, timer-driven `ComputerPlayer` (this module) —
+ * deliberately named apart from `AiDifficultyLevel`, which selects tiers of
+ * the grid-playing `AiController` (the visible opponent players actually
+ * face). The two AI flavours share nothing but the tier names.
+ */
+export type ComputerDifficulty = 'easy' | 'medium' | 'hard';
 
 /** One garbage block to drop on the human's board (as `sendGarbage`). */
 export interface GarbageSend {
@@ -48,7 +54,7 @@ interface QueueElement {
 }
 
 /** Per-difficulty tuning: attack cadence multiplier and queue capacity. */
-const DIFFICULTY: Record<AiDifficulty, { baseMultiplier: number; lossHeight: number }> = {
+const DIFFICULTY: Record<ComputerDifficulty, { baseMultiplier: number; lossHeight: number }> = {
   // baseSteps() = GC_STEPS_PER_SECOND * multiplier (ComputerPlayerAI.cxx).
   easy: { baseMultiplier: 15, lossHeight: 4 },
   medium: { baseMultiplier: 10, lossHeight: 10 },
@@ -128,7 +134,7 @@ export class ComputerPlayer {
   private impactFlag = false;
 
   constructor(
-    readonly difficulty: AiDifficulty,
+    readonly difficulty: ComputerDifficulty,
     private readonly rng: Rng,
     startTick = 0,
   ) {
