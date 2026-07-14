@@ -46,8 +46,32 @@ import { CC_MOVE_MASK, CC_SWAP, CC_ADVANCE } from '@crack-attack/core';
  * `spectators` roster pushes, `room_closed`, and watcher names in
  * `RoomSummary`. A spectator is a third sim pair fed both players' input
  * streams; nothing new crosses the wire per tick.
+ *
+ * v4: AI opponents — a room may seat a deterministic bot instead of a second
+ * human (`create_room.aiOpponent`). The bot's inputs never cross the wire:
+ * every client and spectator computes them locally by running an `AiController`
+ * over the (lockstep-identical) AI sim, so `match_start`/`spectate_start` carry
+ * only the bot's `aiOpponent` descriptor (difficulty + seat index) — the AI sim
+ * shares the existing match seed and the controller draws no RNG, so nothing
+ * else is needed for every machine to reproduce identical moves.
  */
-export const PROTOCOL_VERSION = 3;
+export const PROTOCOL_VERSION = 4;
+
+/** AI opponent difficulty levels (mirrors core's `AiController`). */
+export const AI_DIFFICULTIES = ['easy', 'medium', 'hard'] as const;
+export type AiDifficulty = (typeof AI_DIFFICULTIES)[number];
+
+/**
+ * Describes the bot seat in an AI match: which difficulty it plays and which
+ * player index it occupies. Present on `match_start`/`spectate_start` so every
+ * recipient builds the same controller for the same seat. The AI sim uses the
+ * match seed like the human's, and the controller is RNG-free, so this fully
+ * determines its play.
+ */
+export interface AiOpponentInfo {
+  difficulty: AiDifficulty;
+  index: number;
+}
 
 /**
  * How often (in ticks) each client submits state digests. 32 is a nod to the
@@ -126,6 +150,11 @@ export interface HelloMessage {
 /** Ask the server to create a room; it replies `room_created`. */
 export interface CreateRoomMessage {
   type: 'create_room';
+  /**
+   * If set, the room is seated with a deterministic AI bot of this difficulty
+   * instead of waiting for a second human — a single ready starts the match.
+   */
+  aiOpponent?: { difficulty: AiDifficulty };
 }
 
 /** Join an existing room by code; the server replies `room_joined` or `error`. */
@@ -278,6 +307,12 @@ export interface MatchStartMessage {
   /** Authoritative local-input scheduling delay for this match, in ticks. */
   inputDelay: number;
   players: [string, string];
+  /**
+   * Present iff the opponent is a bot: every client runs the same
+   * {@link AiOpponentInfo} controller locally over the AI seat's sim, so the
+   * bot's inputs are reproduced identically without ever crossing the wire.
+   */
+  aiOpponent?: AiOpponentInfo;
 }
 
 /** A relayed `inputs` batch from the peer at `playerIndex`. */
@@ -310,6 +345,13 @@ export interface SpectateStartMessage {
   inputDelay: number;
   players: [string, string];
   frames: [number[], number[]];
+  /**
+   * Present iff a seat is a bot (see {@link MatchStartMessage.aiOpponent}). The
+   * bot's stream is absent from `frames` (it never crosses the wire); the
+   * spectator computes it locally with the same controller, so it sees the
+   * identical AI moves the players do.
+   */
+  aiOpponent?: AiOpponentInfo;
 }
 
 /** The room's watcher roster changed (sent to players and spectators). */

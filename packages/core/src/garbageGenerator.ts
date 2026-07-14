@@ -105,6 +105,21 @@ export class GarbageGenerator {
     return this.waiting_count;
   }
 
+  /**
+   * Inspection: total garbage cells in pending drops whose alarm falls within
+   * `window` ticks of `now` (alarms already past count too — those retry every
+   * tick until the board has room). Pure read of lockstep-deterministic state;
+   * the AI uses it to time its triggers around incoming garbage.
+   */
+  pendingCellsWithin(now: number, window: number): number {
+    let cells = 0;
+    for (let n = 0; n < GC_GARBAGE_QUEUE_SIZE; n++) {
+      const e = this.garbage_queue[n]!;
+      if (e.active && e.alarm < now + window) cells += e.height * e.width;
+    }
+    return cells;
+  }
+
   /** Feed the drop queue into the sim digest (digest.ts). Pure. */
   hashState(h: StateHasher): void {
     h.add(this.waiting_count);

@@ -25,4 +25,6 @@ export * from './creep.js';
 export * from './signs.js';
 export * from './sound.js';
 export * from './score.js';
+export * from './computerPlayer.js';
+export * from './aiController.js';
 export * from './gameSim.js';

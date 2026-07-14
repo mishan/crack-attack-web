@@ -13,10 +13,11 @@
  * Everything deterministic lives in the session; this file is DOM/WebGL glue.
  */
 
-import { GameSim, GC_STEPS_PER_SECOND } from '@crack-attack/core';
+import { AiController, GameSim, GC_STEPS_PER_SECOND } from '@crack-attack/core';
 import {
   DEFAULT_RECONNECT_GRACE_MS,
   PROTOCOL_VERSION,
+  type AiOpponentInfo,
   type MatchResumeMessage,
   type MatchStartMessage,
   type RoomSummary,
@@ -45,10 +46,16 @@ import {
 import { Spring } from './view/spring.js';
 import { Celebration } from './view/celebration.js';
 import { ViewInterpolator } from './view/viewInterpolator.js';
-import { LockstepSession } from './net/lockstep.js';
+import { LockstepSession, type AiSeat } from './net/lockstep.js';
 import { NetClient } from './net/session.js';
 import { SpectatorSession } from './net/spectator.js';
+import { pickAiDifficulty } from './render/aiDifficultyPicker.js';
 import type { AudioManager } from './audio/audioManager.js';
+
+/** Build the local bot seat from a match's {@link AiOpponentInfo} descriptor. */
+function makeAiSeat(info: AiOpponentInfo | undefined): AiSeat | undefined {
+  return info ? { controller: new AiController(info.difficulty), index: info.index } : undefined;
+}
 
 const MS_PER_TICK = 1000 / GC_STEPS_PER_SECOND;
 const MAX_SIGN_DT_TICKS = 10;
@@ -104,8 +111,11 @@ export function bootNetplay(
     <label>Name <input id="net-name" maxlength="32" style="width:100%"></label>
     <div style="display:flex;gap:6px">
       <button id="net-create" style="flex:1">Create room</button>
+      <button id="net-create-ai" style="flex:1">vs AI</button>
+    </div>
+    <div style="display:flex;gap:6px">
       <input id="net-code" placeholder="code" maxlength="5"
-             style="width:5.5em;text-transform:uppercase">
+             style="flex:1;text-transform:uppercase">
       <button id="net-join">Join</button>
     </div>
     <div id="net-rooms" style="display:flex;flex-direction:column;gap:4px"></div>
@@ -123,6 +133,7 @@ export function bootNetplay(
   const selfEl = $<HTMLDivElement>('net-self');
   const nameInput = $<HTMLInputElement>('net-name');
   const createBtn = $<HTMLButtonElement>('net-create');
+  const createAiBtn = $<HTMLButtonElement>('net-create-ai');
   const codeInput = $<HTMLInputElement>('net-code');
   const joinBtn = $<HTMLButtonElement>('net-join');
   const roomsEl = $<HTMLDivElement>('net-rooms');
@@ -183,6 +194,8 @@ export function bootNetplay(
   let names: [string, string] = ['', ''];
   let localIndex = 0;
   let roomCode = '';
+  /** True when the room we just created seats a bot (so a single Ready starts it). */
+  let createdVsAi = false;
   let resultSent = false;
   let graceMs = DEFAULT_RECONNECT_GRACE_MS;
   let reconnectUntil = 0;
@@ -315,8 +328,15 @@ export function bootNetplay(
       case 'room_created':
         phase = 'room';
         roomCode = msg.code;
-        readyBtn.hidden = true;
-        setStatus(`room ${msg.code} — share this code or wait for a lobby join…`);
+        if (createdVsAi) {
+          // A vs-AI room is already full (human + bot): Ready starts it now.
+          readyBtn.hidden = false;
+          readyBtn.disabled = false;
+          setStatus(`room ${msg.code} — vs AI. Press Ready to start.`);
+        } else {
+          readyBtn.hidden = true;
+          setStatus(`room ${msg.code} — share this code or wait for a lobby join…`);
+        }
         break;
       case 'room_joined':
         phase = 'room';
@@ -453,7 +473,17 @@ export function bootNetplay(
     setStatus('ready — waiting for the opponent…');
   };
   readyBtn.onclick = sendReady;
-  createBtn.onclick = (): void => net?.send({ type: 'create_room' });
+  createBtn.onclick = (): void => {
+    createdVsAi = false;
+    net?.send({ type: 'create_room' });
+  };
+  createAiBtn.onclick = (): void => {
+    void pickAiDifficulty().then((difficulty) => {
+      if (!difficulty) return;
+      createdVsAi = true;
+      net?.send({ type: 'create_room', aiOpponent: { difficulty } });
+    });
+  };
   joinBtn.onclick = (): void =>
     net?.send({ type: 'join_room', code: codeInput.value.trim().toUpperCase() });
 
@@ -606,12 +636,26 @@ export function bootNetplay(
   }
 
   function startMatch(msg: MatchStartMessage): void {
-    enterMatch(new LockstepSession(msg.seed, msg.playerIndex, msg.inputDelay), msg.players, false);
+    // A bot opponent is played locally by the same deterministic controller on
+    // every client; its inputs never arrive over the wire.
+    enterMatch(
+      new LockstepSession(
+        msg.seed,
+        msg.playerIndex,
+        msg.inputDelay,
+        undefined,
+        makeAiSeat(msg.aiOpponent),
+      ),
+      msg.players,
+      false,
+    );
   }
 
   /** Enter (or re-enter, on a rematch) the watcher view for a live game. */
   function startSpectating(msg: SpectateStartMessage): void {
-    spectator = new SpectatorSession(msg.seed, msg.frames);
+    // The bot's stream is absent from the ledgers; the watcher computes it with
+    // the same controller, so it sees the identical AI moves the players do.
+    spectator = new SpectatorSession(msg.seed, msg.frames, makeAiSeat(msg.aiOpponent));
     session = null;
     names = msg.players;
     phase = 'spectating';

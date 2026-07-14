@@ -301,7 +301,147 @@ just use `pnpm` directly.
       watch view titles the boards "A vs B", catches up in chunks, and stays
       seated across rematches (Esc leaves). e2e: a mid-match watcher catches up
       and lands bit-identical sims and the same outcome as the players.
-- [ ] Phase 3 AI, Phase 6 stretch (X-mode, replays, WebRTC, binary codec if
+- [x] **Phase 3 AI landed** (two flavours). The reference's gridless
+      `ComputerPlayer` (timed garbage machine) is ported faithfully in
+      `core/computerPlayer.ts` (+ `GarbageQueue`, Easy/Medium/Hard cadences and
+      loss heights) and kept for parity, but the _visible_ opponent is a real
+      grid-playing bot: `core/aiController.ts` `AiController.decide(sim)` reads
+      the board + swap cursor each tick and returns the next `ActionState` — a
+      pure, deterministic function of sim state plus its own tiny plan/timer (no
+      clocks, no RNG). It picks the nearest single swap that completes a 3+ run
+      (re-evaluated every action tick so the rising board never leaves it
+      chasing a stale target), walks the cursor there pulsing presses (the
+      Swapper debounces held keys), and swaps; medium also "digs" blocks into
+      gaps to churn up matches. **Hard is strategic**: rather than greedily
+      clearing every 3 (a plain 3-match sends _no_ garbage), it look-ahead-plans
+      via a pure cascade evaluator (`core/aiPlanner.ts` — apply a candidate swap
+      to a lightweight board copy, settle gravity, remove 3+ runs, repeat;
+      counts chain depth ≈ multiplier, cleared ≈ magnitude, garbage shattered),
+      and _banks_ small clears while safe, firing only chains / 4+ combos /
+      garbage shatters (what actually attack), dropping to survival clears when
+      the stack tops out. Measured: easy is the survival floor (fixing an
+      earlier inversion), and attack output escalates easy<medium<hard (hard
+      throws far more garbage). All tiers stay a pure, deterministic function of
+      sim state (no clocks, no RNG), ~29µs/decide.
+      **Solo vs AI** (`client/aiMatch.ts`): two _visible_ real boards — you left,
+      the bot's `GameSim` right — cross-wired through the garbage seam exactly
+      like netplay, driven by `AiController.decide`; full view stack + countdown + celebration + audio, entered via a difficulty picker from the solo
+      screen. **Netplay vs AI** (protocol v4, deterministic _client-side seat_):
+      a room may seat a bot instead of a second human (`create_room.aiOpponent`);
+      the bot's inputs never cross the wire — every client and spectator
+      regenerates them locally by running the same `AiController` over the
+      lockstep-identical AI sim, so `match_start`/`spectate_start` carry only an
+      `aiOpponent` descriptor (difficulty + seat index; the AI sim reuses the
+      match seed and the controller is RNG-free). `LockstepSession`/
+      `SpectatorSession` grow an optional `AiSeat`: they synthesize the bot's
+      frame each tick just-in-time (never stalling on it, no digests to compare),
+      and the relay hosts the "1 human + 1 bot" room (single-ready start, human
+      result accepted directly, human drop tears the room down — no grace/resume
+      for bots, not persisted to W-L). A "vs AI" lobby button opens the picker;
+      spectators see the identical AI moves. Tested: controller play/determinism/
+      reset, a spectator reproducing both boards _and_ the AI from only the human
+      stream (bit-identical digests), and the full relay AI-room flow.
+- [x] **AI-vs-AI arena landed** (`tools/ai-arena`): a headless, deterministic
+      match runner for measuring AI changes instead of eyeballing them — two
+      seeded `GameSim`s (identical boards; seats near- but not exactly
+      symmetric since A steps first and enqueues draw the receiver's RNG —
+      `--both` replays seeds with seats swapped), garbage
+      ports cross-wired as in netplay, each driven by its own `AiController`;
+      `(tuningA, tuningB, seed)` fully determines a result (same-tick double
+      loss = draw; tick cap = distinct `timeout`). Every behavioural knob is now
+      the exported `AiTuning` struct (`core/aiController.ts`; the named tiers
+      are presets via `aiTuningFor`, behaviour unchanged), and the CLI pits
+      presets or JSON override files over reproducible seed ranges
+      (`node tools/ai-arena/dist/cli.js --a cand.json --b hard --seeds 50`),
+      reporting W/L/draw, avg length, and garbage throughput. Original
+      baselines (seeds 1–20): medium sweeps easy 20-0; hard beat medium only
+      11-9 and dropped 6/20 to easy (fixed by the defensive planning below —
+      the `dangerMargin` 3→5 "fix" those baselines suggested is now strictly
+      worse, 9-19 against current hard: the tension was a symptom of missing
+      defense, not a real trade).
+- [x] **Defensive garbage planning landed** (hard tier): the bot now _remodels
+      the board to shatter garbage_ instead of only taking one-swap shatters.
+      Probing showed the fire branch alone left slabs sitting (garbage usually
+      perches on the tallest column, where no row has 3 of a colour), so
+      `core/aiPlanner.ts` gains two pure planners.
+      `planShatterSetup(board, maxCost)`: the cheapest sequence of _lateral_
+      block↔block swaps (gravity-neutral — column occupancy never changes, so
+      plans are stable and re-planning each action tick converges; each executed
+      swap reduces cost by exactly 1) assembling a 3-run in a garbage-adjacent
+      window, in either orientation — horizontal (three same-colour sources shuttled
+      along one row segment; minimal-cost subset guarantees no matching-blocks no-op
+      swap) or vertical (each row laterally supplies its _nearest_ matching
+      block — far more often available). The run-completing swap is left to
+      the existing fire branch (its cascade shows `garbageShattered > 0`).
+      `planUndermine`: when no setup reaches the slab, dig its load-bearing
+      support blocks (contiguous blocks capped by garbage) sideways into
+      fall-through gaps so the slab descends onto the wider stack, where
+      setups exist; strictly decreasing potential energy ⇒ always terminates.
+      Strategic priority: fire → danger-clear → shatter setup → undermine →
+      bank. New `AiTuning` knobs: `shatterSetupMaxCost` (default 10; 0
+      disables), `undermine`. Measured (arena): new hard beats old hard 19-1;
+      vs medium 11-9 → 16-4 (18-12 on fresh seeds 21–50); vs easy 14-6 → 18-2
+      (27-3 fresh) — while _increasing_ attack throughput (shattered slabs
+      feed combos). Tests: window/orientation unit tests incl. plan-execution
+      convergence to a shattering swap and progress guarantees.
+- [x] **Offensive chain building landed** (hard tier): the bot now _builds_
+      chains instead of merely noticing them. `planChainSetup`
+      (`core/aiPlanner.ts`): a bounded two-ply search for one gravity-neutral
+      block↔block **setup swap** that fires nothing itself (a swap that clears
+      is a clear, owned by the fire branch) but _enables_ a worth-firing
+      cascade one trigger swap later, scored by `attackValue` + shatter bonus.
+      A static `makesRun3` prefilter — exact for a cascade's first round on a
+      settled board — gates the full cascade evaluation, so only genuine
+      trigger candidates (plus block-into-gap drops, which trigger via
+      gravity) pay for `evaluateSwap`; after JIT warm-up decide() worst-cases
+      ~400µs, avg ~32µs. The enabled trigger meets the fire branch's own
+      thresholds, so it is guaranteed to be taken on a later action tick —
+      and re-planning then either fires or finds a _further_ enabler, so
+      multi-swap constructions emerge from repeated one-swap planning.
+      Priority: replaces generic clustering as the preferred bank move (safe
+      state only, after all defense). New `AiTuning` knob: `chainSetup`.
+      Measured (arena): beats chainSetup-off hard 14-6 (seeds 1–20); vs
+      medium 16-4 → 15-5 (seeds 1–20) and 18-12 → **24-6** on fresh seeds
+      21–50 (68% → 78% combined); vs easy 18-2 → 19-1 with kills ~25% faster
+      (86s → 66s avg); attack throughput roughly doubled (0.17 → 0.30-0.40
+      cells/s).
+- [x] **Fire-threshold sweeps + trigger timing measured** (negative results,
+      documented so they aren't retried): `fireMinChain` 3 is a wash vs 2
+      (14-15-1) and `fireMinRun` 5 clearly loses to 4 (8-22) — 2-chains and
+      4-combos are worth firing immediately; tempo is king. Trigger timing
+      (hold a ready non-shattering fire while an opponent slab is about to
+      land, then fire _through_ it) is implemented behind new `AiTuning` knobs
+      — `holdFireTicks`, `holdFireMinCells`, fed by
+      `GarbageGenerator.pendingCellsWithin` (own-queue inspection; lockstep-
+      safe, `AiSimView` grew `clock` + `garbageGenerator`) — but measured
+      neutral-to-negative head-to-head (16-19-25 combined; 40-tick and
+      12-cell variants within noise), so it defaults **off**
+      (`holdFireTicks: 0`). Why it fails: slabs land on _top_ of the stack
+      while cascades match deep inside it, so a held fire rarely reaches the
+      fresh slab, and holding costs tempo. The knobs stay for future timing
+      experiments.
+- [x] **Multi-enabler lookahead + smooth tier ladder landed**. Probing showed
+      only 13% of bank positions have a single chain enabler, and 22% of the
+      rest have a _two-setup_ construction — so `planChainSetup` gains a
+      second level (`AiTuning.chainLookahead`): when no single enabler
+      exists, scan setup swaps whose result contains one (setup → setup →
+      trigger; the monotone ladder still guarantees progress). Costs ~0 in
+      play because chain planning is board-pure and now memoized by
+      `hashPlanBoard` in the controller (pure optimization — decisions
+      identical, lockstep safe; the memo also un-did a 5× decide() slowdown
+      the deeper search initially caused). Measured _neutral on win rate_
+      (29-28-3 vs lookahead-off; 23-7 vs 24-6 against medium) with a mild
+      tempo gain (~8% faster kills, +11% throughput) — kept ON for tempo and
+      because the bot visibly builds instead of shuffling in quiet stretches.
+      **Medium is now strategic-lite** (fires the chains/combos/shatters it
+      sees, survival-clears in danger, undermines garbage towers; no shatter
+      setups, no chain building; `strategic: false` restores the old digger
+      for experiments): arena-tuned over four candidate presets to land both
+      ladder gaps — hard > medium 77% (46-14, seeds 1–60), medium > easy 93%
+      (28-2; was a degenerate 20-0), and medium out-attacks the old digger 3×
+      (0.26 vs 0.09 cells/s), beating it 18-12. Next candidates: easy-tier
+      calibration vs new players, best-of-N arena mode.
+- [ ] Phase 6 stretch (X-mode, replays, WebRTC, binary codec if
       measurements demand it)
 
 See `BROWSER_PORT_PLAN.md` for the full phase breakdown and suggested order of work.

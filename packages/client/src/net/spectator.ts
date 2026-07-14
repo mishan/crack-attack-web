@@ -12,7 +12,7 @@
 
 import { ActionState, GameSim } from '@crack-attack/core';
 import { ACTION_MASK } from '@crack-attack/protocol';
-import type { Outcome } from './lockstep.js';
+import type { AiSeat, Outcome } from './lockstep.js';
 
 export class SpectatorSession {
   /** Both players' sims, indexed by player index. */
@@ -25,12 +25,20 @@ export class SpectatorSession {
 
   private readonly scratchActions = new ActionState(0);
 
+  /**
+   * If a seat is a bot: its controller + index. Its frames aren't relayed; the
+   * spectator generates them locally from the same (deterministic) AI sim, so
+   * it sees the identical AI moves the players do.
+   */
+  private readonly aiOpponent: AiSeat | null;
+
   /** Set once a sim has lost; the session refuses to step further. */
   outcome: Outcome | null = null;
 
-  constructor(seed: number, histories: [number[], number[]]) {
+  constructor(seed: number, histories: [number[], number[]], aiOpponent?: AiSeat) {
     this.sims = [new GameSim(seed), new GameSim(seed)];
     this.frames = [[...histories[0]], [...histories[1]]];
+    this.aiOpponent = aiOpponent ?? null;
 
     // Cross-wire the garbage ports exactly as the players do, so this sim
     // pair reproduces theirs tick for tick.
@@ -51,9 +59,15 @@ export class SpectatorSession {
     return this.ticks;
   }
 
-  /** How many ticks are fully buffered (both streams) beyond the current tick. */
+  /**
+   * How many ticks are fully buffered beyond the current tick. A bot stream is
+   * produced on demand, so it never gates: only the human stream is counted.
+   */
   get bufferedTicks(): number {
-    return Math.max(0, Math.min(this.frames[0]!.length, this.frames[1]!.length) - this.ticks);
+    const buffered = this.aiOpponent
+      ? this.frames[1 - this.aiOpponent.index]!.length
+      : Math.min(this.frames[0]!.length, this.frames[1]!.length);
+    return Math.max(0, buffered - this.ticks);
   }
 
   /** True when the next tick is blocked on either player's frames. */
@@ -85,6 +99,14 @@ export class SpectatorSession {
     let stepped = 0;
     while (stepped < maxSteps && this.outcome === null && this.bufferedTicks > 0) {
       const t = this.ticks;
+      // Synthesize the bot's frame for this tick from its own sim, before
+      // stepping — the same computation the players run, over an identical AI
+      // sim, so the spectator's boards match theirs tick for tick.
+      if (this.aiOpponent && this.frames[this.aiOpponent.index]!.length <= t) {
+        this.frames[this.aiOpponent.index]!.push(
+          this.aiOpponent.controller.decide(this.sims[this.aiOpponent.index]!).state,
+        );
+      }
       for (let i = 0; i < 2; i++) {
         this.scratchActions.state = this.frames[i]![t]!;
         this.sims[i]!.step(this.scratchActions);

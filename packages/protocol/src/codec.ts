@@ -23,6 +23,7 @@ import type {
 } from './messages.js';
 import {
   ACTION_MASK,
+  AI_DIFFICULTIES,
   MAX_INPUT_FRAMES_PER_MESSAGE,
   MAX_MATCH_FRAMES,
   MAX_PLAYER_NAME_LENGTH,
@@ -30,7 +31,7 @@ import {
   ROOM_CODE_LENGTH,
   SESSION_TOKEN_LENGTH,
 } from './messages.js';
-import type { PlayerRecord, RoomSummary } from './messages.js';
+import type { AiDifficulty, AiOpponentInfo, PlayerRecord, RoomSummary } from './messages.js';
 
 /** Thrown by the decode functions on any malformed or unknown message. */
 export class ProtocolError extends Error {
@@ -151,6 +152,21 @@ function sessionToken(m: Record<string, unknown>, field: string): string {
   const v = str(m, field);
   if (!isSessionToken(v)) throw new ProtocolError(`${field} is not a valid session token`);
   return v;
+}
+
+function aiDifficulty(m: Record<string, unknown>, field: string): AiDifficulty {
+  const v = str(m, field);
+  if (!(AI_DIFFICULTIES as readonly string[]).includes(v))
+    throw new ProtocolError(`${field} must be one of ${AI_DIFFICULTIES.join('|')}`);
+  return v as AiDifficulty;
+}
+
+/** The full bot descriptor (difficulty + seat index) on match_start/spectate_start. */
+function aiOpponentInfo(v: unknown): AiOpponentInfo {
+  if (typeof v !== 'object' || v === null || Array.isArray(v))
+    throw new ProtocolError('aiOpponent must be an object');
+  const r = v as Record<string, unknown>;
+  return { difficulty: aiDifficulty(r, 'difficulty'), index: playerIndex(r, 'index') };
 }
 
 function playerRecord(m: Record<string, unknown>, field: string): PlayerRecord {
@@ -279,7 +295,16 @@ function decodeAny(m: Record<string, unknown>): Message {
       } as const;
       return m['token'] === undefined ? base : { ...base, token: sessionToken(m, 'token') };
     }
-    case 'create_room':
+    case 'create_room': {
+      const ai = m['aiOpponent'];
+      if (ai === undefined) return { type };
+      if (typeof ai !== 'object' || ai === null || Array.isArray(ai))
+        throw new ProtocolError('aiOpponent must be an object');
+      return {
+        type,
+        aiOpponent: { difficulty: aiDifficulty(ai as Record<string, unknown>, 'difficulty') },
+      };
+    }
     case 'ready':
     case 'concede':
     case 'leave_room':
@@ -348,6 +373,7 @@ function decodeAny(m: Record<string, unknown>): Message {
         inputDelay: uint32(m, 'inputDelay'),
         players: namePair(m, 'players'),
         frames: [matchFrames(frames[0], 'frames[0]'), matchFrames(frames[1], 'frames[1]')],
+        ...(m['aiOpponent'] === undefined ? {} : { aiOpponent: aiOpponentInfo(m['aiOpponent']) }),
       };
     }
     case 'spectators':
@@ -370,14 +396,18 @@ function decodeAny(m: Record<string, unknown>): Message {
     case 'peer_joined':
     case 'peer_left':
       return { type, name: playerName(m, 'name') };
-    case 'match_start':
-      return {
+    case 'match_start': {
+      const base = {
         type,
         seed: uint32(m, 'seed'),
         playerIndex: playerIndex(m, 'playerIndex'),
         inputDelay: uint32(m, 'inputDelay'),
         players: namePair(m, 'players'),
-      };
+      } as const;
+      return m['aiOpponent'] === undefined
+        ? base
+        : { ...base, aiOpponent: aiOpponentInfo(m['aiOpponent']) };
+    }
     case 'peer_inputs':
       return {
         type,

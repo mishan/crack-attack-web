@@ -1,9 +1,12 @@
 import { fileURLToPath } from 'node:url';
 import { defineConfig } from 'vite';
 
-// Resolve the core to its TypeScript source so `vite dev`/`build` don't require a
-// prior `tsc -b` of the core package (Vite compiles it inline).
+// Resolve the workspace packages to their TypeScript source so `vite dev`/`build`
+// don't require a prior `tsc -b`, and — critically — never pick up a *stale*
+// built `dist` (e.g. an old PROTOCOL_VERSION or codec that silently drops new
+// message fields). Vite compiles the source inline.
 const coreSrc = fileURLToPath(new URL('../core/src/index.ts', import.meta.url));
+const protocolSrc = fileURLToPath(new URL('../protocol/src/index.ts', import.meta.url));
 
 export default defineConfig({
   // The package directory is the Vite root (index.html lives here).
@@ -17,6 +20,7 @@ export default defineConfig({
   resolve: {
     alias: {
       '@crack-attack/core': coreSrc,
+      '@crack-attack/protocol': protocolSrc,
     },
   },
   build: {

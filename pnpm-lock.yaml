@@ -85,6 +85,12 @@ importers:
         specifier: ^8.18.1
         version: 8.18.1
 
+  tools/ai-arena:
+    dependencies:
+      '@crack-attack/core':
+        specifier: workspace:*
+        version: link:../../packages/core
+
   tools/obj2gltf: {}
 
   tools/replay-check:
