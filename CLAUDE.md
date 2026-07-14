@@ -341,6 +341,22 @@ just use `pnpm` directly.
       spectators see the identical AI moves. Tested: controller play/determinism/
       reset, a spectator reproducing both boards _and_ the AI from only the human
       stream (bit-identical digests), and the full relay AI-room flow.
+- [x] **AI-vs-AI arena landed** (`tools/ai-arena`): a headless, deterministic
+      match runner for measuring AI changes instead of eyeballing them — two
+      seeded `GameSim`s (identical boards, so sides are symmetric), garbage
+      ports cross-wired as in netplay, each driven by its own `AiController`;
+      `(tuningA, tuningB, seed)` fully determines a result (same-tick double
+      loss = draw; tick cap = distinct `timeout`). Every behavioural knob is now
+      the exported `AiTuning` struct (`core/aiController.ts`; the named tiers
+      are presets via `aiTuningFor`, behaviour unchanged), and the CLI pits
+      presets or JSON override files over reproducible seed ranges
+      (`node tools/ai-arena/dist/cli.js --a cand.json --b hard --seeds 50`),
+      reporting W/L/draw, avg length, and garbage throughput. Baselines (seeds
+      1–20): medium sweeps easy 20-0; hard beats medium only 11-9 (while
+      out-throwing it 4×) and drops 6/20 to easy — its banking lets its own
+      stack top out; raising `dangerMargin` 3→5 fixes hard-vs-easy (18-2) but
+      collapses hard-vs-medium (5-15). Next: defensive multi-swap shatter
+      planning and chain-building search, tuned against these baselines.
 - [ ] Phase 6 stretch (X-mode, replays, WebRTC, binary codec if
       measurements demand it)
 

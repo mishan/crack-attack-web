@@ -1,0 +1,19 @@
+{
+  "name": "@crack-attack/ai-arena",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Headless AI-vs-AI arena: pit two AiController tuning configs against each other over a batch of seeds and report wins, survival, and garbage throughput. The fitness function for tuning the bot.",
+  "license": "GPL-2.0-or-later",
+  "type": "module",
+  "main": "./dist/index.js",
+  "bin": {
+    "ai-arena": "./dist/cli.js"
+  },
+  "scripts": {
+    "build": "tsc -b",
+    "clean": "rm -rf dist tsconfig.tsbuildinfo"
+  },
+  "dependencies": {
+    "@crack-attack/core": "workspace:*"
+  }
+}

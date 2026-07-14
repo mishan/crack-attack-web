@@ -27,7 +27,13 @@ import { PLAN_GARBAGE, attackValue, canSwap, evaluateSwap, readPlanBoard } from 
 
 export type AiDifficultyLevel = 'easy' | 'medium' | 'hard';
 
-interface DifficultyTuning {
+/**
+ * Every behavioural knob the controller has, exposed so variants can be paired
+ * against each other in the AI-vs-AI arena (`tools/ai-arena`) and tuned by
+ * measurement. The named difficulty tiers are presets over this struct
+ * ({@link aiTuningFor}); the defaults reproduce their behaviour exactly.
+ */
+export interface AiTuning {
   /** Ticks the bot pauses after each swap (reaction pacing). */
   readonly cooldown: number;
   /** Whether it digs blocks into gaps when no immediate match exists. */
@@ -38,11 +44,37 @@ interface DifficultyTuning {
    * and firing chains / 4+ combos / garbage shatters, which are what actually
    * send garbage. Uses the {@link aiPlanner} cascade evaluator.
    */
-  readonly strategic?: boolean;
-  /** Strategic only: switch to survival (clear anything) at this margin below the
-   * safe height. Larger = defends earlier (safer, banks less). Default {@link DANGER_MARGIN}. */
-  readonly dangerMargin?: number;
+  readonly strategic: boolean;
+  /** Strategic only: switch to survival (clear anything) at this margin below
+   * the safe height. Larger = defends earlier (safer, banks less). */
+  readonly dangerMargin: number;
+  /** Strategic only: score weight per garbage cell a candidate's cascade shatters. */
+  readonly shatterWeight: number;
+  /** Strategic only: a cascade at least this deep is worth firing (2 = any chain). */
+  readonly fireMinChain: number;
+  /** Strategic only: a single run at least this long is worth firing (width garbage). */
+  readonly fireMinRun: number;
+  /** Build fallback: cluster-score weight of a vertical same-flavour neighbour. */
+  readonly clusterVertical: number;
+  /** Build fallback: cluster-score weight of a horizontal same-flavour neighbour. */
+  readonly clusterHorizontal: number;
 }
+
+/**
+ * The bot enters "survival" mode (clear anything to stay alive, stop banking)
+ * once the stack tops out within this margin of the safe height.
+ */
+const DANGER_MARGIN = 3;
+
+/** Knobs shared by every tier; the presets below override behaviour per tier. */
+const BASE_TUNING: Omit<AiTuning, 'cooldown' | 'flatten' | 'strategic'> = {
+  dangerMargin: DANGER_MARGIN,
+  shatterWeight: 3,
+  fireMinChain: 2,
+  fireMinRun: 4,
+  clusterVertical: 2,
+  clusterHorizontal: 1,
+};
 
 // Difficulty is behavioural, not just paced: reaction speed (cooldown) barely
 // affects survival — the bot is limited by how well it *finds/creates* matches,
@@ -53,17 +85,16 @@ interface DifficultyTuning {
 //            (and prefers garbage-shattering clears), so it keeps clearing under
 //            pressure. Measured monotonic easy < medium < hard, garbage or not.
 // Cooldown is kept only for *feel* (easy visibly calmer, hard snappier).
-const TUNING: Record<AiDifficultyLevel, DifficultyTuning> = {
-  easy: { cooldown: 20, flatten: false },
-  medium: { cooldown: 12, flatten: true },
-  hard: { cooldown: 8, flatten: false, strategic: true },
+const TUNING: Record<AiDifficultyLevel, AiTuning> = {
+  easy: { ...BASE_TUNING, cooldown: 20, flatten: false, strategic: false },
+  medium: { ...BASE_TUNING, cooldown: 12, flatten: true, strategic: false },
+  hard: { ...BASE_TUNING, cooldown: 8, flatten: false, strategic: true },
 };
 
-/**
- * The bot enters "survival" mode (clear anything to stay alive, stop banking)
- * once the stack tops out within this margin of the safe height.
- */
-const DANGER_MARGIN = 3;
+/** The tuning preset behind a named difficulty (a copy — safe to spread/override). */
+export function aiTuningFor(difficulty: AiDifficultyLevel): AiTuning {
+  return { ...TUNING[difficulty] };
+}
 
 /** What the controller needs from a sim: the grid and the swap cursor. */
 export interface AiSimView {
@@ -77,7 +108,7 @@ interface SwapPlan {
 }
 
 export class AiController {
-  private readonly tuning: DifficultyTuning;
+  private readonly tuning: AiTuning;
   /**
    * The Swapper debounces held keys (a move/swap only triggers on a *fresh*
    * press), so the bot alternates a press with a neutral "release" tick. This
@@ -87,8 +118,8 @@ export class AiController {
   /** Ticks to wait after a swap before acting again (difficulty pacing). */
   private cooldown = 0;
 
-  constructor(difficulty: AiDifficultyLevel) {
-    this.tuning = TUNING[difficulty];
+  constructor(difficulty: AiDifficultyLevel | AiTuning) {
+    this.tuning = typeof difficulty === 'string' ? TUNING[difficulty] : difficulty;
   }
 
   /** Reset to a clean state for a new game (mirrors the sim's gameStart). */
@@ -241,10 +272,11 @@ export class AiController {
       const g = flavorOf(cx, cy);
       if (g !== null && flavorMatch(g, flavor)) score += weight;
     };
-    if (y + 1 < GC_PLAY_HEIGHT) add(x, y + 1, 2);
-    if (y - 1 >= 1) add(x, y - 1, 2);
-    if (x + 1 < GC_PLAY_WIDTH) add(x + 1, y, 1);
-    if (x - 1 >= 0) add(x - 1, y, 1);
+    const { clusterVertical, clusterHorizontal } = this.tuning;
+    if (y + 1 < GC_PLAY_HEIGHT) add(x, y + 1, clusterVertical);
+    if (y - 1 >= 1) add(x, y - 1, clusterVertical);
+    if (x + 1 < GC_PLAY_WIDTH) add(x + 1, y, clusterHorizontal);
+    if (x - 1 >= 0) add(x - 1, y, clusterHorizontal);
     return score;
   }
 
@@ -281,9 +313,11 @@ export class AiController {
         const dist = Math.abs(x - cursorX) + Math.abs(gy - cursorY);
 
         const worthFiring =
-          cascade.chainDepth >= 2 || cascade.maxRound >= 4 || cascade.garbageShattered > 0;
+          cascade.chainDepth >= this.tuning.fireMinChain ||
+          cascade.maxRound >= this.tuning.fireMinRun ||
+          cascade.garbageShattered > 0;
         if (worthFiring) {
-          const score = attackValue(cascade) + cascade.garbageShattered * 3;
+          const score = attackValue(cascade) + cascade.garbageShattered * this.tuning.shatterWeight;
           // Highest value wins; the nearest *fire* candidate breaks ties (lands
           // before the creep shifts).
           if (score > bestFireScore || (score === bestFireScore && dist < bestFireDist)) {
@@ -300,8 +334,7 @@ export class AiController {
     }
 
     if (bestFire) return bestFire; // attack / defend — always fire a real payoff
-    const margin = this.tuning.dangerMargin ?? DANGER_MARGIN;
-    const danger = grid.top_effective_row >= GC_SAFE_HEIGHT - margin;
+    const danger = grid.top_effective_row >= GC_SAFE_HEIGHT - this.tuning.dangerMargin;
     if (danger) return bestClear; // survive: clear anything (may be null if nothing)
     // Safe and nothing worth firing: bank blocks — build toward a bigger combo.
     return this.findBuild(grid, cursorX, cursorY);
