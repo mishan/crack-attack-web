@@ -23,6 +23,8 @@ import { GC_PLAY_HEIGHT, GC_PLAY_WIDTH, GC_SAFE_HEIGHT } from './constants.js';
 import { GR_BLOCK, GR_EMPTY, GR_GARBAGE, type Grid } from './grid.js';
 import { flavorMatch } from './flavors.js';
 import { SS_SWAPPING, type Swapper } from './swapper.js';
+import type { Clock } from './clock.js';
+import type { GarbageGenerator } from './garbageGenerator.js';
 import {
   PLAN_GARBAGE,
   attackValue,
@@ -69,6 +71,17 @@ export interface AiTuning {
    * *enables* a chain/combo one trigger swap later ({@link planChainSetup})
    * over generic clustering. */
   readonly chainSetup: boolean;
+  /** Strategic only: **trigger timing** — hold a ready non-shattering fire when
+   * an opponent slab will land within this many ticks, so the cascade fires
+   * *through* the fresh slab (shattering it) instead of being spent just before
+   * it arrives. 0 disables holding — and 0 is the default: arena measurement
+   * found no edge (slabs land on *top* of the stack while cascades match deep
+   * inside it, so the held fire rarely reaches the fresh slab, and holding
+   * costs attack tempo). Kept as a knob for future timing experiments. */
+  readonly holdFireTicks: number;
+  /** Strategic only: only hold for incoming garbage of at least this many cells
+   * (a real slab, not splinters). */
+  readonly holdFireMinCells: number;
   /** Strategic only: a cascade at least this deep is worth firing (2 = any chain). */
   readonly fireMinChain: number;
   /** Strategic only: a single run at least this long is worth firing (width garbage). */
@@ -92,6 +105,8 @@ const BASE_TUNING: Omit<AiTuning, 'cooldown' | 'flatten' | 'strategic'> = {
   shatterSetupMaxCost: 10,
   undermine: true,
   chainSetup: true,
+  holdFireTicks: 0, // measured neutral-to-negative; see the AiTuning docs
+  holdFireMinCells: GC_PLAY_WIDTH,
   fireMinChain: 2,
   fireMinRun: 4,
   clusterVertical: 2,
@@ -118,10 +133,16 @@ export function aiTuningFor(difficulty: AiDifficultyLevel): AiTuning {
   return { ...TUNING[difficulty] };
 }
 
-/** What the controller needs from a sim: the grid and the swap cursor. */
+/**
+ * What the controller needs from a sim: the grid, the swap cursor, and — for
+ * trigger timing — the clock and the incoming-garbage queue. All lockstep-
+ * deterministic state of the AI's own sim, so netplay stays in sync.
+ */
 export interface AiSimView {
   readonly grid: Grid;
   readonly swapper: Swapper;
+  readonly clock: Clock;
+  readonly garbageGenerator: GarbageGenerator;
 }
 
 interface SwapPlan {
@@ -176,10 +197,19 @@ export class AiController {
     // The current nearest clearing swap (re-evaluated every action tick); if
     // none, a dig that shifts a block into a gap (harder AIs only) to flatten
     // the surface and open up new matches.
-    const target = this.tuning.strategic
-      ? this.planStrategic(grid, swapper.x, swapper.y)
-      : (this.findSwap(grid, swapper.x, swapper.y) ??
-        (this.tuning.flatten ? this.findFlatten(grid, swapper.x, swapper.y) : null));
+    let target: SwapPlan | null;
+    if (this.tuning.strategic) {
+      // Trigger timing input: is a real opponent slab about to land?
+      const holdFire =
+        this.tuning.holdFireTicks > 0 &&
+        sim.garbageGenerator.pendingCellsWithin(sim.clock.time_step, this.tuning.holdFireTicks) >=
+          this.tuning.holdFireMinCells;
+      target = this.planStrategic(grid, swapper.x, swapper.y, holdFire);
+    } else {
+      target =
+        this.findSwap(grid, swapper.x, swapper.y) ??
+        (this.tuning.flatten ? this.findFlatten(grid, swapper.x, swapper.y) : null);
+    }
     if (!target) return new ActionState(0); // nothing to do — idle
 
     // Walk the cursor toward it, one axis at a time, pulsing each press.
@@ -306,7 +336,9 @@ export class AiController {
    * The strategic tier. Instead of greedily clearing every 3, it evaluates each
    * candidate swap's full cascade ({@link aiPlanner}) and:
    *  - always fires a swap that sends garbage — a chain (chainDepth ≥ 2), a 4+
-   *    combo (a run ≥ 4), or a garbage shatter — picking the highest-value one;
+   *    combo (a run ≥ 4), or a garbage shatter — picking the highest-value one
+   *    (except that a non-shattering fire is *held* while an opponent slab is
+   *    about to land, so the cascade can fire through the fresh slab instead);
    *  - otherwise, if the stack is getting dangerous, clears the nearest 3 to
    *    survive;
    *  - otherwise, if garbage is on the board with no one-swap shatter, works
@@ -316,12 +348,18 @@ export class AiController {
    *    one trigger away), falling back to constructive same-colour clustering.
    * Returns the grid cell to swap rightward, or null to idle. Deterministic.
    */
-  private planStrategic(grid: Grid, cursorX: number, cursorY: number): SwapPlan | null {
+  private planStrategic(
+    grid: Grid,
+    cursorX: number,
+    cursorY: number,
+    holdFire: boolean,
+  ): SwapPlan | null {
     const board = readPlanBoard(grid);
     const H = board.height;
     let bestFire: SwapPlan | null = null;
     let bestFireScore = -1;
     let bestFireDist = Infinity;
+    let bestFireShattered = 0;
     let bestClear: SwapPlan | null = null;
     let bestClearDist = Infinity;
 
@@ -349,6 +387,7 @@ export class AiController {
             bestFireScore = score;
             bestFireDist = dist;
             bestFire = { x, y: gy };
+            bestFireShattered = cascade.garbageShattered;
           }
         }
         if (dist < bestClearDist) {
@@ -358,8 +397,17 @@ export class AiController {
       }
     }
 
-    if (bestFire) return bestFire; // attack / defend — always fire a real payoff
     const danger = grid.top_effective_row >= GC_SAFE_HEIGHT - this.tuning.dangerMargin;
+    if (bestFire) {
+      // Trigger timing: a ready fire that shatters nothing is *held* while a
+      // real slab is about to land — fired after the slab arrives, the same
+      // (or a bigger) cascade shatters it too, instead of being spent just
+      // before it lands. Never hold in danger, and never hold a shattering
+      // fire (that relief is wanted right now). While holding, the branches
+      // below keep banking, which can upgrade the eventual payoff.
+      const hold = holdFire && bestFireShattered === 0 && !danger;
+      if (!hold) return bestFire; // attack / defend — fire a real payoff
+    }
     // In danger a plain clear relieves height *now* (a shatter converts garbage
     // to blocks without lowering the stack), so it comes first.
     if (danger && bestClear) return bestClear;

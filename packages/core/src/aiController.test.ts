@@ -103,6 +103,23 @@ describe('AiController', () => {
     expect(sim2.digest()).toBe(fresh.digest());
   });
 
+  it('pendingCellsWithin sees an inbound slab only inside its window, until it lands', () => {
+    const sim = new GameSim(11);
+    // Discard outbound garbage — in solo mode the bot's own combos would
+    // otherwise be dealt back into its own queue and pollute the counts.
+    sim.garbageGenerator.outSink = { sendGarbage: () => {}, sendSpecialGarbage: () => {} };
+    const stamp = sim.clock.time_step;
+    // A 2×6 slab queued now lands at stamp + ~300 (GC_AVERAGE_GARBAGE_DROP_DELAY
+    // ± half the spread), so a short window misses it and a long one sees it.
+    sim.garbageGenerator.addToQueue(2, 6, GF_NORMAL, stamp);
+    expect(sim.garbageGenerator.pendingCellsWithin(stamp, 100)).toBe(0);
+    expect(sim.garbageGenerator.pendingCellsWithin(stamp, 1000)).toBe(12);
+    // Once it has dropped onto the board, the queue is empty again.
+    const ai = new AiController('hard');
+    for (let t = 0; t < 400 && !sim.lost; t++) sim.step(ai.decide(sim));
+    expect(sim.garbageGenerator.pendingCellsWithin(sim.clock.time_step, 1000)).toBe(0);
+  });
+
   it('never desyncs the sim (no exceptions) even on easy over a long game', () => {
     const sim = new GameSim(123);
     const ai = new AiController('easy');

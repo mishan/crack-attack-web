@@ -402,8 +402,23 @@ just use `pnpm` directly.
       medium 16-4 → 15-5 (seeds 1–20) and 18-12 → **24-6** on fresh seeds
       21–50 (68% → 78% combined); vs easy 18-2 → 19-1 with kills ~25% faster
       (86s → 66s avg); attack throughput roughly doubled (0.17 → 0.30-0.40
-      cells/s). Next candidates: multi-enabler lookahead, trigger-timing
-      (hold fire to counter incoming garbage), `fireMinChain` sweeps.
+      cells/s).
+- [x] **Fire-threshold sweeps + trigger timing measured** (negative results,
+      documented so they aren't retried): `fireMinChain` 3 is a wash vs 2
+      (14-15-1) and `fireMinRun` 5 clearly loses to 4 (8-22) — 2-chains and
+      4-combos are worth firing immediately; tempo is king. Trigger timing
+      (hold a ready non-shattering fire while an opponent slab is about to
+      land, then fire *through* it) is implemented behind new `AiTuning` knobs
+      — `holdFireTicks`, `holdFireMinCells`, fed by
+      `GarbageGenerator.pendingCellsWithin` (own-queue inspection; lockstep-
+      safe, `AiSimView` grew `clock` + `garbageGenerator`) — but measured
+      neutral-to-negative head-to-head (16-19-25 combined; 40-tick and
+      12-cell variants within noise), so it defaults **off**
+      (`holdFireTicks: 0`). Why it fails: slabs land on *top* of the stack
+      while cascades match deep inside it, so a held fire rarely reaches the
+      fresh slab, and holding costs tempo. The knobs stay for future timing
+      experiments. Next candidates: multi-enabler lookahead, medium-tier
+      chainSetup inheritance.
 - [ ] Phase 6 stretch (X-mode, replays, WebRTC, binary codec if
       measurements demand it)
 
