@@ -361,13 +361,13 @@ just use `pnpm` directly.
       the board to shatter garbage_ instead of only taking one-swap shatters.
       Probing showed the fire branch alone left slabs sitting (garbage usually
       perches on the tallest column, where no row has 3 of a colour), so
-      `core/aiPlanner.ts` gains two pure planners. `planShatterSetup(board,
-    maxCost)`: the cheapest sequence of _lateral_ block↔block swaps (gravity-
-      neutral — column occupancy never changes, so plans are stable and
-      re-planning each action tick converges; each executed swap reduces cost
-      by exactly 1) assembling a 3-run in a garbage-adjacent window, in either
-      orientation — horizontal (three same-colour sources shuttled along one
-      row segment; minimal-cost subset guarantees no matching-blocks no-op
+      `core/aiPlanner.ts` gains two pure planners.
+      `planShatterSetup(board, maxCost)`: the cheapest sequence of _lateral_
+      block↔block swaps (gravity-neutral — column occupancy never changes, so
+      plans are stable and re-planning each action tick converges; each executed
+      swap reduces cost by exactly 1) assembling a 3-run in a garbage-adjacent
+      window, in either orientation — horizontal (three same-colour sources shuttled
+      along one row segment; minimal-cost subset guarantees no matching-blocks no-op
       swap) or vertical (each row laterally supplies its _nearest_ matching
       block — far more often available). The run-completing swap is left to
       the existing fire branch (its cascade shows `garbageShattered > 0`).
@@ -382,11 +382,11 @@ just use `pnpm` directly.
       (27-3 fresh) — while _increasing_ attack throughput (shattered slabs
       feed combos). Tests: window/orientation unit tests incl. plan-execution
       convergence to a shattering swap and progress guarantees.
-- [x] **Offensive chain building landed** (hard tier): the bot now *builds*
+- [x] **Offensive chain building landed** (hard tier): the bot now _builds_
       chains instead of merely noticing them. `planChainSetup`
       (`core/aiPlanner.ts`): a bounded two-ply search for one gravity-neutral
       block↔block **setup swap** that fires nothing itself (a swap that clears
-      is a clear, owned by the fire branch) but *enables* a worth-firing
+      is a clear, owned by the fire branch) but _enables_ a worth-firing
       cascade one trigger swap later, scored by `attackValue` + shatter bonus.
       A static `makesRun3` prefilter — exact for a cascade's first round on a
       settled board — gates the full cascade evaluation, so only genuine
@@ -394,7 +394,7 @@ just use `pnpm` directly.
       gravity) pay for `evaluateSwap`; after JIT warm-up decide() worst-cases
       ~400µs, avg ~32µs. The enabled trigger meets the fire branch's own
       thresholds, so it is guaranteed to be taken on a later action tick —
-      and re-planning then either fires or finds a *further* enabler, so
+      and re-planning then either fires or finds a _further_ enabler, so
       multi-swap constructions emerge from repeated one-swap planning.
       Priority: replaces generic clustering as the preferred bank move (safe
       state only, after all defense). New `AiTuning` knob: `chainSetup`.
@@ -408,17 +408,37 @@ just use `pnpm` directly.
       (14-15-1) and `fireMinRun` 5 clearly loses to 4 (8-22) — 2-chains and
       4-combos are worth firing immediately; tempo is king. Trigger timing
       (hold a ready non-shattering fire while an opponent slab is about to
-      land, then fire *through* it) is implemented behind new `AiTuning` knobs
+      land, then fire _through_ it) is implemented behind new `AiTuning` knobs
       — `holdFireTicks`, `holdFireMinCells`, fed by
       `GarbageGenerator.pendingCellsWithin` (own-queue inspection; lockstep-
       safe, `AiSimView` grew `clock` + `garbageGenerator`) — but measured
       neutral-to-negative head-to-head (16-19-25 combined; 40-tick and
       12-cell variants within noise), so it defaults **off**
-      (`holdFireTicks: 0`). Why it fails: slabs land on *top* of the stack
+      (`holdFireTicks: 0`). Why it fails: slabs land on _top_ of the stack
       while cascades match deep inside it, so a held fire rarely reaches the
       fresh slab, and holding costs tempo. The knobs stay for future timing
-      experiments. Next candidates: multi-enabler lookahead, medium-tier
-      chainSetup inheritance.
+      experiments.
+- [x] **Multi-enabler lookahead + smooth tier ladder landed**. Probing showed
+      only 13% of bank positions have a single chain enabler, and 22% of the
+      rest have a _two-setup_ construction — so `planChainSetup` gains a
+      second level (`AiTuning.chainLookahead`): when no single enabler
+      exists, scan setup swaps whose result contains one (setup → setup →
+      trigger; the monotone ladder still guarantees progress). Costs ~0 in
+      play because chain planning is board-pure and now memoized by
+      `hashPlanBoard` in the controller (pure optimization — decisions
+      identical, lockstep safe; the memo also un-did a 5× decide() slowdown
+      the deeper search initially caused). Measured _neutral on win rate_
+      (29-28-3 vs lookahead-off; 23-7 vs 24-6 against medium) with a mild
+      tempo gain (~8% faster kills, +11% throughput) — kept ON for tempo and
+      because the bot visibly builds instead of shuffling in quiet stretches.
+      **Medium is now strategic-lite** (fires the chains/combos/shatters it
+      sees, survival-clears in danger, undermines garbage towers; no shatter
+      setups, no chain building; `strategic: false` restores the old digger
+      for experiments): arena-tuned over four candidate presets to land both
+      ladder gaps — hard > medium 77% (46-14, seeds 1–60), medium > easy 93%
+      (28-2; was a degenerate 20-0), and medium out-attacks the old digger 3×
+      (0.26 vs 0.09 cells/s), beating it 18-12. Next candidates: easy-tier
+      calibration vs new players, best-of-N arena mode.
 - [ ] Phase 6 stretch (X-mode, replays, WebRTC, binary codec if
       measurements demand it)
 

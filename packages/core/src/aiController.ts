@@ -30,10 +30,12 @@ import {
   attackValue,
   canSwap,
   evaluateSwap,
+  hashPlanBoard,
   planChainSetup,
   planShatterSetup,
   planUndermine,
   readPlanBoard,
+  type ChainSetupPlan,
 } from './aiPlanner.js';
 
 export type AiDifficultyLevel = 'easy' | 'medium' | 'hard';
@@ -71,6 +73,10 @@ export interface AiTuning {
    * *enables* a chain/combo one trigger swap later ({@link planChainSetup})
    * over generic clustering. */
   readonly chainSetup: boolean;
+  /** Strategic only: when no single chain enabler exists, search one level
+   * deeper for a setup→setup→trigger construction ({@link planChainSetup}
+   * lookahead). Only active with `chainSetup`. */
+  readonly chainLookahead: boolean;
   /** Strategic only: **trigger timing** — hold a ready non-shattering fire when
    * an opponent slab will land within this many ticks, so the cascade fires
    * *through* the fresh slab (shattering it) instead of being spent just before
@@ -105,6 +111,7 @@ const BASE_TUNING: Omit<AiTuning, 'cooldown' | 'flatten' | 'strategic'> = {
   shatterSetupMaxCost: 10,
   undermine: true,
   chainSetup: true,
+  chainLookahead: true,
   holdFireTicks: 0, // measured neutral-to-negative; see the AiTuning docs
   holdFireMinCells: GC_PLAY_WIDTH,
   fireMinChain: 2,
@@ -115,16 +122,26 @@ const BASE_TUNING: Omit<AiTuning, 'cooldown' | 'flatten' | 'strategic'> = {
 
 // Difficulty is behavioural, not just paced: reaction speed (cooldown) barely
 // affects survival — the bot is limited by how well it *finds/creates* matches,
-// not how fast it acts — so the tiers differ mainly in their no-clear fallback.
+// not how fast it acts — so the tiers differ in strategy, not reflexes.
 //   easy   — reactive only: clears what's one swap away, else idles.
-//   medium — + digging: shuffles blocks into gaps, churning up new matches.
-//   hard   — + building: also clusters same-flavour blocks to set up matches
-//            (and prefers garbage-shattering clears), so it keeps clearing under
-//            pressure. Measured monotonic easy < medium < hard, garbage or not.
+//   medium — strategic-lite: fires chains/combos/shatters it sees, survival-
+//            clears in danger, undermines garbage towers — but no shatter
+//            setups and no chain building. (With `strategic: false` it falls
+//            back to the old reactive digger, kept for experiments.)
+//   hard   — full strategic: + multi-swap shatter setups and chain building.
+// Arena-measured ladder (seeds 1–60): hard > medium 77%, medium > easy 93%,
+// each tier decisive but beatable — and medium out-attacks the old digger 3×.
 // Cooldown is kept only for *feel* (easy visibly calmer, hard snappier).
 const TUNING: Record<AiDifficultyLevel, AiTuning> = {
   easy: { ...BASE_TUNING, cooldown: 20, flatten: false, strategic: false },
-  medium: { ...BASE_TUNING, cooldown: 12, flatten: true, strategic: false },
+  medium: {
+    ...BASE_TUNING,
+    cooldown: 12,
+    flatten: true,
+    strategic: true,
+    shatterSetupMaxCost: 0,
+    chainSetup: false,
+  },
   hard: { ...BASE_TUNING, cooldown: 8, flatten: false, strategic: true },
 };
 
@@ -160,6 +177,14 @@ export class AiController {
   private releaseNext = false;
   /** Ticks to wait after a swap before acting again (difficulty pacing). */
   private cooldown = 0;
+  /**
+   * Chain-setup memo: `planChainSetup` is a pure function of the board alone
+   * (not the cursor), and the board is usually unchanged while the cursor
+   * walks — so its result is cached by board hash. Purely an optimization:
+   * decisions are identical with or without the cache, so lockstep holds.
+   */
+  private chainCacheHash = -1;
+  private chainCachePlan: ChainSetupPlan | null = null;
 
   constructor(difficulty: AiDifficultyLevel | AiTuning) {
     this.tuning = typeof difficulty === 'string' ? TUNING[difficulty] : difficulty;
@@ -169,6 +194,8 @@ export class AiController {
   reset(): void {
     this.releaseNext = false;
     this.cooldown = 0;
+    this.chainCacheHash = -1;
+    this.chainCachePlan = null;
   }
 
   /**
@@ -431,11 +458,19 @@ export class AiController {
     // swap away (the fire branch takes it next action tick) — over generic
     // same-colour clustering.
     if (this.tuning.chainSetup) {
-      const chain = planChainSetup(board, {
-        minChain: this.tuning.fireMinChain,
-        minRun: this.tuning.fireMinRun,
-        shatterWeight: this.tuning.shatterWeight,
-      });
+      // Board-pure and cursor-independent, so memoized by board hash — the
+      // lookahead level is only paid when the board actually changes.
+      const hash = hashPlanBoard(board);
+      if (hash !== this.chainCacheHash) {
+        this.chainCacheHash = hash;
+        this.chainCachePlan = planChainSetup(board, {
+          minChain: this.tuning.fireMinChain,
+          minRun: this.tuning.fireMinRun,
+          shatterWeight: this.tuning.shatterWeight,
+          lookahead: this.tuning.chainLookahead,
+        });
+      }
+      const chain = this.chainCachePlan;
       if (chain) return { x: chain.x, y: chain.y + 1 }; // plan rows are grid rows − 1
     }
     return this.findBuild(grid, cursorX, cursorY);

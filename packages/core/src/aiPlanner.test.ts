@@ -217,6 +217,36 @@ describe('planChainSetup', () => {
     expect(planChainSetup(board(['....', '1213']), opts)).toBeNull();
   });
 
+  it('lookahead finds a two-setup construction and the ladder converges to a fire', () => {
+    // A 2-chain pattern using colour 5 — deliberately scarce (exactly three
+    // 5s on the board) with a neutral 6 blocking column 2, so only one chain
+    // shape exists and the trigger swap can't double as a repair move. Broken
+    // in two independent places: the cap pushed off column 1 ('.54.' →
+    // '.45.') and a floor 5 pushed off column 2 ('5152' → '5125'). No single
+    // swap fires, no single setup enables a fire — but two setups do. The
+    // 2-level plan must appear only with lookahead, and executing the ladder
+    // must converge to a real chain trigger.
+    const rows = ['.45.', '.21.', '.16.', '5125'];
+    expect(planChainSetup(board(rows), opts)).toBeNull();
+    const b = board(rows);
+    let plan = planChainSetup(b, { ...opts, lookahead: true });
+    expect(plan).not.toBeNull();
+
+    // Execute up the ladder: at most two setups, then a firing trigger exists.
+    for (let step = 0; step < 2 && plan; step++) {
+      applySwap(b, plan.x, plan.y);
+      plan = planChainSetup(b, { ...opts, lookahead: true });
+    }
+    // After the construction, some swap cascades to a 2-chain.
+    let fires = false;
+    for (let y = 0; y < b.height && !fires; y++) {
+      for (let x = 0; x < b.width - 1 && !fires; x++) {
+        if (evaluateSwap(b, x, y).chainDepth >= 2) fires = true;
+      }
+    }
+    expect(fires).toBe(true);
+  });
+
   it('never proposes a setup swap that itself clears', () => {
     // The only interesting swap here completes 1-1-1 immediately: that is a
     // clear (the fire/survival branches own it), not a setup — and the mere

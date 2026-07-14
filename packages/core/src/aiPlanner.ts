@@ -490,10 +490,65 @@ export interface ChainSetupPlan {
  * Incremental depth for free: after the setup executes, re-planning either
  * fires the enabled trigger or discovers a *further* enabler — so multi-swap
  * constructions emerge from repeated one-swap planning without a deeper
- * search. Deterministic: scanned bottom-up/left-to-right, best score wins,
- * first find keeps ties. Pure function of the board; no RNG, no timing.
+ * search. With `opts.lookahead`, a **second level** kicks in only when no
+ * single enabler exists (~87% of bank positions, measured): scan setup swaps
+ * whose result *contains* a single enabler — a three-swap construction
+ * (setup → setup → trigger). The same monotone ladder guarantees progress:
+ * a 2-level plan becomes a 1-level plan after its first swap, then a fire.
+ * Deterministic: scanned bottom-up/left-to-right, best score wins, first find
+ * keeps ties. Pure function of the board; no RNG, no timing.
  */
 export function planChainSetup(
+  board: PlanBoard,
+  opts: { minChain: number; minRun: number; shatterWeight: number; lookahead?: boolean },
+): ChainSetupPlan | null {
+  const direct = searchEnabler(board, opts);
+  if (direct || !opts.lookahead) return direct;
+
+  // No single enabler exists: look one level deeper. The candidate move is a
+  // setup swap after which a single enabler *does* exist; it inherits that
+  // enabler's eventual score. Only runs in enabler-less positions, and the
+  // run3 prefilter keeps the inner searches cheap.
+  let best: ChainSetupPlan | null = null;
+  const b2: PlanBoard = { cell: board.cell.slice(), width: board.width, height: board.height };
+  for (let sy = 0; sy < board.height; sy++) {
+    for (let sx = 0; sx < board.width - 1; sx++) {
+      const a = at(board, sx, sy);
+      const c = at(board, sx + 1, sy);
+      if (a < 0 || c < 0) continue; // setups are block↔block only
+      if (mapFlavorToBaseFlavor(a) === mapFlavorToBaseFlavor(c)) continue; // no-op
+      if (makesRun3(board, sx, sy)) continue; // that's a clear, not a setup
+      b2.cell.set(board.cell);
+      b2.cell[sx * b2.height + sy] = c;
+      b2.cell[(sx + 1) * b2.height + sy] = a;
+      const enabled = searchEnabler(b2, opts);
+      if (enabled && (!best || enabled.score > best.score)) {
+        best = { x: sx, y: sy, score: enabled.score };
+      }
+    }
+  }
+  return best;
+}
+
+/**
+ * FNV-1a hash of a plan board's contents. Two boards with equal hash are (for
+ * all practical purposes) identical, so a controller can cache board-pure plan
+ * results across ticks while the cursor walks — recomputing only when the
+ * board actually changes. Any collision would be deterministic too (same
+ * boards, same hash, on every client), so lockstep safety is unaffected.
+ */
+export function hashPlanBoard(b: PlanBoard): number {
+  let h = 0x811c9dc5;
+  h = Math.imul(h ^ b.width, 0x01000193);
+  h = Math.imul(h ^ b.height, 0x01000193);
+  for (let i = 0; i < b.cell.length; i++) {
+    h = Math.imul(h ^ (b.cell[i]! & 0xffff), 0x01000193);
+  }
+  return h >>> 0;
+}
+
+/** The single-enabler search behind {@link planChainSetup} (one setup + trigger). */
+function searchEnabler(
   board: PlanBoard,
   opts: { minChain: number; minRun: number; shatterWeight: number },
 ): ChainSetupPlan | null {
