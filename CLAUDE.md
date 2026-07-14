@@ -351,12 +351,37 @@ just use `pnpm` directly.
       are presets via `aiTuningFor`, behaviour unchanged), and the CLI pits
       presets or JSON override files over reproducible seed ranges
       (`node tools/ai-arena/dist/cli.js --a cand.json --b hard --seeds 50`),
-      reporting W/L/draw, avg length, and garbage throughput. Baselines (seeds
-      1–20): medium sweeps easy 20-0; hard beats medium only 11-9 (while
-      out-throwing it 4×) and drops 6/20 to easy — its banking lets its own
-      stack top out; raising `dangerMargin` 3→5 fixes hard-vs-easy (18-2) but
-      collapses hard-vs-medium (5-15). Next: defensive multi-swap shatter
-      planning and chain-building search, tuned against these baselines.
+      reporting W/L/draw, avg length, and garbage throughput. Original
+      baselines (seeds 1–20): medium sweeps easy 20-0; hard beat medium only
+      11-9 and dropped 6/20 to easy (fixed by the defensive planning below —
+      the `dangerMargin` 3→5 "fix" those baselines suggested is now strictly
+      worse, 9-19 against current hard: the tension was a symptom of missing
+      defense, not a real trade). Next: offensive chain-building search.
+- [x] **Defensive garbage planning landed** (hard tier): the bot now _remodels
+      the board to shatter garbage_ instead of only taking one-swap shatters.
+      Probing showed the fire branch alone left slabs sitting (garbage usually
+      perches on the tallest column, where no row has 3 of a colour), so
+      `core/aiPlanner.ts` gains two pure planners. `planShatterSetup(board,
+    maxCost)`: the cheapest sequence of _lateral_ block↔block swaps (gravity-
+      neutral — column occupancy never changes, so plans are stable and
+      re-planning each action tick converges; each executed swap reduces cost
+      by exactly 1) assembling a 3-run in a garbage-adjacent window, in either
+      orientation — horizontal (three same-colour sources shuttled along one
+      row segment; minimal-cost subset guarantees no matching-blocks no-op
+      swap) or vertical (each row laterally supplies its _nearest_ matching
+      block — far more often available). The run-completing swap is left to
+      the existing fire branch (its cascade shows `garbageShattered > 0`).
+      `planUndermine`: when no setup reaches the slab, dig its load-bearing
+      support blocks (contiguous blocks capped by garbage) sideways into
+      fall-through gaps so the slab descends onto the wider stack, where
+      setups exist; strictly decreasing potential energy ⇒ always terminates.
+      Strategic priority: fire → danger-clear → shatter setup → undermine →
+      bank. New `AiTuning` knobs: `shatterSetupMaxCost` (default 10; 0
+      disables), `undermine`. Measured (arena): new hard beats old hard 19-1;
+      vs medium 11-9 → 16-4 (18-12 on fresh seeds 21–50); vs easy 14-6 → 18-2
+      (27-3 fresh) — while _increasing_ attack throughput (shattered slabs
+      feed combos). Tests: window/orientation unit tests incl. plan-execution
+      convergence to a shattering swap and progress guarantees.
 - [ ] Phase 6 stretch (X-mode, replays, WebRTC, binary codec if
       measurements demand it)
 

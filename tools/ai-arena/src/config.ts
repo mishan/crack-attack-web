@@ -24,6 +24,8 @@ const TUNING_FIELDS: Record<keyof AiTuning, 'number' | 'boolean'> = {
   strategic: 'boolean',
   dangerMargin: 'number',
   shatterWeight: 'number',
+  shatterSetupMaxCost: 'number',
+  undermine: 'boolean',
   fireMinChain: 'number',
   fireMinRun: 'number',
   clusterVertical: 'number',

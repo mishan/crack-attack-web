@@ -23,7 +23,15 @@ import { GC_PLAY_HEIGHT, GC_PLAY_WIDTH, GC_SAFE_HEIGHT } from './constants.js';
 import { GR_BLOCK, GR_EMPTY, GR_GARBAGE, type Grid } from './grid.js';
 import { flavorMatch } from './flavors.js';
 import { SS_SWAPPING, type Swapper } from './swapper.js';
-import { PLAN_GARBAGE, attackValue, canSwap, evaluateSwap, readPlanBoard } from './aiPlanner.js';
+import {
+  PLAN_GARBAGE,
+  attackValue,
+  canSwap,
+  evaluateSwap,
+  planShatterSetup,
+  planUndermine,
+  readPlanBoard,
+} from './aiPlanner.js';
 
 export type AiDifficultyLevel = 'easy' | 'medium' | 'hard';
 
@@ -50,6 +58,12 @@ export interface AiTuning {
   readonly dangerMargin: number;
   /** Strategic only: score weight per garbage cell a candidate's cascade shatters. */
   readonly shatterWeight: number;
+  /** Strategic only: pursue multi-swap garbage-shatter setups up to this many
+   * lateral swaps ({@link planShatterSetup}); 0 disables setup planning. */
+  readonly shatterSetupMaxCost: number;
+  /** Strategic only: when garbage rests on a tower no setup can reach, dig its
+   * support out so the slab descends into range ({@link planUndermine}). */
+  readonly undermine: boolean;
   /** Strategic only: a cascade at least this deep is worth firing (2 = any chain). */
   readonly fireMinChain: number;
   /** Strategic only: a single run at least this long is worth firing (width garbage). */
@@ -70,6 +84,8 @@ const DANGER_MARGIN = 3;
 const BASE_TUNING: Omit<AiTuning, 'cooldown' | 'flatten' | 'strategic'> = {
   dangerMargin: DANGER_MARGIN,
   shatterWeight: 3,
+  shatterSetupMaxCost: 10,
+  undermine: true,
   fireMinChain: 2,
   fireMinRun: 4,
   clusterVertical: 2,
@@ -287,6 +303,8 @@ export class AiController {
    *    combo (a run ≥ 4), or a garbage shatter — picking the highest-value one;
    *  - otherwise, if the stack is getting dangerous, clears the nearest 3 to
    *    survive;
+   *  - otherwise, if garbage is on the board with no one-swap shatter, works
+   *    toward the cheapest multi-swap shatter setup ({@link planShatterSetup});
    *  - otherwise (safe, nothing worth firing) *banks*: makes a constructive
    *    build move to set up a bigger combo/chain, rather than wasting the 3.
    * Returns the grid cell to swap rightward, or null to idle. Deterministic.
@@ -335,7 +353,24 @@ export class AiController {
 
     if (bestFire) return bestFire; // attack / defend — always fire a real payoff
     const danger = grid.top_effective_row >= GC_SAFE_HEIGHT - this.tuning.dangerMargin;
-    if (danger) return bestClear; // survive: clear anything (may be null if nothing)
+    // In danger a plain clear relieves height *now* (a shatter converts garbage
+    // to blocks without lowering the stack), so it comes first.
+    if (danger && bestClear) return bestClear;
+    // No one-swap shatter exists (the fire branch would have taken it), but
+    // garbage may still be clearable in a few moves: work toward the cheapest
+    // multi-swap setup that assembles a match against a slab. Once it's one
+    // swap from done, the fire branch above executes it.
+    if (this.tuning.shatterSetupMaxCost > 0) {
+      const setup = planShatterSetup(board, this.tuning.shatterSetupMaxCost);
+      if (setup) return { x: setup.x, y: setup.y + 1 }; // plan rows are grid rows − 1
+    }
+    // No setup reaches the garbage (it's typically perched on a tower): dig
+    // the tower out from under it so the slab descends into setup range.
+    if (this.tuning.undermine) {
+      const dig = planUndermine(board, cursorX, cursorY - 1);
+      if (dig) return { x: dig.x, y: dig.y + 1 };
+    }
+    if (danger) return null; // nothing clearable at all — idle
     // Safe and nothing worth firing: bank blocks — build toward a bigger combo.
     return this.findBuild(grid, cursorX, cursorY);
   }

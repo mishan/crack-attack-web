@@ -4,6 +4,8 @@ import {
   PLAN_GARBAGE,
   attackValue,
   evaluateSwap,
+  planShatterSetup,
+  planUndermine,
   type PlanBoard,
 } from './aiPlanner.js';
 import { AiController } from './aiController.js';
@@ -83,6 +85,121 @@ describe('aiPlanner cascade evaluator', () => {
     const chain = attackValue({ chainDepth: 3, totalCleared: 9, maxRound: 3, garbageShattered: 0 });
     const flat = attackValue({ chainDepth: 1, totalCleared: 9, maxRound: 9, garbageShattered: 0 });
     expect(chain).toBeGreaterThan(flat);
+  });
+});
+
+/** Apply a lateral swap `(x,y)`↔`(x+1,y)` in place (test helper). */
+function applySwap(b: PlanBoard, x: number, y: number): void {
+  const tmp = b.cell[x * b.height + y]!;
+  b.cell[x * b.height + y] = b.cell[(x + 1) * b.height + y]!;
+  b.cell[(x + 1) * b.height + y] = tmp;
+}
+
+describe('planShatterSetup', () => {
+  it('finds the cheapest lateral plan to a window under a slab', () => {
+    // 1s at x 0,2,4 under a full-width slab: the best window is {1,2,3}
+    // (cost 2 — shuttle the outer 1s inward one cell each). The first move is
+    // the rightmost source that must move right: the 1 at x0 → swap at (0,0).
+    const b = board(['######', '121213']);
+    expect(planShatterSetup(b, 10)).toEqual({ x: 0, y: 0, cost: 2 });
+  });
+
+  it('respects the cost cap and returns null without garbage', () => {
+    expect(planShatterSetup(board(['######', '121213']), 1)).toBeNull();
+    expect(planShatterSetup(board(['......', '121213']), 10)).toBeNull();
+  });
+
+  it('sees windows beside a slab, not just under one', () => {
+    // Garbage occupies (0,0); the only garbage-adjacent window is {1,2,3}.
+    // 1s at x 1,2,4 → one swap lines up 1 1 1 beside the slab.
+    const b = board(['......', '#11211']);
+    expect(planShatterSetup(b, 10)).toEqual({ x: 3, y: 0, cost: 1 });
+    // And that final swap really does shatter.
+    expect(evaluateSwap(b, 3, 0).garbageShattered).toBe(1);
+  });
+
+  it('sources cannot cross garbage in the row, and standing matches are skipped', () => {
+    // Row 1: the slab cell splits the row, so neither side has 3 of a colour.
+    // Row 0: a standing 3+ match (only constructible in a test — the sim would
+    // already be clearing it) must not be "planned", even at cost 1 by sliding
+    // a fourth matching block around. Nothing plannable ⇒ null.
+    const b = board(['......', '11#212', '333333']);
+    expect(planShatterSetup(b, 10)).toBeNull();
+  });
+
+  it('executing the plan converges: cost strictly decreases to a shattering swap', () => {
+    const b = board(['######', '121213']);
+    let plan = planShatterSetup(b, 10);
+    let lastCost = Infinity;
+    let guard = 0;
+    while (plan && plan.cost > 1) {
+      expect(plan.cost).toBeLessThan(lastCost);
+      lastCost = plan.cost;
+      applySwap(b, plan.x, plan.y);
+      plan = planShatterSetup(b, 10);
+      expect(++guard).toBeLessThan(10);
+    }
+    expect(plan).not.toBeNull();
+    // The remaining single swap is exactly what the fire branch would execute.
+    const cascade = evaluateSwap(b, plan!.x, plan!.y);
+    expect(cascade.garbageShattered).toBeGreaterThan(0);
+  });
+
+  it('never proposes swapping two matching blocks (progress is guaranteed)', () => {
+    // Four 1s available; the minimal subset must exclude the one whose move
+    // would swap 1↔1. Whatever plan comes back, its swap must change the board.
+    const b = board(['######', '112131']);
+    const plan = planShatterSetup(b, 10);
+    expect(plan).not.toBeNull();
+    const before = b.cell.slice();
+    applySwap(b, plan!.x, plan!.y);
+    expect(b.cell).not.toEqual(before);
+  });
+});
+
+describe('planShatterSetup vertical windows', () => {
+  it('assembles a colour column beside a slab, one row at a time', () => {
+    // A 3-tall slab in column 0. Column 1 is the only garbage-adjacent window;
+    // flavour 2 is one lateral swap away (row y2 must bring its 2 from x2).
+    const b = board(['#27.', '#72.', '#27.', '4545']);
+    expect(planShatterSetup(b, 10)).toEqual({ x: 1, y: 2, cost: 1 });
+    expect(evaluateSwap(b, 1, 2).garbageShattered).toBeGreaterThan(0);
+  });
+
+  it('vertical plans converge over multiple rows', () => {
+    // Flavour 2 is the only colour present in all three garbage-adjacent rows;
+    // it needs a lateral move in two of them to line up in column 1.
+    const b = board(['#62.', '#62.', '#25.', '4545']);
+    let plan = planShatterSetup(b, 10);
+    expect(plan).toEqual({ x: 1, y: 2, cost: 2 });
+    applySwap(b, plan!.x, plan!.y);
+    plan = planShatterSetup(b, 10);
+    expect(plan?.cost).toBe(1);
+    expect(evaluateSwap(b, plan!.x, plan!.y).garbageShattered).toBeGreaterThan(0);
+  });
+
+  it('a 1-wide support tower offers no vertical plan (no lateral supply)', () => {
+    // Slab perched on a lone column: every row's segment is a single cell, so
+    // no colour can be brought in laterally — the undermine fallback's job.
+    const b = board(['.#..', '.1..', '.2..', '.3..', '4256']);
+    expect(planShatterSetup(b, 10)).toBeNull();
+  });
+});
+
+describe('planUndermine', () => {
+  it('digs the load-bearing block under a slab into the neighbouring gap', () => {
+    // Tower at column 1 carries the slab; the top tower block (1,y2) can dig
+    // left (swap at x0) or right (swap at x1). Nearest to the cursor wins.
+    const b = board(['.#..', '.1..', '.2..', '3123']);
+    expect(planUndermine(b, 0, 2)).toEqual({ x: 0, y: 2 });
+    expect(planUndermine(b, 3, 2)).toEqual({ x: 1, y: 2 });
+  });
+
+  it('ignores digs that carry no garbage, and blocks that cannot fall', () => {
+    // Same shape, no slab: nothing is load-bearing — undermining is not
+    // generic flattening. And with a slab but no fall-through cell, null too.
+    expect(planUndermine(board(['....', '.1..', '.2..', '3123']), 0, 0)).toBeNull();
+    expect(planUndermine(board(['.#..', '31.4', '324.', '3123']), 0, 0)).toBeNull();
   });
 });
 
