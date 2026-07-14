@@ -50,7 +50,7 @@ function underGarbage(
 }
 
 describe('AiController', () => {
-  it('actually plays: it makes swaps that eliminate blocks', () => {
+  it('actually plays: it makes swaps that eliminate blocks', { timeout: 30_000 }, () => {
     // Across several seeds the bot should find and execute clearing swaps.
     let played = 0;
     for (const seed of [1, 2, 7, 42, 2026]) {
@@ -59,22 +59,29 @@ describe('AiController', () => {
     expect(played).toBeGreaterThan(0);
   });
 
-  it('difficulty escalates under garbage: easy survives least, hard attacks most', () => {
-    // The tiers are defined behaviourally: easy is the survival floor (fixing the
-    // old inversion where medium/hard were no stronger), while hard is the
-    // *aggressive* tier — it banks blocks and fires combos/chains, sending far
-    // more garbage back than the others. Aggregated over seeds (per-game play is
-    // chaotic).
-    const seeds = [1, 2, 7, 42, 101, 2026, 55, 88];
-    const easy = underGarbage('easy', seeds);
-    const medium = underGarbage('medium', seeds);
-    const hard = underGarbage('hard', seeds);
-    // Survival: easy is clearly the weakest (the reported inversion is gone).
-    expect(medium.survival).toBeGreaterThan(easy.survival);
-    // Attack: strictly escalating — hard throws the most garbage, easy the least.
-    expect(medium.sent).toBeGreaterThan(easy.sent);
-    expect(hard.sent).toBeGreaterThan(medium.sent);
-  });
+  // Long-running: three tiers × 8 seeds × up to 40k ticks each, and both the
+  // medium and hard tiers now run the strategic planner — needs headroom on
+  // slower machines than vitest's 5 s default.
+  it(
+    'difficulty escalates under garbage: easy survives least, hard attacks most',
+    { timeout: 60_000 },
+    () => {
+      // The tiers are defined behaviourally: easy is the survival floor (fixing the
+      // old inversion where medium/hard were no stronger), while hard is the
+      // *aggressive* tier — it banks blocks and fires combos/chains, sending far
+      // more garbage back than the others. Aggregated over seeds (per-game play is
+      // chaotic).
+      const seeds = [1, 2, 7, 42, 101, 2026, 55, 88];
+      const easy = underGarbage('easy', seeds);
+      const medium = underGarbage('medium', seeds);
+      const hard = underGarbage('hard', seeds);
+      // Survival: easy is clearly the weakest (the reported inversion is gone).
+      expect(medium.survival).toBeGreaterThan(easy.survival);
+      // Attack: strictly escalating — hard throws the most garbage, easy the least.
+      expect(medium.sent).toBeGreaterThan(easy.sent);
+      expect(hard.sent).toBeGreaterThan(medium.sent);
+    },
+  );
 
   it('is deterministic: same seed + difficulty ⇒ identical sim digest', () => {
     const run = (): number => {
