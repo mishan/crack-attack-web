@@ -28,6 +28,7 @@ import {
   attackValue,
   canSwap,
   evaluateSwap,
+  planChainSetup,
   planShatterSetup,
   planUndermine,
   readPlanBoard,
@@ -64,6 +65,10 @@ export interface AiTuning {
   /** Strategic only: when garbage rests on a tower no setup can reach, dig its
    * support out so the slab descends into range ({@link planUndermine}). */
   readonly undermine: boolean;
+  /** Strategic only: when safe with nothing to fire, prefer a bank move that
+   * *enables* a chain/combo one trigger swap later ({@link planChainSetup})
+   * over generic clustering. */
+  readonly chainSetup: boolean;
   /** Strategic only: a cascade at least this deep is worth firing (2 = any chain). */
   readonly fireMinChain: number;
   /** Strategic only: a single run at least this long is worth firing (width garbage). */
@@ -86,6 +91,7 @@ const BASE_TUNING: Omit<AiTuning, 'cooldown' | 'flatten' | 'strategic'> = {
   shatterWeight: 3,
   shatterSetupMaxCost: 10,
   undermine: true,
+  chainSetup: true,
   fireMinChain: 2,
   fireMinRun: 4,
   clusterVertical: 2,
@@ -305,8 +311,9 @@ export class AiController {
    *    survive;
    *  - otherwise, if garbage is on the board with no one-swap shatter, works
    *    toward the cheapest multi-swap shatter setup ({@link planShatterSetup});
-   *  - otherwise (safe, nothing worth firing) *banks*: makes a constructive
-   *    build move to set up a bigger combo/chain, rather than wasting the 3.
+   *  - otherwise (safe, nothing worth firing) *banks*: prefers a chain-enabling
+   *    setup swap ({@link planChainSetup} — after it, a worth-firing cascade is
+   *    one trigger away), falling back to constructive same-colour clustering.
    * Returns the grid cell to swap rightward, or null to idle. Deterministic.
    */
   private planStrategic(grid: Grid, cursorX: number, cursorY: number): SwapPlan | null {
@@ -371,7 +378,18 @@ export class AiController {
       if (dig) return { x: dig.x, y: dig.y + 1 };
     }
     if (danger) return null; // nothing clearable at all — idle
-    // Safe and nothing worth firing: bank blocks — build toward a bigger combo.
+    // Safe and nothing worth firing: bank blocks. Prefer a *chain enabler* —
+    // one setup swap after which a worth-firing cascade is a single trigger
+    // swap away (the fire branch takes it next action tick) — over generic
+    // same-colour clustering.
+    if (this.tuning.chainSetup) {
+      const chain = planChainSetup(board, {
+        minChain: this.tuning.fireMinChain,
+        minRun: this.tuning.fireMinRun,
+        shatterWeight: this.tuning.shatterWeight,
+      });
+      if (chain) return { x: chain.x, y: chain.y + 1 }; // plan rows are grid rows − 1
+    }
     return this.findBuild(grid, cursorX, cursorY);
   }
 

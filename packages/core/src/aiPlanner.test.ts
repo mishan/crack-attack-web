@@ -4,6 +4,7 @@ import {
   PLAN_GARBAGE,
   attackValue,
   evaluateSwap,
+  planChainSetup,
   planShatterSetup,
   planUndermine,
   type PlanBoard,
@@ -183,6 +184,44 @@ describe('planShatterSetup vertical windows', () => {
     // no colour can be brought in laterally — the undermine fallback's job.
     const b = board(['.#..', '.1..', '.2..', '.3..', '4256']);
     expect(planShatterSetup(b, 10)).toBeNull();
+  });
+});
+
+describe('planChainSetup', () => {
+  const opts = { minChain: 2, minRun: 4, shatterWeight: 3 };
+
+  it('finds the setup swap that re-enables a broken 2-chain', () => {
+    // The proven 2-chain board (see the cascade test above) with its bottom
+    // row broken: '313' → '133'. No swap fires anything now, but swapping
+    // (0,0)↔(1,0) restores '313', after which the (1,2) trigger swap cascades
+    // to depth 2. The planner must find that setup and price the payoff.
+    const b = board([
+      '.3.', // the cap that falls into the round-2 match
+      '.21',
+      '.11',
+      '133', // broken: the setup swap restores '313'
+    ]);
+    const plan = planChainSetup(b, opts);
+    expect(plan).not.toBeNull();
+    expect({ x: plan!.x, y: plan!.y }).toEqual({ x: 0, y: 0 });
+    // Payoff of the enabled cascade: depth 2, 6 cleared → 1·width + 3.
+    expect(plan!.score).toBe(
+      attackValue({ chainDepth: 2, totalCleared: 6, maxRound: 3, garbageShattered: 0 }),
+    );
+    // And the enabled trigger really is a fire: apply the setup and check.
+    applySwap(b, 0, 0);
+    expect(evaluateSwap(b, 1, 2).chainDepth).toBe(2);
+  });
+
+  it('returns null when no colour can ever form a run', () => {
+    expect(planChainSetup(board(['....', '1213']), opts)).toBeNull();
+  });
+
+  it('never proposes a setup swap that itself clears', () => {
+    // The only interesting swap here completes 1-1-1 immediately: that is a
+    // clear (the fire/survival branches own it), not a setup — and the mere
+    // 3-clear it enables is below the fire thresholds anyway.
+    expect(planChainSetup(board(['....', '1121']), opts)).toBeNull();
   });
 });
 

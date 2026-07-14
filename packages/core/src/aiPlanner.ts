@@ -424,6 +424,121 @@ export function planShatterSetup(board: PlanBoard, maxCost: number): SetupPlan |
 }
 
 /**
+ * Whether swapping `(x,y)`↔`(x+1,y)` immediately completes a 3+ run, checked
+ * statically against post-swap flavours (base-flavour matching). On a settled
+ * board (which a `readPlanBoard` snapshot always is, and which gravity-neutral
+ * setup swaps preserve) this is **exact** for a cascade's first round when the
+ * swap doesn't drop a block — so it serves as a cheap prefilter that lets the
+ * full {@link evaluateSwap} run only on genuine trigger candidates.
+ */
+function makesRun3(b: PlanBoard, x: number, y: number): boolean {
+  const va = at(b, x, y);
+  const vb = at(b, x + 1, y);
+  // Post-swap value at a cell (the two swapped cells exchange).
+  const val = (cx: number, cy: number): number => {
+    if (cy === y && cx === x) return vb;
+    if (cy === y && cx === x + 1) return va;
+    return at(b, cx, cy);
+  };
+  const matches = (v: number, base: number): boolean => v >= 0 && mapFlavorToBaseFlavor(v) === base;
+
+  for (const [ax, v] of [
+    [x, vb],
+    [x + 1, va],
+  ] as const) {
+    if (v < 0) continue; // the cell became empty — anchors nothing
+    const base = mapFlavorToBaseFlavor(v);
+    let run = 1;
+    for (let cx = ax - 1; cx >= 0 && matches(val(cx, y), base); cx--) run++;
+    for (let cx = ax + 1; cx < b.width && matches(val(cx, y), base); cx++) run++;
+    if (run >= 3) return true;
+    run = 1;
+    for (let cy = y - 1; cy >= 0 && matches(val(ax, cy), base); cy--) run++;
+    for (let cy = y + 1; cy < b.height && matches(val(ax, cy), base); cy++) run++;
+    if (run >= 3) return true;
+  }
+  return false;
+}
+
+/** What a chain-enabling setup swap buys: the swap plus the enabled payoff. */
+export interface ChainSetupPlan {
+  /** The setup swap `(x,y)`↔`(x+1,y)`, in plan coordinates. */
+  x: number;
+  y: number;
+  /** Score of the best cascade this setup enables (attackValue + shatter bonus). */
+  score: number;
+}
+
+/**
+ * planChainSetup — the offensive counterpart of {@link planShatterSetup}: a
+ * bounded two-ply search for one **setup swap** that fires nothing itself but
+ * *enables* a worth-firing cascade one swap later. This is how chains are
+ * *built* rather than merely noticed: arrange the board so that a single
+ * trigger swap starts a cascade whose falls feed further matches.
+ *
+ * Setup swaps are lateral block↔block exchanges (gravity-neutral, so the board
+ * stays settled and plans survive re-planning) that complete no run of their
+ * own — a swap that clears is a clear, owned by the fire/survival branches.
+ * For each candidate setup, trigger swaps are scanned with the static
+ * {@link makesRun3} prefilter (exact on a settled board); a block dropped into
+ * a fall-through gap can also trigger via gravity, so those few candidates get
+ * the full cascade evaluation directly. An enabled cascade counts when it
+ * meets the caller's fire thresholds (chain depth / run length) — the same
+ * bar the fire branch uses, so the enabled trigger is guaranteed to be taken
+ * on a later action tick once the setup lands.
+ *
+ * Incremental depth for free: after the setup executes, re-planning either
+ * fires the enabled trigger or discovers a *further* enabler — so multi-swap
+ * constructions emerge from repeated one-swap planning without a deeper
+ * search. Deterministic: scanned bottom-up/left-to-right, best score wins,
+ * first find keeps ties. Pure function of the board; no RNG, no timing.
+ */
+export function planChainSetup(
+  board: PlanBoard,
+  opts: { minChain: number; minRun: number; shatterWeight: number },
+): ChainSetupPlan | null {
+  let best: ChainSetupPlan | null = null;
+  const b2: PlanBoard = { cell: board.cell.slice(), width: board.width, height: board.height };
+
+  for (let sy = 0; sy < board.height; sy++) {
+    for (let sx = 0; sx < board.width - 1; sx++) {
+      const a = at(board, sx, sy);
+      const c = at(board, sx + 1, sy);
+      if (a < 0 || c < 0) continue; // setups are block↔block only
+      if (mapFlavorToBaseFlavor(a) === mapFlavorToBaseFlavor(c)) continue; // no-op
+      if (makesRun3(board, sx, sy)) continue; // that's a clear, not a setup
+      // Apply the setup on the scratch board (undone below).
+      b2.cell.set(board.cell);
+      b2.cell[sx * b2.height + sy] = c;
+      b2.cell[(sx + 1) * b2.height + sy] = a;
+
+      for (let ty = 0; ty < b2.height; ty++) {
+        for (let tx = 0; tx < b2.width - 1; tx++) {
+          if (tx === sx && ty === sy) continue; // undoing the setup is pointless
+          if (!canSwap(b2, tx, ty)) continue;
+          const ta = at(b2, tx, ty);
+          const tc = at(b2, tx + 1, ty);
+          if (ta >= 0 && tc >= 0 && mapFlavorToBaseFlavor(ta) === mapFlavorToBaseFlavor(tc)) {
+            continue; // no-op
+          }
+          // A block swapped over a fall-through gap triggers via gravity, which
+          // the static prefilter can't see — evaluate those in full.
+          const fallThrough =
+            (ta >= 0 && tc < 0 && ty > 0 && at(b2, tx + 1, ty - 1) < 0) ||
+            (tc >= 0 && ta < 0 && ty > 0 && at(b2, tx, ty - 1) < 0);
+          if (!fallThrough && !makesRun3(b2, tx, ty)) continue;
+          const cas = evaluateSwap(b2, tx, ty);
+          if (cas.chainDepth < opts.minChain && cas.maxRound < opts.minRun) continue;
+          const score = attackValue(cas) + cas.garbageShattered * opts.shatterWeight;
+          if (!best || score > best.score) best = { x: sx, y: sy, score };
+        }
+      }
+    }
+  }
+  return best;
+}
+
+/**
  * planUndermine — the defensive fallback when no shatter setup exists at all:
  * garbage is often perched on a narrow tower of blocks (it lands on the tallest
  * column), where no row has the width to assemble a match. The human technique

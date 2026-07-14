@@ -356,7 +356,7 @@ just use `pnpm` directly.
       11-9 and dropped 6/20 to easy (fixed by the defensive planning below —
       the `dangerMargin` 3→5 "fix" those baselines suggested is now strictly
       worse, 9-19 against current hard: the tension was a symptom of missing
-      defense, not a real trade). Next: offensive chain-building search.
+      defense, not a real trade).
 - [x] **Defensive garbage planning landed** (hard tier): the bot now _remodels
       the board to shatter garbage_ instead of only taking one-swap shatters.
       Probing showed the fire branch alone left slabs sitting (garbage usually
@@ -382,6 +382,28 @@ just use `pnpm` directly.
       (27-3 fresh) — while _increasing_ attack throughput (shattered slabs
       feed combos). Tests: window/orientation unit tests incl. plan-execution
       convergence to a shattering swap and progress guarantees.
+- [x] **Offensive chain building landed** (hard tier): the bot now *builds*
+      chains instead of merely noticing them. `planChainSetup`
+      (`core/aiPlanner.ts`): a bounded two-ply search for one gravity-neutral
+      block↔block **setup swap** that fires nothing itself (a swap that clears
+      is a clear, owned by the fire branch) but *enables* a worth-firing
+      cascade one trigger swap later, scored by `attackValue` + shatter bonus.
+      A static `makesRun3` prefilter — exact for a cascade's first round on a
+      settled board — gates the full cascade evaluation, so only genuine
+      trigger candidates (plus block-into-gap drops, which trigger via
+      gravity) pay for `evaluateSwap`; after JIT warm-up decide() worst-cases
+      ~400µs, avg ~32µs. The enabled trigger meets the fire branch's own
+      thresholds, so it is guaranteed to be taken on a later action tick —
+      and re-planning then either fires or finds a *further* enabler, so
+      multi-swap constructions emerge from repeated one-swap planning.
+      Priority: replaces generic clustering as the preferred bank move (safe
+      state only, after all defense). New `AiTuning` knob: `chainSetup`.
+      Measured (arena): beats chainSetup-off hard 14-6 (seeds 1–20); vs
+      medium 16-4 → 15-5 (seeds 1–20) and 18-12 → **24-6** on fresh seeds
+      21–50 (68% → 78% combined); vs easy 18-2 → 19-1 with kills ~25% faster
+      (86s → 66s avg); attack throughput roughly doubled (0.17 → 0.30-0.40
+      cells/s). Next candidates: multi-enabler lookahead, trigger-timing
+      (hold fire to counter incoming garbage), `fireMinChain` sweeps.
 - [ ] Phase 6 stretch (X-mode, replays, WebRTC, binary codec if
       measurements demand it)
 
