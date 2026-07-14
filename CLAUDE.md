@@ -343,7 +343,9 @@ just use `pnpm` directly.
       stream (bit-identical digests), and the full relay AI-room flow.
 - [x] **AI-vs-AI arena landed** (`tools/ai-arena`): a headless, deterministic
       match runner for measuring AI changes instead of eyeballing them — two
-      seeded `GameSim`s (identical boards, so sides are symmetric), garbage
+      seeded `GameSim`s (identical boards; seats near- but not exactly
+      symmetric since A steps first and enqueues draw the receiver's RNG —
+      `--both` replays seeds with seats swapped), garbage
       ports cross-wired as in netplay, each driven by its own `AiController`;
       `(tuningA, tuningB, seed)` fully determines a result (same-tick double
       loss = draw; tick cap = distinct `timeout`). Every behavioural knob is now

@@ -6,16 +6,34 @@
  * is driven by its own `AiController` with its own tuning. Everything is
  * deterministic: a `(tuningA, tuningB, seed)` triple always produces the same
  * result, so a series over a seed batch is reproducible and any planner/tuning
- * change is *measurable* against a baseline rather than eyeballed. Because both
- * boards start identical, sides are symmetric — swapping A and B just mirrors
- * the result, so there is no need to replay swapped sides.
+ * change is *measurable* against a baseline rather than eyeballed.
+ *
+ * Seats are *near*- but not guaranteed symmetric: boards start identical, but
+ * A steps before B within a tick, and a garbage enqueue draws the
+ * **receiver's** gameplay RNG (`determineDropTime`) — so relative to the
+ * receiver's own stream, a send lands one step earlier in seat B than the
+ * mirror image. That reorders draws only when an enqueue coincides with the
+ * receiver's own in-step draws (creep-row generation), so mirrors are
+ * usually — but not provably — identical (measured: 20/20 hard-vs-medium
+ * seeds mirrored exactly). For careful comparisons run both orientations
+ * (the CLI's `--both`) and aggregate.
  *
  * A same-tick double loss is a draw (the netplay convention); hitting the tick
  * cap is reported separately as a timeout so stalemates don't masquerade as
  * draws.
  */
 
-import { AiController, GameSim, type AiTuning } from '@crack-attack/core';
+import {
+  AiController,
+  GC_PLAY_WIDTH,
+  GF_BLACK,
+  GF_COLOR_1,
+  GF_COLOR_3,
+  GF_COLOR_4,
+  GF_COLOR_5,
+  GameSim,
+  type AiTuning,
+} from '@crack-attack/core';
 
 /** Who won a single match. */
 export type MatchOutcome = 'a' | 'b' | 'draw' | 'timeout';
@@ -46,6 +64,31 @@ export interface SeriesResult {
 /** Default tick cap: 10 minutes of game time (50 ticks/s). */
 export const DEFAULT_MAX_TICKS = 30_000;
 
+/**
+ * Cells a special garbage flavor expands to when dealt (see the receiver's
+ * `dealSpecialLocalGarbage`): gray/white/color-2 are a full-width row, black a
+ * 1×2, color-3 a 1×4, color-4 a 1×3, color-5 a 3×2. Color-1 splinters by the
+ * receiver's RNG into 5–7 cells — counted as 6 (the average), so throughput
+ * for that one flavor is approximate. Exported so the test suite can verify
+ * the table against what `dealSpecialLocalGarbage` actually queues.
+ */
+export function specialCells(flavor: number): number {
+  switch (flavor) {
+    case GF_BLACK:
+      return 2;
+    case GF_COLOR_1:
+      return 6;
+    case GF_COLOR_3:
+      return 4;
+    case GF_COLOR_4:
+      return 3;
+    case GF_COLOR_5:
+      return 6;
+    default:
+      return GC_PLAY_WIDTH; // gray / white / color-2: one full-width row
+  }
+}
+
 /** Route `from`'s outgoing garbage into `to`'s queue, counting cells sent. */
 function link(from: GameSim, to: GameSim, count: (cells: number) => void): void {
   from.garbageGenerator.outSink = {
@@ -54,7 +97,7 @@ function link(from: GameSim, to: GameSim, count: (cells: number) => void): void 
       to.garbageGenerator.addToQueue(h, w, f, from.clock.time_step);
     },
     sendSpecialGarbage: (f) => {
-      count(1);
+      count(specialCells(f));
       to.garbageGenerator.addToQueue(1, 1, f, from.clock.time_step);
     },
   };

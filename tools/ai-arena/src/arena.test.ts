@@ -1,6 +1,17 @@
 import { describe, expect, it } from 'vitest';
-import { aiTuningFor } from '@crack-attack/core';
-import { runMatch, runSeries } from './arena.js';
+import {
+  GF_BLACK,
+  GF_COLOR_1,
+  GF_COLOR_2,
+  GF_COLOR_3,
+  GF_COLOR_4,
+  GF_COLOR_5,
+  GF_GRAY,
+  GF_WHITE,
+  GameSim,
+  aiTuningFor,
+} from '@crack-attack/core';
+import { runMatch, runSeries, specialCells } from './arena.js';
 import { tuningFromJson } from './config.js';
 
 describe('arena', () => {
@@ -24,6 +35,33 @@ describe('arena', () => {
     expect(series.winsA).toBeGreaterThan(series.winsB);
     expect(series.matches).toHaveLength(5);
     expect(series.winsA + series.winsB + series.draws + series.timeouts).toBe(5);
+  });
+
+  it('specialCells matches what the receiving generator actually queues', () => {
+    // Deterministic expansions: the table must agree cell-for-cell with
+    // dealSpecialLocalGarbage.
+    for (const flavor of [
+      GF_GRAY,
+      GF_WHITE,
+      GF_COLOR_2,
+      GF_BLACK,
+      GF_COLOR_3,
+      GF_COLOR_4,
+      GF_COLOR_5,
+    ]) {
+      const sim = new GameSim(3);
+      sim.garbageGenerator.addToQueue(1, 1, flavor, sim.clock.time_step);
+      expect(sim.garbageGenerator.pendingCellsWithin(sim.clock.time_step, 10_000)).toBe(
+        specialCells(flavor),
+      );
+    }
+    // COLOR_1 splinters by the receiver's RNG into 5–7 cells; the table's 6 is
+    // a documented approximation — assert the real expansion stays in range.
+    const sim = new GameSim(3);
+    sim.garbageGenerator.addToQueue(1, 1, GF_COLOR_1, sim.clock.time_step);
+    const cells = sim.garbageGenerator.pendingCellsWithin(sim.clock.time_step, 10_000);
+    expect(cells).toBeGreaterThanOrEqual(5);
+    expect(cells).toBeLessThanOrEqual(7);
   });
 
   it('tuningFromJson merges overrides over a base preset and rejects junk', () => {

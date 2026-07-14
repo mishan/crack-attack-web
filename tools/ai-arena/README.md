@@ -8,8 +8,10 @@ change should be measured here against a baseline, not eyeballed.
 Both sims share a seed (identical starting boards) with garbage ports
 cross-wired exactly as in netplay, so a `(tuningA, tuningB, seed)` triple is
 fully deterministic and any series is reproducible by naming the same seed
-range. Because the boards start identical, sides are symmetric — no need to
-replay with sides swapped.
+range. Seats are _near_- but not exactly symmetric (seat A steps first each
+tick, and garbage enqueues draw the receiver's RNG), so for careful
+comparisons pass `--both` to replay every seed with the seats swapped and
+aggregate both orientations.
 
 ## Usage
 
