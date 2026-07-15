@@ -463,7 +463,7 @@ just use `pnpm` directly.
       measured neutral-to-negative (the defensive branches already act on
       garbage in every mode) → defaults 0, kept for experiments. **Replay
       capture**: the vs-AI screen saves `(seed, difficulty, ticks, sparse
-  human inputs)` as JSON at game end ("Save replay"; the AI seat
+human inputs)` as JSON at game end ("Save replay"; the AI seat
       regenerates deterministically). **`tools/replay-analyze`**: reconstructs
       both boards bit-exactly (same wiring/step order as `aiMatch`) and
       reports each seat through the planner's own evaluator — swaps/tempo,
