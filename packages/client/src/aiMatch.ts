@@ -223,7 +223,7 @@ export function bootAiMatch(
   const saveBtn = document.createElement('button');
   saveBtn.textContent = 'Save replay';
   saveBtn.style.cssText =
-    'position:fixed;top:12px;right:120px;z-index:7;padding:6px 12px;opacity:.85;display:none';
+    'position:fixed;top:52px;right:12px;z-index:7;padding:6px 12px;opacity:.85;display:none';
   saveBtn.onclick = saveReplay;
   document.body.appendChild(saveBtn);
 
