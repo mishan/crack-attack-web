@@ -93,6 +93,12 @@ importers:
 
   tools/obj2gltf: {}
 
+  tools/replay-analyze:
+    dependencies:
+      '@crack-attack/core':
+        specifier: workspace:*
+        version: link:../../packages/core
+
   tools/replay-check:
     dependencies:
       '@crack-attack/core':

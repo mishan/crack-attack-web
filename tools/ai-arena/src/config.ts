@@ -23,6 +23,7 @@ const TUNING_FIELDS: Record<keyof AiTuning, 'number' | 'boolean'> = {
   flatten: 'boolean',
   strategic: 'boolean',
   dangerMargin: 'number',
+  garbageDangerCells: 'number',
   shatterWeight: 'number',
   shatterSetupMaxCost: 'number',
   undermine: 'boolean',

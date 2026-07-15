@@ -49,7 +49,9 @@ export type AiDifficultyLevel = 'easy' | 'medium' | 'hard';
 export interface AiTuning {
   /** Ticks the bot pauses after each swap (reaction pacing). */
   readonly cooldown: number;
-  /** Whether it digs blocks into gaps when no immediate match exists. */
+  /** Whether it digs blocks into gaps when nothing better exists — the
+   * reactive tiers' churn move, and the strategic tier's last fallback
+   * (instead of idling: measured 220 three-second stands per 8 games). */
   readonly flatten: boolean;
   /**
    * The top tier: instead of greedily clearing every 3, it look-ahead-plans
@@ -61,6 +63,14 @@ export interface AiTuning {
   /** Strategic only: switch to survival (clear anything) at this margin below
    * the safe height. Larger = defends earlier (safer, banks less). */
   readonly dangerMargin: number;
+  /** Strategic only: garbage-aware danger — every this-many garbage cells on
+   * the board raise the effective danger margin by one row (garbage is dead
+   * weight: a garbage-heavy stack at height N has far less clearable material
+   * than a clean one, so it is closer to death than its height says).
+   * 0 disables — and 0 is the default: measured neutral-to-negative, because
+   * the defensive branches (shatter fires/setups, undermine) already act on
+   * garbage in any mode, while earlier survival mode costs banking tempo. */
+  readonly garbageDangerCells: number;
   /** Strategic only: score weight per garbage cell a candidate's cascade shatters. */
   readonly shatterWeight: number;
   /** Strategic only: pursue multi-swap garbage-shatter setups up to this many
@@ -107,6 +117,11 @@ const DANGER_MARGIN = 3;
 /** Knobs shared by every tier; the presets below override behaviour per tier. */
 const BASE_TUNING: Omit<AiTuning, 'cooldown' | 'flatten' | 'strategic'> = {
   dangerMargin: DANGER_MARGIN,
+  // Measured neutral-to-negative (arena 9-14-7 vs off; heavy-stream survival
+  // no better): the defensive branches already act on garbage in any mode, so
+  // earlier survival mode just downgrades to nearest-clears. Off by default;
+  // the knob stays for experiments.
+  garbageDangerCells: 0,
   shatterWeight: 3,
   shatterSetupMaxCost: 10,
   undermine: true,
@@ -142,7 +157,7 @@ const TUNING: Record<AiDifficultyLevel, AiTuning> = {
     shatterSetupMaxCost: 0,
     chainSetup: false,
   },
-  hard: { ...BASE_TUNING, cooldown: 8, flatten: false, strategic: true },
+  hard: { ...BASE_TUNING, cooldown: 8, flatten: true, strategic: true },
 };
 
 /** The tuning preset behind a named difficulty (a copy — safe to spread/override). */
@@ -424,7 +439,18 @@ export class AiController {
       }
     }
 
-    const danger = grid.top_effective_row >= GC_SAFE_HEIGHT - this.tuning.dangerMargin;
+    // Garbage-aware danger: dead-weight cells make the stack effectively
+    // taller than its height says, so they widen the survival margin.
+    let garbageCells = 0;
+    if (this.tuning.garbageDangerCells > 0) {
+      for (const v of board.cell) if (v === PLAN_GARBAGE) garbageCells++;
+    }
+    const margin =
+      this.tuning.dangerMargin +
+      (this.tuning.garbageDangerCells > 0
+        ? Math.floor(garbageCells / this.tuning.garbageDangerCells)
+        : 0);
+    const danger = grid.top_effective_row >= GC_SAFE_HEIGHT - margin;
     if (bestFire) {
       // Trigger timing: a ready fire that shatters nothing is *held* while a
       // real slab is about to land — fired after the slab arrives, the same
@@ -452,7 +478,12 @@ export class AiController {
       const dig = planUndermine(board, cursorX, cursorY - 1);
       if (dig) return { x: dig.x, y: dig.y + 1 };
     }
-    if (danger) return null; // nothing clearable at all — idle
+    if (danger) {
+      // Nothing clearable and no garbage plan: dig peaks into gaps — it drops
+      // blocks (lowering the stack) and churns up new matches. Far better for
+      // survival than standing still.
+      return this.tuning.flatten ? this.findFlatten(grid, cursorX, cursorY) : null;
+    }
     // Safe and nothing worth firing: bank blocks. Prefer a *chain enabler* —
     // one setup swap after which a worth-firing cascade is a single trigger
     // swap away (the fire branch takes it next action tick) — over generic
@@ -473,7 +504,14 @@ export class AiController {
       const chain = this.chainCachePlan;
       if (chain) return { x: chain.x, y: chain.y + 1 }; // plan rows are grid rows − 1
     }
-    return this.findBuild(grid, cursorX, cursorY);
+    // Last resort before idling: cluster-bank, else dig — measured, the
+    // strategic tier otherwise stands still for seconds at a time (the board
+    // offers no positive-gain move until creep changes it; digging changes it
+    // *now* and feeds the planners fresh shapes).
+    return (
+      this.findBuild(grid, cursorX, cursorY) ??
+      (this.tuning.flatten ? this.findFlatten(grid, cursorX, cursorY) : null)
+    );
   }
 
   /**
