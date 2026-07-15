@@ -65,6 +65,40 @@ describe('replay-analyze', () => {
     expect(() => validateReplay({ kind: 'crack-attack-vs-ai-replay', version: 2 })).toThrow(
       /version/,
     );
+    const base = {
+      kind: 'crack-attack-vs-ai-replay',
+      version: 1,
+      seed: 1,
+      difficulty: 'hard',
+      ticks: 10,
+      actions: [],
+    };
+    expect(() => validateReplay({ ...base, seed: 1.5 })).toThrow(/seed must be an integer/);
+    // Per-entry validation: tick bounds, duplicate ticks, command bit masks.
+    expect(() => validateReplay({ ...base, actions: [{ tick: 11, command: 16 }] })).toThrow(
+      /outside 1\.\.10/,
+    );
+    expect(() => validateReplay({ ...base, actions: [{ tick: 0, command: 16 }] })).toThrow(
+      /outside 1\.\.10/,
+    );
+    expect(() =>
+      validateReplay({
+        ...base,
+        actions: [
+          { tick: 3, command: 16 },
+          { tick: 3, command: 1 },
+        ],
+      }),
+    ).toThrow(/duplicate action/);
+    expect(() => validateReplay({ ...base, actions: [{ tick: 3, command: 1 << 9 }] })).toThrow(
+      /not a valid CC_\* mask/,
+    );
+    expect(() => validateReplay({ ...base, actions: [{ tick: 3, command: 0 }] })).toThrow(
+      /not a valid CC_\* mask/,
+    );
+    expect(() => validateReplay({ ...base, actions: [null] })).toThrow(/must be objects/);
+    // A well-formed replay passes.
+    expect(validateReplay({ ...base, actions: [{ tick: 3, command: 16 }] }).ticks).toBe(10);
     expect(() =>
       validateReplay({
         kind: 'crack-attack-vs-ai-replay',

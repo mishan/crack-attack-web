@@ -106,6 +106,21 @@ export class GarbageGenerator {
   }
 
   /**
+   * Inspection: total garbage cells across all pending drops, regardless of
+   * alarm. Measuring the delta around an `addToQueue` call gives the *exact*
+   * cells a send delivered — including special-flavor expansion and queue-full
+   * drops — which is how the analysis tooling counts garbage.
+   */
+  get pendingCells(): number {
+    let cells = 0;
+    for (let n = 0; n < GC_GARBAGE_QUEUE_SIZE; n++) {
+      const e = this.garbage_queue[n]!;
+      if (e.active) cells += e.height * e.width;
+    }
+    return cells;
+  }
+
+  /**
    * Inspection: total garbage cells in pending drops whose alarm falls within
    * `window` ticks of `now` (alarms already past count too — those retry every
    * tick until the board has room). Pure read of lockstep-deterministic state;

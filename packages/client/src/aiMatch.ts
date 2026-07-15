@@ -98,7 +98,9 @@ export function bootAiMatch(
     link.href = url;
     link.download = `replay-vs-${difficulty}-${seed}.json`;
     link.click();
-    URL.revokeObjectURL(url);
+    // Revoking synchronously can cancel the download in some browsers — give
+    // the navigation ample time to start before releasing the blob.
+    setTimeout(() => URL.revokeObjectURL(url), 30_000);
   };
 
   const boards = [makeBoard(humanSim, 'YOU', 0), makeBoard(aiSim, `CPU · ${difficulty}`, 1)] as [

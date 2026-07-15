@@ -22,6 +22,12 @@
 import {
   ActionState,
   AiController,
+  CC_ADVANCE,
+  CC_DOWN,
+  CC_LEFT,
+  CC_RIGHT,
+  CC_SWAP,
+  CC_UP,
   GC_SAFE_HEIGHT,
   GameSim,
   SS_SWAPPING,
@@ -30,6 +36,9 @@ import {
   type AiDifficultyLevel,
   type SignEvent,
 } from '@crack-attack/core';
+
+/** Every valid command bit OR'd together (as in replay-check's validation). */
+const ALL_COMMAND_BITS = CC_LEFT | CC_RIGHT | CC_UP | CC_DOWN | CC_SWAP | CC_ADVANCE;
 
 /** The saved replay format (client `aiMatch` `saveReplay`). */
 export interface VsAiReplay {
@@ -96,19 +105,46 @@ function newSeatReport(): SeatReport {
   };
 }
 
-/** Basic shape validation for a JSON-loaded replay; throws with a reason. */
+/**
+ * Full shape validation for a JSON-loaded replay; throws with a specific
+ * reason. This is the safety boundary for external input — every action entry
+ * is checked (integer tick in range, no duplicates, command a valid CC_* mask)
+ * so malformed files fail here with a clear message instead of surfacing as
+ * confusing behavior mid-analysis.
+ */
 export function validateReplay(value: unknown): VsAiReplay {
   const r = value as Partial<VsAiReplay> | null;
   if (!r || typeof r !== 'object') throw new Error('replay must be a JSON object');
   if (r.kind !== 'crack-attack-vs-ai-replay')
     throw new Error(`unexpected kind "${String(r.kind)}"`);
   if (r.version !== 1) throw new Error(`unsupported version ${String(r.version)}`);
-  if (typeof r.seed !== 'number') throw new Error('missing seed');
+  if (typeof r.seed !== 'number' || !Number.isInteger(r.seed)) {
+    throw new Error(`seed must be an integer (got ${String(r.seed)})`);
+  }
   if (r.difficulty !== 'easy' && r.difficulty !== 'medium' && r.difficulty !== 'hard') {
     throw new Error(`bad difficulty "${String(r.difficulty)}"`);
   }
   if (!Number.isInteger(r.ticks) || (r.ticks as number) < 0) throw new Error('bad ticks');
   if (!Array.isArray(r.actions)) throw new Error('missing actions');
+  const seen = new Set<number>();
+  for (const a of r.actions as unknown[]) {
+    const e = a as { tick?: unknown; command?: unknown } | null;
+    if (!e || typeof e !== 'object') throw new Error('action entries must be objects');
+    if (!Number.isInteger(e.tick) || (e.tick as number) < 1 || (e.tick as number) > r.ticks!) {
+      throw new Error(`action tick ${String(e.tick)} outside 1..${r.ticks}`);
+    }
+    if (
+      !Number.isInteger(e.command) ||
+      (e.command as number) <= 0 ||
+      ((e.command as number) & ~ALL_COMMAND_BITS) !== 0
+    ) {
+      throw new Error(
+        `action command ${String(e.command)} at tick ${String(e.tick)} is not a valid CC_* mask`,
+      );
+    }
+    if (seen.has(e.tick as number)) throw new Error(`duplicate action for tick ${String(e.tick)}`);
+    seen.add(e.tick as number);
+  }
   return r as VsAiReplay;
 }
 
@@ -164,15 +200,26 @@ export function analyzeReplay(replay: VsAiReplay): Analysis {
   const aiReport = newSeatReport();
   const timeline: FireEvent[] = [];
 
+  // Garbage is counted as the exact queued-cell delta on the *receiver* — this
+  // accounts for special-flavor expansion (a gray special is a full-width row,
+  // color-1 splinters by the receiver's RNG) and for queue-full drops, unlike
+  // counting the sender's nominal dimensions.
   const link = (from: GameSim, to: GameSim, report: SeatReport): void => {
+    const delivered = (deal: () => void): number => {
+      const before = to.garbageGenerator.pendingCells;
+      deal();
+      return to.garbageGenerator.pendingCells - before;
+    };
     from.garbageGenerator.outSink = {
       sendGarbage: (h, w, f) => {
-        report.garbageSent += h * w;
-        to.garbageGenerator.addToQueue(h, w, f, from.clock.time_step);
+        report.garbageSent += delivered(() =>
+          to.garbageGenerator.addToQueue(h, w, f, from.clock.time_step),
+        );
       },
       sendSpecialGarbage: (f) => {
-        report.garbageSent += 1;
-        to.garbageGenerator.addToQueue(1, 1, f, from.clock.time_step);
+        report.garbageSent += delivered(() =>
+          to.garbageGenerator.addToQueue(1, 1, f, from.clock.time_step),
+        );
       },
     };
   };
