@@ -26,7 +26,8 @@ import {
 import { bootAiDemo } from './aiDemo.js';
 import { bootAiMatch } from './aiMatch.js';
 import { pickAiDifficulty } from './render/aiDifficultyPicker.js';
-import { pickAiMatchup, type AiMatchup } from './render/aiMatchupPicker.js';
+import { pickAiMatchup } from './render/aiMatchupPicker.js';
+import { parseDemoMatchup } from './view/demoMatchup.js';
 import { KeyboardInput } from './input/keyboard.js';
 import { mountTouchControls } from './input/touchControls.js';
 import { BoardView, DEFAULT_RENDER_TUNING } from './render/boardView.js';
@@ -85,14 +86,6 @@ function resolveRelayUrl(params: URLSearchParams): string {
   if (fromEnv) return fromEnv;
   const scheme = globalThis.location.protocol === 'https:' ? 'wss' : 'ws';
   return `${scheme}://${globalThis.location.hostname}:8080`;
-}
-
-/** `?demo=easy,hard` → that pairing (`?demo=easy` → easy vs easy); a bare or unknown value → hard vs hard. */
-function parseDemoMatchup(value: string | null): AiMatchup {
-  const tier = (s: string | undefined): AiDifficultyLevel =>
-    s === 'easy' || s === 'medium' || s === 'hard' ? s : 'hard';
-  const [left, right] = (value ?? '').split(',');
-  return { left: tier(left), right: tier(right ?? left) };
 }
 
 /** Whether an event target is a form control or editable element (keys should pass through). */
