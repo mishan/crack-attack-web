@@ -1,7 +1,7 @@
 # Parity survey — what's left vs. the original C++
 
 Audit of `crack-attack/` (reference source) against the port, focused on
-presentation/meta; the rules layer is complete (see CLAUDE.md port status).
+presentation/meta; the rules layer is complete (see AGENTS.md port status).
 File:line references are into `crack-attack/src/`.
 
 ## Confirmed missing (the visible seven)

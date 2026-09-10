@@ -143,7 +143,7 @@ vite.config.ts.timestamp-*
 .vite/
 
 # Vendored upstream C++ source — kept in the workspace as the port reference,
-# not committed. Read it locally; port from it. See CLAUDE.md.
+# not committed. Read it locally; port from it. See AGENTS.md.
 /crack-attack/
 
 packages/server/crack-attack.db*
