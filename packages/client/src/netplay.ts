@@ -799,6 +799,10 @@ export function bootNetplay(
       countdown: metaTicks < COUNTDOWN_GATE_TICKS,
       rematchSent,
     });
+    // A half-finished confirm never carries over: once Concede isn't live (the
+    // match ended, or the next one is in its countdown), disarm it, so a rematch
+    // always needs a fresh first tap.
+    if (a.concede !== 'enabled') concedeArmedUntil = 0;
     const armed = nowMs < concedeArmedUntil;
     applyButton(
       concedeBtn,
