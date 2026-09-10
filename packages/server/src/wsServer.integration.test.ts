@@ -7,18 +7,23 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import WebSocket from 'ws';
 import {
+  ACTION_MASK,
+  MAX_INPUT_FRAMES_PER_MESSAGE,
+  MAX_PLAYER_NAME_LENGTH,
   PROTOCOL_VERSION,
   encodeMessage,
   decodeServerMessage,
   type ClientMessage,
   type ServerMessage,
 } from '@crack-attack/protocol';
-import { startRelayWsServer, type RelayWsServer } from './wsServer.js';
+import { MAX_CLIENT_MESSAGE_BYTES, startRelayWsServer, type RelayWsServer } from './wsServer.js';
 
 class TestClient {
   private readonly ws: WebSocket;
   private readonly inbox: ServerMessage[] = [];
   private waiter: (() => void) | null = null;
+  /** Resolves with the close code once the socket closes. */
+  readonly closed: Promise<number>;
 
   constructor(port: number) {
     this.ws = new WebSocket(`ws://127.0.0.1:${port}`);
@@ -26,6 +31,7 @@ class TestClient {
       this.inbox.push(decodeServerMessage(data.toString()));
       this.waiter?.();
     });
+    this.closed = new Promise((resolve) => this.ws.once('close', (code) => resolve(code)));
   }
 
   async open(): Promise<void> {
@@ -37,6 +43,11 @@ class TestClient {
 
   send(msg: ClientMessage): void {
     this.ws.send(encodeMessage(msg));
+  }
+
+  /** Send arbitrary text, bypassing the codec. */
+  sendRaw(text: string): void {
+    this.ws.send(text);
   }
 
   /** Wait for (and consume) the next message of the given type. */
@@ -119,6 +130,49 @@ describe('relay over WebSocket', () => {
     expect(desyncA.tick).toBe(64);
     const endB = await bob.next('match_end');
     expect(endB.reason).toBe('desync');
+
+    alice.close();
+    bob.close();
+  });
+
+  it('sizes the payload limit well above the largest legitimate client message', () => {
+    const worstInputs = encodeMessage({
+      type: 'inputs',
+      startTick: 0xffffffff,
+      frames: new Array<number>(MAX_INPUT_FRAMES_PER_MESSAGE).fill(ACTION_MASK),
+    });
+    const worstHello = encodeMessage({
+      type: 'hello',
+      protocolVersion: 0xffffffff,
+      name: '\u0001'.repeat(MAX_PLAYER_NAME_LENGTH), // JSON-escaped: 6 bytes/char
+      token: 'f'.repeat(32),
+    });
+    for (const text of [worstInputs, worstHello]) {
+      expect(Buffer.byteLength(text, 'utf8') * 8).toBeLessThan(MAX_CLIENT_MESSAGE_BYTES);
+    }
+  });
+
+  it('closes a connection sending an oversized message (1009), serving others', async () => {
+    server = await startRelayWsServer({ port: 0 });
+    const alice = new TestClient(server.port);
+    const mallory = new TestClient(server.port);
+    await alice.open();
+    await mallory.open();
+    alice.send({ type: 'hello', protocolVersion: PROTOCOL_VERSION, name: 'alice' });
+    await alice.next('welcome');
+
+    mallory.sendRaw('x'.repeat(MAX_CLIENT_MESSAGE_BYTES + 1));
+    expect(await mallory.closed).toBe(1009); // "message too big"
+
+    // The server is still up: the existing client carries on, new ones connect.
+    alice.send({ type: 'create_room' });
+    const { code } = await alice.next('room_created');
+    const bob = new TestClient(server.port);
+    await bob.open();
+    bob.send({ type: 'hello', protocolVersion: PROTOCOL_VERSION, name: 'bob' });
+    await bob.next('welcome');
+    bob.send({ type: 'join_room', code });
+    expect((await bob.next('room_joined')).players).toEqual(['alice', 'bob']);
 
     alice.close();
     bob.close();

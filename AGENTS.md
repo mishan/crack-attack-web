@@ -300,7 +300,7 @@ A generator header that a real, non-AI tool always writes (e.g. a lockfile's own
       also the comparison key for the future `tools/replay-check` harness.
       `packages/server`: transport-free `RelayServer` (hello/version gate, rooms,
       ready → `match_start` with server seed + pinned player indices, verbatim
-      input relay with fatal contiguity enforcement, digest comparison → `desync`,
+      input relay with fatal contiguity/ledger-cap/pacing enforcement, digest comparison → `desync`,
       concede/disconnect forfeits, rematch by re-readying — the relay never learns
       gameplay outcomes, they're deterministic) + `wsServer.ts` (`ws`) + `main.ts`
       CLI (PORT/HOST, default 8080 per `CO_DEFAULT_PORT`); unit tests on fake

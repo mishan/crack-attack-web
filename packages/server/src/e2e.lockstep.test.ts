@@ -11,7 +11,14 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import { CC_ADVANCE, CC_LEFT, CC_RIGHT, CC_SWAP, Rng } from '@crack-attack/core';
+import {
+  CC_ADVANCE,
+  CC_LEFT,
+  CC_RIGHT,
+  CC_SWAP,
+  GC_TIME_STEP_PERIOD,
+  Rng,
+} from '@crack-attack/core';
 import {
   PROTOCOL_VERSION,
   decodeServerMessage,
@@ -22,6 +29,14 @@ import {
 import { LockstepSession } from '../../client/src/net/lockstep.js';
 import { SpectatorSession } from '../../client/src/net/spectator.js';
 import { RelayServer, type ClientConnection } from './relay.js';
+
+/**
+ * Virtual wall clock for the relay's input pacing. These tests play whole
+ * matches far faster than real time, so each pump advances this clock by the
+ * ticks it asks for, as a 50 Hz render loop would.
+ */
+let virtualMs = 0;
+const virtualNow = (): number => virtualMs;
 
 /** A headless netplay client: relay connection + lockstep session + input script. */
 class HeadlessPlayer {
@@ -97,6 +112,7 @@ class HeadlessPlayer {
   async pump(steps: number): Promise<void> {
     const s = this.session;
     if (!s) return;
+    virtualMs += steps * GC_TIME_STEP_PERIOD;
     s.advance(steps, this.script);
     for (const b of s.takeOutgoing()) {
       await this.say({ type: 'inputs', startTick: b.startTick, frames: b.frames });
@@ -116,7 +132,7 @@ describe('end-to-end lockstep through the relay', () => {
     'plays a full match to a deterministic outcome with zero desyncs',
     { timeout: E2E_TIMEOUT_MS },
     async () => {
-      const relay = new RelayServer({ inputDelay: 3 });
+      const relay = new RelayServer({ inputDelay: 3, now: virtualNow });
       const alice = new HeadlessPlayer(relay, 101);
       const bob = new HeadlessPlayer(relay, 202);
       await alice.join('alice');
@@ -171,7 +187,7 @@ describe('end-to-end lockstep through the relay', () => {
     'survives a mid-match drop: rejoin by token, resume, identical outcome',
     { timeout: E2E_TIMEOUT_MS },
     async () => {
-      const relay = new RelayServer({ inputDelay: 3, graceMs: 60_000 });
+      const relay = new RelayServer({ inputDelay: 3, graceMs: 60_000, now: virtualNow });
       const alice = new HeadlessPlayer(relay, 101);
       const bob = new HeadlessPlayer(relay, 202);
       await alice.join('alice');
@@ -231,7 +247,7 @@ describe('end-to-end lockstep through the relay', () => {
     'a mid-match spectator catches up and observes the identical outcome',
     { timeout: E2E_TIMEOUT_MS },
     async () => {
-      const relay = new RelayServer({ inputDelay: 3 });
+      const relay = new RelayServer({ inputDelay: 3, now: virtualNow });
       const alice = new HeadlessPlayer(relay, 101);
       const bob = new HeadlessPlayer(relay, 202);
       await alice.join('alice');

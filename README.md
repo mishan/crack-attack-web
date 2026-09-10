@@ -141,6 +141,13 @@ It listens on **:8080** by default and prints the address it bound to. The relay
 forwards input frames, assigns rooms/seeds, compares digests, and persists
 win/loss records — it never runs the simulation itself.
 
+Abuse limits: incoming WebSocket messages are capped at **16 KiB** (the largest
+legitimate one is under 1 KiB; ws closes an offending connection with code
+1009), and a player whose input stream outruns real time by more than ~2 s or
+exceeds the per-match ledger cap is disconnected like any protocol violation.
+Background store failures (e.g. a busy SQLite file when recording a forfeit)
+are logged to stderr and the relay keeps serving.
+
 ### Server environment variables
 
 | Var    | Default             | Meaning                                                            |
