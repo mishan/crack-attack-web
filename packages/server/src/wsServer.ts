@@ -29,6 +29,18 @@ export interface RelayWsServer {
 /** Default port, matching the original (CO_DEFAULT_PORT, Communicator.h:35). */
 export const DEFAULT_PORT = 8080;
 
+/**
+ * Largest incoming WebSocket message the relay accepts, in bytes (ws's
+ * `maxPayload`; its default is 100 MiB). The biggest legitimate client→server
+ * message is a full `inputs` batch: MAX_INPUT_FRAMES_PER_MESSAGE (250) frames
+ * of at most 2 digits (ACTION_MASK = 63) plus commas, a uint32 startTick and
+ * the envelope — about 800 bytes of compact JSON. Everything else is smaller
+ * (a worst-case `hello`: a 32-unit name fully \u-escaped is 192 bytes, plus a
+ * 32-char token — under 300). 16 KiB leaves ~20x headroom; anything bigger is
+ * hostile, and ws closes that connection with 1009 (message too big).
+ */
+export const MAX_CLIENT_MESSAGE_BYTES = 16 * 1024;
+
 /** Start a relay on a WebSocket server. Resolves once listening. */
 export function startRelayWsServer(options: RelayWsServerOptions = {}): Promise<RelayWsServer> {
   // Entropy defaults to a CSPRNG inside RelayServer itself.
@@ -37,8 +49,10 @@ export function startRelayWsServer(options: RelayWsServerOptions = {}): Promise<
     inputDelay: options.inputDelay,
     store: options.store,
     graceMs: options.graceMs,
+    now: options.now,
   });
   const wss = new WebSocketServer({
+    maxPayload: MAX_CLIENT_MESSAGE_BYTES,
     port: options.port ?? DEFAULT_PORT,
     ...(options.host !== undefined ? { host: options.host } : {}),
   });

@@ -31,11 +31,29 @@ const store = new SqliteStore(dbPath);
 const server = await startRelayWsServer({ port, host, store });
 console.log(`crack-attack relay listening on :${server.port} (db: ${dbPath})`);
 
+// Last-resort handlers, installed once listening (startup failures still exit
+// as before). A stray rejection is a background store write that failed —
+// it cost a stats update, not relay state — so log and keep serving. An
+// uncaught exception may have left room/session state half-updated: exit.
+process.on('unhandledRejection', (reason) => {
+  console.error('relay: unhandled promise rejection (continuing):', reason);
+});
+process.on('uncaughtException', (err) => {
+  console.error('relay: uncaught exception, exiting:', err);
+  process.exit(1);
+});
+
 for (const signal of ['SIGINT', 'SIGTERM'] as const) {
   process.on(signal, () => {
-    void server
+    server
       .close()
       .then(() => store.close())
-      .then(() => process.exit(0));
+      .then(
+        () => process.exit(0),
+        (err: unknown) => {
+          console.error('relay: shutdown failed:', err);
+          process.exit(1);
+        },
+      );
   });
 }

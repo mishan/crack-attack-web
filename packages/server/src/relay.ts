@@ -17,9 +17,11 @@
  * Original work Copyright (C) 2000 Daniel Nelson. GPL-2.0-or-later.
  */
 
+import { GC_STEPS_PER_SECOND } from '@crack-attack/core';
 import {
   DEFAULT_INPUT_DELAY_TICKS,
   DEFAULT_RECONNECT_GRACE_MS,
+  MAX_MATCH_FRAMES,
   PROTOCOL_VERSION,
   ROOM_CODE_ALPHABET,
   ROOM_CODE_LENGTH,
@@ -54,6 +56,18 @@ export interface ClientConnection {
  * exceeding this is violating the protocol.
  */
 const MAX_PENDING_DIGESTS = 128;
+
+/**
+ * How far (in ticks) a seat's input frontier may run ahead of real time since
+ * `match_start`, on top of the match's `inputDelay` pre-fill. An honest client
+ * samples one frame per stepped tick and its fixed timestep never steps faster
+ * than wall-clock 50 Hz (catch-up bursts only replay already-buffered *remote*
+ * frames; the countdown gate makes it lag), and it receives `match_start` after
+ * the server stamped it — so it only ever trails this bound. The 2 s allowance
+ * is generous slack for clock-rate skew and batching. A client beyond it is
+ * flooding the ledger faster than the game can be played: fatal.
+ */
+export const MAX_INPUT_LEAD_TICKS = 2 * GC_STEPS_PER_SECOND;
 
 /**
  * A player's place in a room. Unlike a connection, a seat survives a
@@ -99,6 +113,8 @@ interface Room {
   state: 'waiting' | 'playing';
   /** Seed of the current match (kept for `match_resume`). */
   seed: number;
+  /** `now()` at the current match's start: the input-pacing baseline. */
+  started_at: number;
   /**
    * Digests at or below this tick are ignored: set on resume to the ledger
    * frontier, since the rejoining client replays from tick 0 and resubmits
@@ -153,6 +169,12 @@ export interface RelayServerOptions {
   store?: LobbyStore | undefined;
   /** Reconnect grace in ms; DEFAULT_RECONNECT_GRACE_MS unless overridden. */
   graceMs?: number | undefined;
+  /**
+   * Monotonic clock in ms for input pacing; defaults to `performance.now()`
+   * (unlike `Date.now()`, it can't jump backwards on an NTP/clock adjustment
+   * and wrongly disconnect honest players). Inject for tests.
+   */
+  now?: (() => number) | undefined;
 }
 
 export class RelayServer {
@@ -164,12 +186,14 @@ export class RelayServer {
   private readonly inputDelay: number;
   private readonly store: LobbyStore;
   private readonly graceMs: number;
+  private readonly now: () => number;
 
   constructor(options: RelayServerOptions = {}) {
     this.entropy = options.entropy ?? cryptoEntropy;
     this.inputDelay = options.inputDelay ?? DEFAULT_INPUT_DELAY_TICKS;
     this.store = options.store ?? new MemoryStore();
     this.graceMs = options.graceMs ?? DEFAULT_RECONNECT_GRACE_MS;
+    this.now = options.now ?? (() => performance.now());
   }
 
   /** Number of open rooms (inspection/test helper). */
@@ -331,7 +355,11 @@ export class RelayServer {
     if (room.grace_timer !== null) clearTimeout(room.grace_timer);
     room.grace_timer = setTimeout(() => {
       room.grace_timer = null;
-      void this.expireGrace(room, seat);
+      // Nothing awaits a timer callback: an escaping rejection would be
+      // unhandled, which by default exits the whole relay.
+      this.expireGrace(room, seat).catch((err: unknown) => {
+        console.error(`relay: grace expiry failed (room ${room.code}):`, err);
+      });
     }, this.graceMs);
   }
 
@@ -346,7 +374,13 @@ export class RelayServer {
       this.broadcastRoomList();
       return;
     }
-    await this.recordDecisive(peer, seat);
+    try {
+      await this.recordDecisive(peer, seat);
+    } catch (err) {
+      // A failed store write (e.g. SQLITE_BUSY) only costs the stats update;
+      // the survivor must still get the forfeit, or the room sticks in play.
+      console.error(`relay: failed to record grace-expiry forfeit (room ${room.code}):`, err);
+    }
     this.endMatch(room, 'disconnect', peer.match_index);
     if (peer.conn) this.send(peer.conn, { type: 'peer_left', name: seat.name });
     for (const w of room.spectators) this.send(w.conn, { type: 'peer_left', name: seat.name });
@@ -443,6 +477,7 @@ export class RelayServer {
       spectators: [],
       state: 'waiting',
       seed: 0,
+      started_at: 0,
       digest_floor: -1,
       grace_timer: null,
     };
@@ -571,6 +606,7 @@ export class RelayServer {
     // Server-generated seed, replacing the original's seed exchange
     // (Communicator.cxx:283-296). Both clients derive both sims from it.
     room.seed = randomUint32(this.entropy);
+    room.started_at = this.now();
     room.digest_floor = -1;
     // Pin indices from the current seat order before deriving names.
     for (let i = 0; i < 2; i++) room.seats[i]!.match_index = i;
@@ -624,12 +660,32 @@ export class RelayServer {
     // ordered and reliable, so a gap or overlap is a client bug that would
     // silently corrupt lockstep — treat it as fatal.
     if (startTick !== seat.frames.length) {
-      this.error(
+      this.fatal(
         session.conn,
-        'bad_message',
         `inputs batch starts at ${startTick}, expected ${seat.frames.length}`,
       );
-      session.conn.close();
+      return;
+    }
+    const frontier = seat.frames.length + frames.length;
+    // Ledger cap: the codec rejects longer match_resume/spectate_start
+    // histories, so a seat past it could no longer be resumed or watched —
+    // and the ledger lives in server memory. Fatal, like a contiguity break.
+    if (frontier > MAX_MATCH_FRAMES) {
+      this.fatal(session.conn, `inputs ledger would exceed ${MAX_MATCH_FRAMES} frames`);
+      return;
+    }
+    // Pacing: the frontier may not outrun real time (see MAX_INPUT_LEAD_TICKS).
+    // Checked against the server-side ledger, so a resumed client — which
+    // replays from the ledger and only then sends live input — is unaffected;
+    // a bot seat's stream never reaches the relay at all.
+    // Clamped at 0 so even an injected clock that steps back can't shrink the allowance.
+    const elapsed = Math.max(
+      0,
+      Math.floor(((this.now() - room.started_at) * GC_STEPS_PER_SECOND) / 1000),
+    );
+    const allowed = elapsed + this.inputDelay + MAX_INPUT_LEAD_TICKS;
+    if (frontier > allowed) {
+      this.fatal(session.conn, `inputs frontier ${frontier} runs ahead of the clock (${allowed})`);
       return;
     }
     for (const f of frames) seat.frames.push(f);
@@ -843,8 +899,10 @@ export class RelayServer {
     }
     if (room.state === 'playing') {
       // Leaving mid-match forfeits it. Recording is fire-and-forget here (the
-      // handler path is sync); failures only cost a stats update.
-      void this.recordDecisive(peer, seat).catch(() => undefined);
+      // handler path is sync); failures only cost a stats update, but log them.
+      this.recordDecisive(peer, seat).catch((err: unknown) => {
+        console.error(`relay: failed to record mid-match leave forfeit (room ${room.code}):`, err);
+      });
       this.endMatch(room, 'disconnect', peer.match_index);
     }
     if (peer.conn) this.send(peer.conn, { type: 'peer_left', name: seat.name });
@@ -913,5 +971,15 @@ export class RelayServer {
 
   private error(conn: ClientConnection, code: ErrorCode, message: string): void {
     this.send(conn, { type: 'error', code, message });
+  }
+
+  /**
+   * A protocol violation that would corrupt lockstep or exhaust the relay:
+   * report it and close. A mid-match close then takes the ordinary disconnect
+   * path (reconnect grace, then forfeit).
+   */
+  private fatal(conn: ClientConnection, message: string): void {
+    this.error(conn, 'bad_message', message);
+    conn.close();
   }
 }

@@ -1,6 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { GC_STEPS_PER_SECOND } from '@crack-attack/core';
 import {
+  DEFAULT_INPUT_DELAY_TICKS,
   DEFAULT_RECONNECT_GRACE_MS,
+  MAX_INPUT_FRAMES_PER_MESSAGE,
+  MAX_MATCH_FRAMES,
   PROTOCOL_VERSION,
   encodeMessage,
   decodeServerMessage,
@@ -9,8 +13,20 @@ import {
   type ClientMessage,
   type ServerMessage,
 } from '@crack-attack/protocol';
-import { RelayServer, type ClientConnection } from './relay.js';
+import { MAX_INPUT_LEAD_TICKS, RelayServer, type ClientConnection } from './relay.js';
 import { MemoryStore } from './store.js';
+
+/** A store whose result writes fail, like a SQLITE_BUSY or closed-DB backend. */
+class FailingRecordStore extends MemoryStore {
+  override recordResult(): Promise<void> {
+    return Promise.reject(new Error('SQLITE_BUSY: database is locked'));
+  }
+}
+
+/** `n` neutral input frames. */
+function neutral(n: number): number[] {
+  return new Array<number>(n).fill(0);
+}
 
 /** A fake connection capturing everything the relay sends. */
 class FakeConn implements ClientConnection {
@@ -267,6 +283,100 @@ describe('input relay', () => {
     expect(a.lastOf('error').code).toBe('bad_message');
     expect(a.closed).toBe(true);
   });
+
+  it('treats a batch pushing the ledger past MAX_MATCH_FRAMES as fatal', async () => {
+    let ms = 0;
+    const relay = new RelayServer({ now: () => ms });
+    const [a, b] = await startedMatch(relay);
+    ms = 1e12; // far in the future, so pacing never binds: isolate the cap
+    const batch = neutral(MAX_INPUT_FRAMES_PER_MESSAGE);
+    for (let t = 0; t < MAX_MATCH_FRAMES; t += batch.length) {
+      await say(relay, a, { type: 'inputs', startTick: t, frames: batch });
+      b.clear();
+    }
+    expect(a.closed).toBe(false); // exactly at the cap is fine
+    await say(relay, a, { type: 'inputs', startTick: MAX_MATCH_FRAMES, frames: [0] });
+    expect(a.lastOf('error').code).toBe('bad_message');
+    expect(a.closed).toBe(true);
+    expect(b.allOf('peer_inputs')).toHaveLength(0); // rejected, not relayed
+  });
+
+  it('treats inputs running ahead of real time as fatal', async () => {
+    let ms = 0;
+    const relay = new RelayServer({ now: () => ms });
+    const [a, b] = await startedMatch(relay);
+    // At match start, the inputDelay pre-fill plus the lead allowance is fine...
+    const lead = DEFAULT_INPUT_DELAY_TICKS + MAX_INPUT_LEAD_TICKS;
+    await say(relay, a, { type: 'inputs', startTick: 0, frames: neutral(lead) });
+    // ...as is another second's worth once a second has passed...
+    ms += 1000;
+    await say(relay, a, {
+      type: 'inputs',
+      startTick: lead,
+      frames: neutral(GC_STEPS_PER_SECOND),
+    });
+    expect(a.closed).toBe(false);
+    b.clear();
+    // ...but a single frame beyond that is not.
+    await say(relay, a, { type: 'inputs', startTick: lead + GC_STEPS_PER_SECOND, frames: [0] });
+    expect(a.lastOf('error').code).toBe('bad_message');
+    expect(a.closed).toBe(true);
+    expect(b.allOf('peer_inputs')).toHaveLength(0);
+  });
+
+  it('accepts real-time pacing across a drop and resume, and in vs-AI rooms', async () => {
+    let ms = 0;
+    const relay = new RelayServer({ now: () => ms, graceMs: 60_000 });
+    const a = await client(relay, 'alice');
+    const tokenA = a.lastOf('welcome').token;
+    const b = await client(relay, 'bob');
+    const code = await createRoom(relay, a);
+    await say(relay, b, { type: 'join_room', code });
+    await say(relay, a, { type: 'ready' });
+    await say(relay, b, { type: 'ready' });
+
+    // Like a client: inputDelay neutral frames up front, then one batch per
+    // render frame at 50 Hz (5 ticks per 100 ms here).
+    const frontier = new Map<FakeConn, number>();
+    const send = async (conn: FakeConn, n: number): Promise<void> => {
+      const t = frontier.get(conn) ?? 0;
+      await say(relay, conn, { type: 'inputs', startTick: t, frames: neutral(n) });
+      frontier.set(conn, t + n);
+    };
+    /** `seconds` of real-time play by `players`, sharing one clock. */
+    const play = async (seconds: number, ...players: FakeConn[]): Promise<void> => {
+      for (let i = 0; i < seconds * 10; i++) {
+        ms += 100;
+        for (const p of players) await send(p, 5);
+      }
+    };
+    await send(a, DEFAULT_INPUT_DELAY_TICKS);
+    await send(b, DEFAULT_INPUT_DELAY_TICKS);
+    await play(10, a, b);
+
+    // Alice drops for 20 s (bob stalls in lockstep), then rejoins: the server
+    // checks its own ledger frontier, so her live input continues unhindered.
+    relay.disconnect(a);
+    ms += 20_000;
+    const a2 = await client(relay, 'alice', tokenA);
+    expect(a2.lastOf('match_resume').frames[0]).toHaveLength(frontier.get(a)!);
+    frontier.set(a2, frontier.get(a)!);
+    await play(10, a2, b);
+    for (const conn of [a2, b]) {
+      expect(conn.allOf('error')).toEqual([]);
+      expect(conn.closed).toBe(false);
+    }
+
+    // vs-AI: the bot's stream never crosses the wire; the human's is paced alone.
+    const c = await client(relay, 'carol');
+    await say(relay, c, { type: 'create_room', aiOpponent: { difficulty: 'easy' } });
+    await say(relay, c, { type: 'ready' });
+    await send(c, DEFAULT_INPUT_DELAY_TICKS);
+    await play(10, c);
+    expect(c.allOf('error')).toEqual([]);
+    expect(c.closed).toBe(false);
+    relay.shutdown();
+  });
 });
 
 describe('digest comparison', () => {
@@ -358,6 +468,25 @@ describe('results + records', () => {
     // A later session with alice's token sees the recorded win.
     const a2 = await client(relay, 'alice', tokenA);
     expect(a2.lastOf('welcome').record).toEqual({ wins: 1, losses: 0 });
+  });
+});
+
+describe('background store failures', () => {
+  it('logs (not swallows) a failed forfeit write on a mid-match leave', async () => {
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    try {
+      const relay = new RelayServer({ store: new FailingRecordStore() });
+      const [a, b] = await startedMatch(relay);
+      await say(relay, a, { type: 'leave_room' });
+      expect(b.lastOf('match_end')).toEqual({ type: 'match_end', reason: 'disconnect', winner: 1 });
+      await new Promise((resolve) => setTimeout(resolve, 0)); // let the write settle
+      expect(errors).toHaveBeenCalledWith(
+        expect.stringContaining('mid-match leave forfeit'),
+        expect.any(Error),
+      );
+    } finally {
+      errors.mockRestore();
+    }
   });
 });
 
@@ -614,6 +743,34 @@ describe('reconnect grace', () => {
     const a2 = await client(relay, 'alice', tokenA);
     expect(a2.allOf('match_resume')).toHaveLength(0); // nothing to rejoin
     expect(a2.lastOf('welcome').record).toEqual({ wins: 1, losses: 0 }); // once
+  });
+
+  it('logs a failed forfeit write at grace expiry and keeps serving', async () => {
+    // Regression: the timer callback discarded the expiry promise, so a store
+    // rejection became an unhandled rejection (which exits Node by default).
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    try {
+      const relay = new RelayServer({ store: new FailingRecordStore() });
+      const { b, code } = await droppedMidMatch(relay);
+      await vi.advanceTimersByTimeAsync(DEFAULT_RECONNECT_GRACE_MS + 1);
+      expect(errors).toHaveBeenCalledWith(
+        expect.stringContaining('grace-expiry forfeit'),
+        expect.any(Error),
+      );
+      // The survivor still gets the forfeit; only the record update is lost.
+      expect(b.lastOf('match_end')).toEqual({ type: 'match_end', reason: 'disconnect', winner: 1 });
+      expect(b.lastOf('room_list').rooms[0]!.players).toEqual([
+        { name: 'bob', record: { wins: 0, losses: 0 } },
+      ]);
+      // The relay keeps working: a new opponent joins and a match starts.
+      const c = await client(relay, 'carol');
+      await say(relay, c, { type: 'join_room', code });
+      await say(relay, b, { type: 'ready' });
+      await say(relay, c, { type: 'ready' });
+      expect(c.lastOf('match_start').players).toEqual(['bob', 'carol']);
+    } finally {
+      errors.mockRestore();
+    }
   });
 
   it('a rejoin after expiry lands in the lobby, not the dead match', async () => {
