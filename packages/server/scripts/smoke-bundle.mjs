@@ -42,7 +42,11 @@ const finish = (ok, message) => {
     console.log(`relay smoke test passed: ${message}`);
     process.exit(0);
   }
-  console.error(`relay smoke test FAILED: ${message}\n--- stdout\n${stdout}--- stderr\n${stderr}`);
+  // Each captured stream as its own block, even when it doesn't end in a newline.
+  const block = (label, text) => `--- ${label}\n${text}${text.endsWith('\n') ? '' : '\n'}`;
+  console.error(
+    `relay smoke test FAILED: ${message}\n${block('stdout', stdout)}${block('stderr', stderr)}`,
+  );
   process.exit(1);
 };
 const timer = setTimeout(() => finish(false, `timed out after ${TIMEOUT_MS} ms`), TIMEOUT_MS);

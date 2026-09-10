@@ -68,7 +68,9 @@ export class SqliteStore implements LobbyStore {
   }
 
   recordResult(winnerToken: string, loserToken: string): Promise<void> {
-    // Both sides of a result, or neither.
+    // Atomic: a failure part-way (a disk error, say) can't leave the win
+    // recorded without the loss. A token with no row just updates nothing —
+    // tolerated, as the store conformance suite expects.
     this.db.exec('BEGIN');
     try {
       this.addWin.run(winnerToken);
