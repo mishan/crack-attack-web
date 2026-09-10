@@ -53,7 +53,9 @@ export interface AudioSettings {
 
 const STORAGE_KEY = 'ca.audio.settings';
 
-const DEFAULT_SETTINGS: AudioSettings = { muted: false, music: 1, sfx: 1 };
+// Music starts off: the soundtrack streams megabytes and not everyone wants it
+// on arrival. The ♪ slider turns it on (and the choice persists); SFX stay on.
+const DEFAULT_SETTINGS: AudioSettings = { muted: false, music: 0, sfx: 1 };
 
 function loadSettings(): AudioSettings {
   try {
@@ -84,6 +86,11 @@ export class AudioManager {
   private currentTrack: MusicTrack | null = null;
   /** A track requested before unlock; started once a gesture arrives. */
   private pendingTrack: { track: MusicTrack; loop: boolean } | null = null;
+  /**
+   * The track the game wants while music is turned off (volume 0): nothing is
+   * streamed, but turning the volume up starts it.
+   */
+  private idleTrack: { track: MusicTrack; loop: boolean } | null = null;
   private fadeRaf = 0;
 
   private settings: AudioSettings;
@@ -211,6 +218,15 @@ export class AudioManager {
       this.pendingTrack = { track, loop };
       return;
     }
+    if (this.settings.music <= 0) {
+      // Music is off: don't stream (the tracks are megabytes), just remember
+      // what should be playing in case the player turns it up.
+      this.idleTrack = { track, loop };
+      this.musicEl.pause();
+      this.currentTrack = null;
+      return;
+    }
+    this.idleTrack = null;
     this.currentTrack = track;
     this.musicEl.loop = loop;
     this.musicEl.src = assetUrl('music', MUSIC_FILES[track]);
@@ -259,6 +275,7 @@ export class AudioManager {
     this.musicEl.pause();
     this.currentTrack = null;
     this.pendingTrack = null;
+    this.idleTrack = null;
   }
 
   /**
@@ -268,6 +285,8 @@ export class AudioManager {
    */
   fadeoutMusic(ms: number): void {
     this.cancelFade();
+    // Whatever was due is ending: don't start it if music is turned up mid-fade.
+    this.idleTrack = null;
     // Requested before unlock: drop the pending track so it doesn't start later
     // mid-countdown at full volume (there's nothing audible to fade yet).
     if (!this.unlocked) {
@@ -331,9 +350,20 @@ export class AudioManager {
   }
 
   setMusicVolume(v: number): void {
+    const wasOff = this.settings.music <= 0;
     this.settings.music = v;
     this.applyMusicVolume();
     this.persist();
+    if (v <= 0 && this.currentTrack) {
+      // Turned off: stop streaming, but keep the track for turning it back up.
+      this.cancelFade();
+      this.idleTrack = { track: this.currentTrack, loop: this.musicEl.loop };
+      this.musicEl.pause();
+      this.currentTrack = null;
+    } else if (v > 0 && wasOff && this.idleTrack) {
+      const { track, loop } = this.idleTrack;
+      this.playMusic(track, loop);
+    }
   }
 
   setSfxVolume(v: number): void {
