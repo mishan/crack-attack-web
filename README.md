@@ -194,7 +194,7 @@ Under `tools/` (see `tools/README.md` for more):
 
 We port from the original C++ Crack Attack! as the reference implementation:
 <https://github.com/gnu-lorien/crack-attack>. It isn't needed to build or run
-this port — it's used to port from and to validate against. See `CLAUDE.md` for
+this port — it's used to port from and to validate against. See `AGENTS.md` for
 the port status and architecture notes, and `BROWSER_PORT_PLAN.md` for the phase
 plan.
 
