@@ -28,5 +28,20 @@ export default defineConfig({
     // to dist/*, Vite emits the web bundle to dist/web/*; no collision).
     outDir: 'dist/web',
     emptyOutDir: true,
+    // The three.js core chunk (below) is ~560 kB on its own and deliberately
+    // kept whole; warn only if a chunk grows past it.
+    chunkSizeWarningLimit: 600,
+    rolldownOptions: {
+      output: {
+        // three.js core in a chunk of its own: it's most of the first-load bytes
+        // and changes far less often than the game code, so returning players
+        // keep it cached across deploys instead of re-downloading it every
+        // release. Only `three/build` (the core) — add-ons under
+        // `three/examples` (the glTF loader) stay in their own lazy chunks.
+        codeSplitting: {
+          groups: [{ name: 'three', test: /[\\/]node_modules[\\/]three[\\/]build[\\/]/ }],
+        },
+      },
+    },
   },
 });

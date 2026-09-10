@@ -49,6 +49,12 @@ crack-attack/    # upstream C++ reference source — local only, gitignored (por
 enforced by ESLint (`no-restricted-imports` / `no-restricted-globals` on those paths)
 and is load-bearing for determinism. If lint stops you here, that's the guard working.
 
+`core` modules must also stay free of **top-level side effects** (no module-scope
+registration, global patching, or work beyond declarations): `packages/core/package.json`
+declares `"sideEffects": false`, which is what lets the client bundler keep the AI
+planner and other mode-only code out of first load. A module that relies on its
+top-level code running when merely imported would silently break in production builds.
+
 ## Toolchain
 
 pnpm workspaces, TypeScript (strict, project references), Vitest, ESLint (flat

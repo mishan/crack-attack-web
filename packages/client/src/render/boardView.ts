@@ -36,7 +36,6 @@ import {
   Vector3,
   WebGLRenderer,
 } from 'three';
-import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import {
   BR_DIRECTION_1,
   BR_DIRECTION_2,
@@ -298,6 +297,9 @@ export class BoardView {
    */
   private async loadBlockModel(): Promise<void> {
     try {
+      // The loader is fetched on demand (its own chunk): the box fallback covers
+      // the gap, so it needn't hold up first load.
+      const { GLTFLoader } = await import('three/examples/jsm/loaders/GLTFLoader.js');
       const url = new URL('models/block.gltf', document.baseURI).href;
       const gltf = await new GLTFLoader().loadAsync(url);
 
