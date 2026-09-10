@@ -16,7 +16,7 @@
  * platform glue (and stays out of `packages/core`, which must not touch the DOM).
  */
 
-import { GameSim, GC_STEPS_PER_SECOND } from '@crack-attack/core';
+import { GameSim, GC_STEPS_PER_SECOND, generateSeed } from '@crack-attack/core';
 import { bootAiMatch } from './aiMatch.js';
 import { pickAiDifficulty } from './render/aiDifficultyPicker.js';
 import { KeyboardInput } from './input/keyboard.js';
@@ -48,7 +48,6 @@ import {
   saveScoreRecords,
 } from './score/scoreStore.js';
 
-const SEED = 0x1a2b3c4d;
 const MS_PER_TICK = 1000 / GC_STEPS_PER_SECOND;
 /** Cap sign advance per frame so a long stall (tab refocus) doesn't warp them away. */
 const MAX_SIGN_DT_TICKS = 10;
@@ -163,7 +162,9 @@ function bootSolo(
   onPlayAi: () => void,
   audio: AudioManager,
 ): ModeHandle {
-  let sim = new GameSim(SEED);
+  // A fresh board every game, as the reference seeds each run
+  // (`Random::seed(Random::generateSeed())`, Attack.cxx:143).
+  let sim = new GameSim(generateSeed());
   const clock = new FixedTimestep();
   const input = new KeyboardInput();
   const interp = new ViewInterpolator();
@@ -265,7 +266,7 @@ function bootSolo(
 
   // --- input ---------------------------------------------------------------
   const restart = (): void => {
-    sim = new GameSim(SEED); // fresh deterministic game
+    sim = new GameSim(generateSeed()); // fresh game on a new board
     clock.reset();
     interp.reset();
     const fresh = deriveViewModel(sim);
