@@ -147,3 +147,7 @@ vite.config.ts.timestamp-*
 /crack-attack/
 
 packages/server/crack-attack.db*
+
+# Temporary git worktrees created by coding agents (e.g. Claude Code's isolated
+# subagents); never part of the repo.
+.claude/worktrees/
