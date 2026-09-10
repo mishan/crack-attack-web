@@ -84,6 +84,39 @@ The app must be served over HTTP(S) — opening `dist/web/index.html` directly v
 `file://` won't load ES modules. Use `dev`/`preview`, or host `dist/web` behind
 any static file server.
 
+### Deploying the client
+
+The build is plain static files — upload the contents of `dist/web` to any web
+server, at the domain root or a subdirectory (asset paths are relative). Nothing
+runs server-side; only online play needs the separate relay (set
+`VITE_RELAY_URL` at build time, see below).
+
+For a fast first load, configure the server to:
+
+- **Compress** text assets (`.js`, `.html`, `.gltf`) with gzip or Brotli. The
+  first-load JavaScript is ~700 kB raw but ~185 kB gzipped.
+- **Cache `assets/` forever.** Its file names carry a content hash, so they can
+  be `Cache-Control: public, max-age=31536000, immutable`. Three.js is split
+  into its own chunk, so a game update doesn't make returning players
+  re-download it.
+- **Don't cache `index.html`** (`Cache-Control: no-cache`) so a new deploy is
+  picked up immediately. The other files (`textures/`, `music/`, `sounds/`,
+  `models/`) aren't hashed, so give them a modest max-age.
+
+Only the solo board loads up front; vs-AI, the AI-vs-AI demo, and netplay are
+fetched when first opened. If a tab left open across a redeploy can't find its
+old chunk, it falls back to the solo screen — keeping the previous deploy's
+`assets/` files around for a while avoids even that.
+
+Example (nginx):
+
+```nginx
+location /assets/ { add_header Cache-Control "public, max-age=31536000, immutable"; }
+location = /index.html { add_header Cache-Control "no-cache"; }
+gzip on;
+gzip_types application/javascript model/gltf+json;
+```
+
 ### Client URL parameters
 
 Append these to the client URL (e.g. `http://localhost:5173/?net`):

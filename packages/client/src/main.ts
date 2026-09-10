@@ -23,8 +23,6 @@ import {
   generateSeed,
   type AiDifficultyLevel,
 } from '@crack-attack/core';
-import { bootAiDemo } from './aiDemo.js';
-import { bootAiMatch } from './aiMatch.js';
 import { pickAiDifficulty } from './render/aiDifficultyPicker.js';
 import { pickAiMatchup } from './render/aiMatchupPicker.js';
 import { parseDemoMatchup } from './view/demoMatchup.js';
@@ -33,7 +31,6 @@ import { mountTouchControls } from './input/touchControls.js';
 import { BoardView, DEFAULT_RENDER_TUNING } from './render/boardView.js';
 import { GarbageDecalView } from './render/garbageDecalView.js';
 import { HudView } from './render/hudView.js';
-import { mountRenderTuner } from './render/renderTuner.js';
 import { LevelLightsView } from './render/levelLightsView.js';
 import { LoseBarView } from './render/loseBarView.js';
 import { SignsView } from './render/signsView.js';
@@ -72,6 +69,16 @@ interface ModeHandle {
   dispose(): void;
 }
 
+// Every mode but solo lives in its own chunk, fetched on demand, so first load
+// only pays for the solo board (the AI planner, for one, ships with the AI
+// modes). Opening a picker starts the fetch, so the chunk has usually arrived
+// by the time a choice is made.
+const loadAiMatch = () => import('./aiMatch.js');
+const loadAiDemo = () => import('./aiDemo.js');
+const loadNetplay = () => import('./netplay.js');
+/** Warm a lazy chunk; a failure here resurfaces (and is handled) when the mode boots. */
+const prefetch = (load: () => Promise<unknown>): void => void load().catch(() => {});
+
 /**
  * Where the relay lives, in priority order: `?relay=` (dev convenience) →
  * `VITE_RELAY_URL` (baked at build time — the deployment story, e.g.
@@ -96,6 +103,7 @@ function isTypingTarget(target: EventTarget | null): boolean {
 }
 
 function boot(): void {
+  document.getElementById('loading')?.remove();
   const app = document.getElementById('app');
   const hudEl = document.getElementById('hud');
   if (!app) throw new Error('missing #app container');
@@ -139,6 +147,7 @@ function boot(): void {
 
   // Open the difficulty modal, then boot a vs-AI match (or stay put if cancelled).
   const playAi = (): void => {
+    prefetch(loadAiMatch);
     void pickAiDifficulty().then((diff) => {
       if (!diff) return;
       aiDifficulty = diff;
@@ -148,6 +157,7 @@ function boot(): void {
 
   // Pick the two bots, then boot the AI-vs-AI demo (or stay put if cancelled).
   const watchAi = (): void => {
+    prefetch(loadAiDemo);
     void pickAiMatchup(demoMatchup).then((matchup) => {
       if (!matchup) return;
       demoMatchup = matchup;
@@ -155,21 +165,39 @@ function boot(): void {
     });
   };
 
+  // Bumped on every switch, so a lazy mode whose chunk lands after the user has
+  // already moved on is dropped instead of booting on top of the new mode.
+  let modeGen = 0;
+  const bootLazy = <M>(load: () => Promise<M>, start: (m: M) => ModeHandle): void => {
+    const gen = modeGen;
+    load().then(
+      (m) => {
+        if (gen === modeGen) current = start(m);
+      },
+      (err: unknown) => {
+        // Typically a stale tab after a redeploy (the old chunk is gone). Fall
+        // back to solo, which is in the entry bundle.
+        console.error('failed to load mode', err);
+        if (gen === modeGen) enter('solo');
+      },
+    );
+  };
+
   const HELP = { solo: SOLO_HELP, net: NET_HELP, ai: AI_HELP, demo: DEMO_HELP };
   const enter = (mode: 'solo' | 'net' | 'ai' | 'demo'): void => {
     current?.dispose();
     current = null;
+    modeGen++;
     if (hudEl) hudEl.textContent = '';
     if (help) help.textContent = HELP[mode];
+    const toSolo = (): void => enter('solo');
     if (mode === 'net') {
-      void import('./netplay.js').then((m) => {
-        current = m.bootNetplay(app, hudEl, relayUrl, () => enter('solo'), audio);
-      });
+      bootLazy(loadNetplay, (m) => m.bootNetplay(app, hudEl, relayUrl, toSolo, audio));
     } else if (mode === 'ai') {
-      current = bootAiMatch(app, hudEl, aiDifficulty, audio, () => enter('solo'));
+      bootLazy(loadAiMatch, (m) => m.bootAiMatch(app, hudEl, aiDifficulty, audio, toSolo));
     } else if (mode === 'demo') {
       const { left, right } = demoMatchup;
-      current = bootAiDemo(app, hudEl, left, right, audio, () => enter('solo'));
+      bootLazy(loadAiDemo, (m) => m.bootAiDemo(app, hudEl, left, right, audio, toSolo));
     } else {
       current = bootSolo(app, hudEl, () => enter('net'), playAi, watchAi, audio);
     }
@@ -263,8 +291,11 @@ function bootSolo(
   };
 
   // Temporary lighting/material tuner — open with `?tune` in the URL.
+  // A dev aid, so it's its own chunk rather than part of first load.
   if (new URLSearchParams(globalThis.location.search).has('tune')) {
-    mountRenderTuner(view, DEFAULT_RENDER_TUNING);
+    void import('./render/renderTuner.js').then((m) => {
+      if (!disposed) m.mountRenderTuner(view, DEFAULT_RENDER_TUNING);
+    });
   }
 
   const fitToWindow = (): void => view.resize(globalThis.innerWidth, globalThis.innerHeight);
