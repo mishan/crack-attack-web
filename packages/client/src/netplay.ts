@@ -25,6 +25,7 @@ import {
   type SpectateStartMessage,
 } from '@crack-attack/protocol';
 import { KeyboardInput } from './input/keyboard.js';
+import { mountTouchControls } from './input/touchControls.js';
 import { BoardView } from './render/boardView.js';
 import { GarbageDecalView } from './render/garbageDecalView.js';
 import { HudView } from './render/hudView.js';
@@ -46,6 +47,7 @@ import {
 import { Spring } from './view/spring.js';
 import { Celebration } from './view/celebration.js';
 import { ViewInterpolator } from './view/viewInterpolator.js';
+import { netplayActions, type NetplayPhase } from './view/netplayActions.js';
 import { LockstepSession, type AiSeat } from './net/lockstep.js';
 import { NetClient } from './net/session.js';
 import { SpectatorSession } from './net/spectator.js';
@@ -63,6 +65,8 @@ const MAX_SIGN_DT_TICKS = 10;
 const CATCH_UP_STEPS_PER_FRAME = 500;
 /** Reconnect attempt spacing while a match seat may still be held. */
 const RECONNECT_INTERVAL_MS = 2000;
+/** The Concede button needs a second tap within this window, so a stray touch can't forfeit. */
+const CONCEDE_CONFIRM_MS = 3000;
 
 const STORAGE_TOKEN = 'crack-attack.token';
 const STORAGE_NAME = 'crack-attack.name';
@@ -82,7 +86,7 @@ interface BoardBundle {
   nameLabel: BitmapLabel;
 }
 
-type Phase = 'connecting' | 'lobby' | 'room' | 'playing' | 'ended' | 'spectating';
+type Phase = NetplayPhase;
 
 /** A running netplay mode; `dispose` tears everything down (mode switch). */
 export interface NetplayHandle {
@@ -178,7 +182,8 @@ export function bootNetplay(
   document.body.appendChild(rosterEl);
   const titleEl = document.createElement('div');
   titleEl.style.cssText =
-    'position:fixed;top:12px;right:12px;z-index:5;font-size:13px;opacity:.85;display:none';
+    // Below the action buttons (Stop watching sits at the top of that column).
+    'position:fixed;top:52px;right:12px;z-index:5;font-size:13px;opacity:.85;display:none';
   document.body.appendChild(titleEl);
   const showRoster = (names: string[]): void => {
     rosterEl.textContent = names.length ? `watching: ${names.join(', ')}` : '';
@@ -197,6 +202,8 @@ export function bootNetplay(
   /** True when the room we just created seats a bot (so a single Ready starts it). */
   let createdVsAi = false;
   let resultSent = false;
+  /** We've asked for a rematch this game and are waiting on the opponent. */
+  let rematchSent = false;
   let graceMs = DEFAULT_RECONNECT_GRACE_MS;
   let reconnectUntil = 0;
   let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
@@ -470,7 +477,14 @@ export function bootNetplay(
   const sendReady = (): void => {
     net?.send({ type: 'ready' });
     readyBtn.disabled = true;
+    rematchSent = true;
     setStatus('ready — waiting for the opponent…');
+  };
+  const concede = (): void => {
+    // Blocked during the countdown, as in the C++ (Game::concession returns
+    // early while the gate runs, Game.cxx:186).
+    if (metaTicks < COUNTDOWN_GATE_TICKS) return;
+    net?.send({ type: 'concede' });
   };
   readyBtn.onclick = sendReady;
   createBtn.onclick = (): void => {
@@ -506,7 +520,7 @@ export function bootNetplay(
     if (reason === 'concession' || reason === 'disconnect') {
       showBanner(
         winner === localIndex
-          ? `You win — opponent ${reason === 'concession' ? 'conceded' : 'disconnected'}. R for rematch.`
+          ? `You win — opponent ${reason === 'concession' ? 'conceded' : 'disconnected'}.`
           : 'You forfeited the match.',
       );
     }
@@ -523,6 +537,23 @@ export function bootNetplay(
     overlay.style.display = 'flex';
     showBanner(bannerText);
     clearOverlay();
+  }
+
+  /** Leave the room (after a finished match, or one we were watching) for the lobby. */
+  function leaveToLobby(status: string): void {
+    net?.send({ type: 'leave_room' });
+    session = null;
+    spectator = null;
+    phase = 'lobby';
+    rematchSent = false;
+    overlay.style.display = 'flex';
+    readyBtn.hidden = true;
+    titleEl.style.display = 'none';
+    showRoster([]);
+    showBanner('');
+    clearOverlay();
+    setStatus(status);
+    audio.playPrelude(); // back to lobby menu music
   }
 
   // --- boards -------------------------------------------------------------------
@@ -543,7 +574,8 @@ export function bootNetplay(
       const nameLabel = new BitmapLabel(FONT0, { height: 24, color: '#e7ebf3' });
       const nameBar = document.createElement('div');
       nameBar.style.cssText =
-        'position:absolute;top:10px;left:0;right:0;display:flex;justify-content:center;' +
+        // Below the top-right audio controls, which would otherwise cover the right name.
+        'position:absolute;top:52px;left:0;right:0;display:flex;justify-content:center;' +
         'pointer-events:none;z-index:2';
       nameBar.append(nameLabel.element);
       container.append(nameBar);
@@ -585,6 +617,7 @@ export function bootNetplay(
     names = players;
     phase = 'playing';
     resultSent = false;
+    rematchSent = false;
     reconnectUntil = 0;
     // Fresh games run the 3-2-1-GO gate; a resume rejoins live play.
     metaTicks = resume ? COUNTDOWN_GATE_TICKS + GO_DISPLAY_TICKS : 0;
@@ -695,23 +728,11 @@ export function bootNetplay(
       return;
     }
     if (e.code === 'Escape' && phase === 'spectating') {
-      net?.send({ type: 'leave_room' });
-      spectator = null;
-      phase = 'lobby';
-      overlay.style.display = 'flex';
-      titleEl.style.display = 'none';
-      showRoster([]);
-      showBanner('');
-      clearOverlay();
-      setStatus('stopped watching');
-      audio.playPrelude(); // back to lobby menu music
+      leaveToLobby('stopped watching');
       return;
     }
     if (e.code === 'Escape' && phase === 'playing' && !session?.outcome) {
-      // Concession is blocked during the countdown, as in the C++
-      // (Game::concession returns early while the gate runs, Game.cxx:186).
-      if (metaTicks < COUNTDOWN_GATE_TICKS) return;
-      net?.send({ type: 'concede' });
+      concede();
       return;
     }
     if (phase === 'playing' && input.handles(e.code)) {
@@ -725,12 +746,92 @@ export function bootNetplay(
   globalThis.addEventListener('keyup', onKeyUp);
   globalThis.addEventListener('blur', onBlur);
 
+  // On-screen pad for touch devices (same KeyboardInput path as the keys),
+  // shown only during live play. No restart button: rematch is an action below.
+  const touch = mountTouchControls({
+    press: (code) => input.press(code),
+    release: (code) => input.release(code),
+  });
+  // Hidden until syncActions sees live play, so it never flashes over the lobby.
+  if (touch) touch.style.display = 'none';
+
+  // The in-match actions as buttons too (Concede / Rematch / Leave / Stop
+  // watching), so mouse and touch players aren't stuck without the keys.
+  // `netplayActions` decides what's on offer; `syncActions` applies it per frame.
+  const actionBar = document.createElement('div');
+  actionBar.style.cssText =
+    'position:fixed;top:12px;right:12px;z-index:7;display:flex;flex-direction:column;' +
+    'align-items:flex-end;gap:8px';
+  document.body.appendChild(actionBar);
+  const actionButton = (onClick: () => void): HTMLButtonElement => {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.style.cssText = 'padding:6px 12px;opacity:.85;display:none';
+    btn.onclick = onClick;
+    actionBar.appendChild(btn);
+    return btn;
+  };
+  let concedeArmedUntil = 0;
+  const concedeBtn = actionButton(() => {
+    const now = performance.now();
+    if (now < concedeArmedUntil) {
+      concedeArmedUntil = 0;
+      concede();
+    } else {
+      concedeArmedUntil = now + CONCEDE_CONFIRM_MS;
+    }
+  });
+  const rematchBtn = actionButton(() => sendReady());
+  const leaveBtn = actionButton(() => leaveToLobby('left the room'));
+  const stopWatchingBtn = actionButton(() => leaveToLobby('stopped watching'));
+
+  /** Set a button's visibility / text / enabled state, touching the DOM only on change. */
+  const applyButton = (btn: HTMLButtonElement, show: boolean, text = '', enabled = true): void => {
+    const display = show ? '' : 'none';
+    if (btn.style.display !== display) btn.style.display = display;
+    if (show && btn.textContent !== text) btn.textContent = text;
+    if (btn.disabled === enabled) btn.disabled = !enabled;
+  };
+  function syncActions(nowMs: number): void {
+    const a = netplayActions({
+      phase,
+      decided: phase === 'ended' || (phase === 'playing' && !!session?.outcome),
+      countdown: metaTicks < COUNTDOWN_GATE_TICKS,
+      rematchSent,
+    });
+    // A half-finished confirm never carries over: once Concede isn't live (the
+    // match ended, or the next one is in its countdown), disarm it, so a rematch
+    // always needs a fresh first tap.
+    if (a.concede !== 'enabled') concedeArmedUntil = 0;
+    const armed = nowMs < concedeArmedUntil;
+    applyButton(
+      concedeBtn,
+      a.concede !== 'hidden',
+      armed ? 'Tap again to concede' : 'Concede',
+      a.concede === 'enabled',
+    );
+    applyButton(
+      rematchBtn,
+      a.rematch !== 'hidden',
+      a.rematch === 'waiting' ? 'Waiting for opponent…' : 'Rematch',
+      a.rematch === 'enabled',
+    );
+    applyButton(leaveBtn, a.leave, 'Leave');
+    applyButton(stopWatchingBtn, a.stopWatching, 'Stop watching');
+    if (touch) {
+      const display = a.touchPad ? '' : 'none';
+      if (touch.style.display !== display) touch.style.display = display;
+      if (!a.touchPad) input.clear(); // don't leave a held direction behind
+    }
+  }
+
   // --- loop ------------------------------------------------------------------------
   let lastMs = performance.now();
   let waitingSince: number | null = null;
 
   const frame = (nowMs: number): void => {
     if (disposed) return;
+    syncActions(nowMs);
     // --- watcher branch: no input, no sending; just consume and render.
     if (spectator && boards && phase === 'spectating') {
       const w = spectator;
@@ -892,7 +993,7 @@ export function bootNetplay(
               : winner === localIndex
                 ? 'message_winner'
                 : 'message_loser';
-          showBanner(winner === null ? 'Draw — R for rematch.' : 'R for rematch.');
+          showBanner(winner === null ? 'Draw — both topped out.' : '');
           if (!resultSent) {
             resultSent = true;
             net?.send({ type: 'result', winner });
@@ -1016,6 +1117,8 @@ export function bootNetplay(
       banner.remove();
       rosterEl.remove();
       titleEl.remove();
+      actionBar.remove();
+      touch?.remove();
       bigMessage.dispose();
       if (hudEl) hudEl.textContent = '';
     },
