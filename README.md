@@ -72,6 +72,8 @@ Controls:
 - **← → ↑ ↓** move the cursor · **Z** / **Space** swap · **X** raise the stack
 - **R** restart (solo) / ready-rematch (netplay) · **P** pause (solo) · **M** mute
 - **Esc** concede / stop watching (netplay)
+- Music starts **off** (sound effects are on); turn it up with the ♪ slider at
+  the top right, and the setting is remembered.
 
 ### Production build
 
