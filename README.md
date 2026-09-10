@@ -168,6 +168,84 @@ PORT=9000 HOST=127.0.0.1 DB=:memory: pnpm --filter @crack-attack/server start
 DB=/var/lib/crack-attack/lobby.db pnpm --filter @crack-attack/server start
 ```
 
+### Production: TLS termination with nginx (recommended)
+
+Browsers block mixed content: a game served from an `https://` page may only
+open **`wss://`** (TLS) WebSockets, so a plain `ws://` relay is refused outright.
+The relay itself speaks plain WebSocket, so run it behind a reverse proxy that
+terminates TLS. With nginx:
+
+1. **Bind the relay to loopback** so its unencrypted port isn't reachable from
+   outside:
+
+   ```sh
+   HOST=127.0.0.1 PORT=8080 DB=/var/lib/crack-attack/lobby.db \
+     pnpm --filter @crack-attack/server start
+   ```
+
+2. **Proxy a path on your HTTPS site to it.** The relay accepts WebSocket
+   upgrades on any path, so it needs no extra configuration for `/ws`:
+
+   ```nginx
+   server {
+     listen 443 ssl;
+     server_name example.com;
+     ssl_certificate     /etc/letsencrypt/live/example.com/fullchain.pem;
+     ssl_certificate_key /etc/letsencrypt/live/example.com/privkey.pem;
+
+     # The static client (dist/web) can be served from the same site.
+     root /var/www/crack-attack;
+
+     location /ws {
+       proxy_pass http://127.0.0.1:8080;
+       proxy_http_version 1.1;
+       proxy_set_header Upgrade $http_upgrade;
+       proxy_set_header Connection "upgrade";
+       proxy_set_header Host $host;
+       # The relay doesn't send heartbeats yet, so an idle lobby socket is
+       # silent; nginx's 60 s default would cut it. Allow long-lived sockets.
+       proxy_read_timeout 1h;
+       proxy_send_timeout 1h;
+     }
+   }
+   ```
+
+3. **Build the client with the public `wss://` URL** (the default fallback,
+   same host on port 8080, won't match this setup):
+
+   ```sh
+   VITE_RELAY_URL=wss://example.com/ws pnpm --filter @crack-attack/client build
+   ```
+
+Notes:
+
+- Let's Encrypt (e.g. `certbot --nginx -d example.com`) is the easy way to get
+  and renew the certificate.
+- The relay can also live on its own host or subdomain (e.g.
+  `wss://relay.example.com/`); point `VITE_RELAY_URL` at it. Serving both from
+  one site keeps it to a single certificate.
+- Behind the proxy, every connection reaches the relay from nginx's address (it
+  doesn't read `X-Forwarded-For`), so the relay has no per-client IPs.
+- To keep the relay running, a systemd unit works well (it shuts down cleanly
+  on `systemctl stop`):
+
+  ```ini
+  [Unit]
+  Description=Crack Attack! relay
+  After=network.target
+
+  [Service]
+  WorkingDirectory=/opt/crack-attack-web/packages/server
+  ExecStart=/usr/bin/node dist/main.js
+  Environment=HOST=127.0.0.1 PORT=8080 DB=/var/lib/crack-attack/lobby.db
+  StateDirectory=crack-attack
+  User=crack-attack
+  Restart=on-failure
+
+  [Install]
+  WantedBy=multi-user.target
+  ```
+
 ## Wiring the client to the relay
 
 The client resolves the relay WebSocket URL in this priority order:
