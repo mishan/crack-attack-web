@@ -504,6 +504,18 @@ A generator header that a real, non-AI tool always writes (e.g. a lockfile's own
       sampled "worth-firing swap existed" opportunity rate — plus a
       `--timeline` of every fire. The planner exports now ship from the core
       barrel (`aiPlanner.js` in `index.ts`) for exactly this kind of tooling.
+- [x] **AI-vs-AI demo mode landed** (`client/aiDemo.ts`): the arena, but
+      watchable — two visible bot boards play back-to-back matches with a
+      running tally, for amusement and as a showcase. The match is the DOM-free
+      `sim/aiVsAi.ts` `AiVsAiMatch` (the arena's seeding, garbage cross-wiring,
+      seat-0-first step order, same-tick double loss = draw, 10-minute tick cap
+      = timeout; unit-tested for determinism). Each board has its own message
+      overlay + celebration, so the winner shows WINNER + fireworks and the
+      loser LOSER, as in the reference's two-board layout; the next match starts
+      on a fresh seed ~7 s after a result. Controls: N next match, F 1×/2×/4×
+      speed (the countdown stays on wall time), P pause, Esc leave. Entered via
+      "Watch AI vs AI" on the solo screen (a left/right tier picker,
+      `render/aiMatchupPicker.ts`) or directly with `?demo[=left,right]`.
 - [ ] Phase 6 stretch (X-mode, replays, WebRTC, binary codec if
       measurements demand it)
 
