@@ -147,8 +147,11 @@ describe('relay over WebSocket', () => {
       name: '\u0001'.repeat(MAX_PLAYER_NAME_LENGTH), // JSON-escaped: 6 bytes/char
       token: 'f'.repeat(32),
     });
+    // Require real slack, not just "fits": the limit must be at least HEADROOM
+    // times the largest legitimate message (all quantities in bytes).
+    const HEADROOM = 8;
     for (const text of [worstInputs, worstHello]) {
-      expect(Buffer.byteLength(text, 'utf8') * 8).toBeLessThan(MAX_CLIENT_MESSAGE_BYTES);
+      expect(Buffer.byteLength(text, 'utf8') * HEADROOM).toBeLessThan(MAX_CLIENT_MESSAGE_BYTES);
     }
   });
 

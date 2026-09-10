@@ -169,7 +169,11 @@ export interface RelayServerOptions {
   store?: LobbyStore | undefined;
   /** Reconnect grace in ms; DEFAULT_RECONNECT_GRACE_MS unless overridden. */
   graceMs?: number | undefined;
-  /** Wall clock in ms for input pacing; defaults to Date.now. Inject for tests. */
+  /**
+   * Monotonic clock in ms for input pacing; defaults to `performance.now()`
+   * (unlike `Date.now()`, it can't jump backwards on an NTP/clock adjustment
+   * and wrongly disconnect honest players). Inject for tests.
+   */
   now?: (() => number) | undefined;
 }
 
@@ -189,7 +193,7 @@ export class RelayServer {
     this.inputDelay = options.inputDelay ?? DEFAULT_INPUT_DELAY_TICKS;
     this.store = options.store ?? new MemoryStore();
     this.graceMs = options.graceMs ?? DEFAULT_RECONNECT_GRACE_MS;
-    this.now = options.now ?? (() => Date.now());
+    this.now = options.now ?? (() => performance.now());
   }
 
   /** Number of open rooms (inspection/test helper). */
@@ -674,7 +678,11 @@ export class RelayServer {
     // Checked against the server-side ledger, so a resumed client — which
     // replays from the ledger and only then sends live input — is unaffected;
     // a bot seat's stream never reaches the relay at all.
-    const elapsed = Math.floor(((this.now() - room.started_at) * GC_STEPS_PER_SECOND) / 1000);
+    // Clamped at 0 so even an injected clock that steps back can't shrink the allowance.
+    const elapsed = Math.max(
+      0,
+      Math.floor(((this.now() - room.started_at) * GC_STEPS_PER_SECOND) / 1000),
+    );
     const allowed = elapsed + this.inputDelay + MAX_INPUT_LEAD_TICKS;
     if (frontier > allowed) {
       this.fatal(session.conn, `inputs frontier ${frontier} runs ahead of the clock (${allowed})`);
