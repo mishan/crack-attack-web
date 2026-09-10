@@ -131,4 +131,13 @@ describe('mountTouchControls', () => {
     expect(sink.restart).toHaveBeenCalledTimes(1);
     expect(sink.press).not.toHaveBeenCalled();
   });
+
+  it('leaves the restart button out when the mode has no restart', () => {
+    const sink = { press: vi.fn(), release: vi.fn() };
+    const root = mountTouchControls(sink) as unknown as FakeElement;
+
+    expect(root.find('restart')).toBeUndefined();
+    root.find('swap')!.dispatch('pointerdown', pointerEvent());
+    expect(sink.press).toHaveBeenCalledWith('Space');
+  });
 });

@@ -25,6 +25,12 @@ import {
 } from '@crack-attack/core';
 import { pickAiDifficulty } from './render/aiDifficultyPicker.js';
 import { pickAiMatchup } from './render/aiMatchupPicker.js';
+import {
+  NO_WEBGL_MESSAGE,
+  START_FAILED_MESSAGE,
+  showFatal,
+  webglAvailable,
+} from './render/fatalMessage.js';
 import { parseDemoMatchup } from './view/demoMatchup.js';
 import { KeyboardInput } from './input/keyboard.js';
 import { mountTouchControls } from './input/touchControls.js';
@@ -103,7 +109,12 @@ function isTypingTarget(target: EventTarget | null): boolean {
 }
 
 function boot(): void {
-  document.getElementById('loading')?.remove();
+  // Everything renders through WebGL 2 (three.js); without it, say so rather
+  // than leave a blank page.
+  if (!webglAvailable()) {
+    showFatal(NO_WEBGL_MESSAGE);
+    return;
+  }
   const app = document.getElementById('app');
   const hudEl = document.getElementById('hud');
   if (!app) throw new Error('missing #app container');
@@ -168,11 +179,22 @@ function boot(): void {
   // Bumped on every switch, so a lazy mode whose chunk lands after the user has
   // already moved on is dropped instead of booting on top of the new mode.
   let modeGen = 0;
+  // A mode that throws while starting (almost always WebGL: the browser refused
+  // a new context) gets an explanation instead of a frozen screen.
+  const startFailed = (err: unknown): void => {
+    console.error('failed to start mode', err);
+    showFatal(START_FAILED_MESSAGE);
+  };
   const bootLazy = <M>(load: () => Promise<M>, start: (m: M) => ModeHandle): void => {
     const gen = modeGen;
     load().then(
       (m) => {
-        if (gen === modeGen) current = start(m);
+        if (gen !== modeGen) return;
+        try {
+          current = start(m);
+        } catch (err) {
+          startFailed(err);
+        }
       },
       (err: unknown) => {
         // Typically a stale tab after a redeploy (the old chunk is gone). Fall
@@ -191,19 +213,25 @@ function boot(): void {
     if (hudEl) hudEl.textContent = '';
     if (help) help.textContent = HELP[mode];
     const toSolo = (): void => enter('solo');
-    if (mode === 'net') {
-      bootLazy(loadNetplay, (m) => m.bootNetplay(app, hudEl, relayUrl, toSolo, audio));
-    } else if (mode === 'ai') {
-      bootLazy(loadAiMatch, (m) => m.bootAiMatch(app, hudEl, aiDifficulty, audio, toSolo));
-    } else if (mode === 'demo') {
-      const { left, right } = demoMatchup;
-      bootLazy(loadAiDemo, (m) => m.bootAiDemo(app, hudEl, left, right, audio, toSolo));
-    } else {
-      current = bootSolo(app, hudEl, () => enter('net'), playAi, watchAi, audio);
+    try {
+      if (mode === 'net') {
+        bootLazy(loadNetplay, (m) => m.bootNetplay(app, hudEl, relayUrl, toSolo, audio));
+      } else if (mode === 'ai') {
+        bootLazy(loadAiMatch, (m) => m.bootAiMatch(app, hudEl, aiDifficulty, audio, toSolo));
+      } else if (mode === 'demo') {
+        const { left, right } = demoMatchup;
+        bootLazy(loadAiDemo, (m) => m.bootAiDemo(app, hudEl, left, right, audio, toSolo));
+      } else {
+        current = bootSolo(app, hudEl, () => enter('net'), playAi, watchAi, audio);
+      }
+    } catch (err) {
+      startFailed(err);
     }
   };
 
   enter(params.has('demo') ? 'demo' : params.has('net') ? 'net' : 'solo');
+  // Booted: drop the placeholder (a failed start has already replaced it).
+  document.getElementById('loading')?.remove();
 }
 
 function bootSolo(
@@ -535,4 +563,9 @@ function bootSolo(
   };
 }
 
-boot();
+try {
+  boot();
+} catch (err) {
+  console.error('failed to boot', err);
+  showFatal(START_FAILED_MESSAGE);
+}

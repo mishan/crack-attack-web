@@ -36,6 +36,7 @@ import {
   Vector3,
   WebGLRenderer,
 } from 'three';
+import { CONTEXT_LOST_MESSAGE, showFatal } from './fatalMessage.js';
 import {
   BR_DIRECTION_1,
   BR_DIRECTION_2,
@@ -140,6 +141,16 @@ export class BoardView {
   // once it loads. Kept as a stable object so updating `.value` reaches the
   // already-compiled program without a recompile.
   private readonly lightmap: IUniform<Texture>;
+
+  /**
+   * The browser can take the WebGL context away at any time (a GPU/driver
+   * reset, or a mobile tab backgrounded under memory pressure), leaving the
+   * canvas black for good. Say so and offer a reload rather than a dead board.
+   */
+  private readonly onContextLost = (e: Event): void => {
+    e.preventDefault();
+    showFatal(CONTEXT_LOST_MESSAGE);
+  };
 
   constructor(container: HTMLElement, width: number, visibleHeight: number) {
     this.halfW = (width - 1) / 2;
@@ -248,6 +259,7 @@ export class BoardView {
     // whole scene — the back wall and cursor must stay whole.
     this.renderer.localClippingEnabled = true;
     container.appendChild(this.renderer.domElement);
+    this.renderer.domElement.addEventListener('webglcontextlost', this.onContextLost);
 
     // Upgrade the block geometry from the fallback cube to the real rounded-cube
     // model (converted by tools/obj2gltf). Async; blocks render as boxes until it
@@ -506,7 +518,12 @@ export class BoardView {
    * simply be dropped on the floor.
    */
   dispose(): void {
+    // Detach the loss handler first: forceContextLoss() fires that same event.
+    this.renderer.domElement.removeEventListener('webglcontextlost', this.onContextLost);
     this.renderer.dispose();
+    // dispose() frees three's GPU resources but leaves the context itself to GC;
+    // drop it now so repeated mode switches can't run into the browser's cap.
+    this.renderer.forceContextLoss();
     this.renderer.domElement.remove();
   }
 }

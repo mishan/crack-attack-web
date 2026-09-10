@@ -18,7 +18,8 @@
 export interface TouchControlSink {
   press(code: string): void;
   release(code: string): void;
-  restart(): void;
+  /** Omit for modes without a restart (netplay's rematch is an on-screen button). */
+  restart?(): void;
 }
 
 /** Whether this device wants on-screen controls (touch / coarse pointer). */
@@ -157,7 +158,8 @@ export function mountTouchControls(sink: TouchControlSink): HTMLElement | null {
     );
   }
 
-  // Actions: Swap (Space), Raise (hold to keep rising), and Restart.
+  // Actions: Swap (Space), Raise (hold to keep rising), and Restart (if the
+  // mode has one).
   const actions = document.createElement('div');
   actions.className = 'touch-actions';
   const swapHold = hold('Space');
@@ -174,15 +176,11 @@ export function mountTouchControls(sink: TouchControlSink): HTMLElement | null {
     () => raiseHold(true),
     () => raiseHold(false),
   );
-  const restart = makeButton(
-    '↻',
-    'restart',
-    () => sink.restart(),
-    () => {},
-  );
   const row = document.createElement('div');
   row.className = 'row';
-  row.append(restart, swap);
+  const restart = sink.restart?.bind(sink);
+  if (restart) row.append(makeButton('↻', 'restart', restart, () => {}));
+  row.append(swap);
   actions.append(row, raise);
 
   root.append(dpad, actions);
