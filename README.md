@@ -18,7 +18,7 @@ The project is a pnpm monorepo:
 
 ## Requirements
 
-- **Node** `^20.19.0 || >=22.12.0`
+- **Node** `>=22.13.0` (the relay uses Node's built-in `node:sqlite`)
 - **pnpm** `9.x` — the repo pins it via the `packageManager` field, so the
   simplest way to get the right version is Corepack (bundled with Node):
 
@@ -132,7 +132,8 @@ Append these to the client URL (e.g. `http://localhost:5173/?net`):
 
 ## Run the relay server (for multiplayer)
 
-Netplay and spectating go through the relay. Build it once, then start it:
+Netplay and spectating go through the relay. In development, build it once,
+then start it from the repo (to deploy it, see [Standalone build](#standalone-build-for-deploying)):
 
 ```sh
 pnpm --filter @crack-attack/server build
@@ -168,6 +169,28 @@ PORT=9000 HOST=127.0.0.1 DB=:memory: pnpm --filter @crack-attack/server start
 DB=/var/lib/crack-attack/lobby.db pnpm --filter @crack-attack/server start
 ```
 
+### Standalone build (for deploying)
+
+The relay packages into a single self-contained file that runs with plain Node:
+no pnpm, no `node_modules`, nothing to compile on the server.
+
+```sh
+pnpm --filter @crack-attack/server bundle    # → packages/server/dist/relay.mjs
+```
+
+Copy `relay.mjs` anywhere and run it with Node 22.13 or newer; it takes the same
+environment variables:
+
+```sh
+HOST=127.0.0.1 PORT=8080 DB=/var/lib/crack-attack/lobby.db node relay.mjs
+```
+
+It inlines the game packages and `ws`, and keeps records with Node's built-in
+SQLite (`node:sqlite`), so there's no native add-on to install. On Node 22 it
+prints a one-time `ExperimentalWarning` about SQLite (the module is still
+labelled experimental there); it's harmless. A database written by an earlier
+version of the relay opens unchanged.
+
 ### Production: TLS termination with nginx (recommended)
 
 Browsers block mixed content: a game served from an `https://` page may only
@@ -179,8 +202,7 @@ terminates TLS. With nginx:
    outside:
 
    ```sh
-   HOST=127.0.0.1 PORT=8080 DB=/var/lib/crack-attack/lobby.db \
-     pnpm --filter @crack-attack/server start
+   HOST=127.0.0.1 PORT=8080 DB=/var/lib/crack-attack/lobby.db node relay.mjs
    ```
 
 2. **Proxy a path on your HTTPS site to it.** The relay accepts WebSocket
@@ -235,8 +257,8 @@ Notes:
   After=network.target
 
   [Service]
-  WorkingDirectory=/opt/crack-attack-web/packages/server
-  ExecStart=/usr/bin/node dist/main.js
+  WorkingDirectory=/opt/crack-attack
+  ExecStart=/usr/bin/node /opt/crack-attack/relay.mjs
   Environment=HOST=127.0.0.1 PORT=8080 DB=/var/lib/crack-attack/lobby.db
   StateDirectory=crack-attack
   User=crack-attack

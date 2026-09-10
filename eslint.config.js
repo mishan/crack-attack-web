@@ -65,4 +65,19 @@ export default tseslint.config(
       'no-undef': 'off',
     },
   },
+  // Plain-JS Node scripts (the relay's bundle + smoke test), run directly with
+  // `node`: give `no-undef` the Node globals they use.
+  {
+    files: ['packages/server/scripts/**/*.mjs'],
+    languageOptions: {
+      globals: {
+        process: 'readonly',
+        console: 'readonly',
+        setTimeout: 'readonly',
+        clearTimeout: 'readonly',
+        URL: 'readonly',
+        WebSocket: 'readonly',
+      },
+    },
+  },
 );

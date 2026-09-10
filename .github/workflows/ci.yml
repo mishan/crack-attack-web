@@ -22,9 +22,10 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
-      # Exercise both supported Node majors (see root package.json `engines`).
+      # The oldest supported Node (root package.json `engines`; the relay needs
+      # node:sqlite, unflagged since 22.13) and the current LTS.
       matrix:
-        node-version: ['20.19', '22']
+        node-version: ['22.13', '24']
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -56,3 +57,9 @@ jobs:
 
       - name: Client production build (Vite)
         run: pnpm --filter @crack-attack/client run build
+
+      - name: Relay standalone bundle (esbuild)
+        run: pnpm --filter @crack-attack/server run bundle
+
+      - name: Relay bundle smoke test (alone in an empty directory)
+        run: node packages/server/scripts/smoke-bundle.mjs
