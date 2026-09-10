@@ -8,7 +8,13 @@ class FakeAudio {
   volume = 1;
   preload = '';
   paused = true;
+  /** Make the next play() reject, as a browser's autoplay block does. */
+  rejectNextPlay = false;
   play(): Promise<void> {
+    if (this.rejectNextPlay) {
+      this.rejectNextPlay = false;
+      return Promise.reject(new Error('NotAllowedError: autoplay blocked'));
+    }
     this.paused = false;
     return Promise.resolve();
   }
@@ -56,6 +62,11 @@ afterEach(() => vi.unstubAllGlobals());
 
 /** The manager's single music element. */
 const music = (): FakeAudio => audioEls[0]!;
+/** Let pending play() rejections run. */
+const settle = (): Promise<void> => new Promise((r) => setTimeout(r, 0));
+/** A returning player who has music turned on. */
+const musicOn = (): void =>
+  void store.set('ca.audio.settings', JSON.stringify({ muted: false, music: 1, sfx: 1 }));
 
 describe('AudioManager music', () => {
   it('starts with music off and sound effects on for a first-time player', () => {
@@ -102,5 +113,49 @@ describe('AudioManager music', () => {
     audio.playPrelude();
     expect(music().src).toContain('music/prelude.ogg');
     expect(music().paused).toBe(false);
+  });
+
+  it('retries a blocked track on the next gesture', async () => {
+    musicOn();
+    const audio = new AudioManager();
+    audio.unlock();
+    music().rejectNextPlay = true;
+    audio.playGame();
+    await settle();
+    expect(music().paused).toBe(true);
+
+    audio.unlock(); // the next gesture
+    expect(music().src).toContain('music/game.ogg');
+    expect(music().paused).toBe(false);
+  });
+
+  it('never lets an older blocked request override a newer track', async () => {
+    musicOn();
+    const audio = new AudioManager();
+    audio.unlock();
+    music().rejectNextPlay = true;
+    audio.playPrelude(); // blocked; its rejection lands after the next request
+    audio.playGame();
+    await settle();
+
+    audio.unlock(); // a later gesture must not bring the prelude back
+    expect(music().src).toContain('music/game.ogg');
+    expect(music().paused).toBe(false);
+  });
+
+  it('does not revive an older blocked track while music is off', async () => {
+    musicOn();
+    const audio = new AudioManager();
+    audio.unlock();
+    music().rejectNextPlay = true;
+    audio.playPrelude();
+    await settle(); // the prelude is now queued for a retry
+    audio.setMusicVolume(0);
+    audio.playGame(); // what the game wants now, while music is off
+
+    audio.unlock(); // a later gesture
+    audio.setMusicVolume(1);
+    expect(music().src).toContain('music/game.ogg');
+    expect(music().loop).toBe(true);
   });
 });

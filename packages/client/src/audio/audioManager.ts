@@ -91,6 +91,14 @@ export class AudioManager {
    * streamed, but turning the volume up starts it.
    */
   private idleTrack: { track: MusicTrack; loop: boolean } | null = null;
+  /**
+   * Bumped by every music request (and by stopping / turning music off).
+   * `play()` rejects asynchronously — changing `src` aborts the previous
+   * track's pending play — so a rejection only queues a retry if it belongs to
+   * the latest request; otherwise an old track would come back on the next
+   * gesture and override the one the game now wants.
+   */
+  private musicRequest = 0;
   private fadeRaf = 0;
 
   private settings: AudioSettings;
@@ -214,6 +222,9 @@ export class AudioManager {
    */
   playMusic(track: MusicTrack, loop: boolean): void {
     this.cancelFade();
+    // The latest request is the only one worth retrying.
+    this.pendingTrack = null;
+    const request = ++this.musicRequest;
     if (!this.unlocked) {
       this.pendingTrack = { track, loop };
       return;
@@ -232,8 +243,9 @@ export class AudioManager {
     this.musicEl.src = assetUrl('music', MUSIC_FILES[track]);
     this.applyMusicVolume();
     void this.musicEl.play().catch(() => {
-      /* autoplay may still be blocked; the next gesture retries via unlock() */
-      this.pendingTrack = { track, loop };
+      // Autoplay may still be blocked; the next gesture retries via unlock() —
+      // unless a newer request (or a stop) has superseded this one meanwhile.
+      if (request === this.musicRequest) this.pendingTrack = { track, loop };
     });
   }
 
@@ -273,6 +285,7 @@ export class AudioManager {
   stopMusic(): void {
     this.cancelFade();
     this.musicEl.pause();
+    this.musicRequest++; // an in-flight play() rejection is now stale
     this.currentTrack = null;
     this.pendingTrack = null;
     this.idleTrack = null;
@@ -359,6 +372,7 @@ export class AudioManager {
       this.cancelFade();
       this.idleTrack = { track: this.currentTrack, loop: this.musicEl.loop };
       this.musicEl.pause();
+      this.musicRequest++; // an in-flight play() rejection is now stale
       this.currentTrack = null;
     } else if (v > 0 && wasOff && this.idleTrack) {
       const { track, loop } = this.idleTrack;
