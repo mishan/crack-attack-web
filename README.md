@@ -89,6 +89,8 @@ any static file server.
 Append these to the client URL (e.g. `http://localhost:5173/?net`):
 
 - `?net` — boot straight into netplay instead of solo.
+- `?demo` — boot straight into the AI-vs-AI demo (hard vs hard);
+  `?demo=easy,hard` picks the left and right bots. Handy as a showcase link.
 - `?relay=<url>` — override the relay WebSocket URL for this session, e.g.
   `?relay=ws://localhost:8080` or `?relay=wss://example.com/ws`.
 - `?tune` — open the lighting/material render tuner (dev aid).
@@ -171,6 +173,14 @@ plans combos and chains to attack):
 - **Netplay:** the **vs AI** button in the online lobby seats a bot instead of a
   second human. The bot is deterministic and computed identically on every
   client, so spectators see the same moves.
+
+### Watching AI vs AI
+
+**Watch AI vs AI** on the solo screen picks two bots and lets them play each
+other, match after match, with a running tally — the in-browser version of the
+`ai-arena` tool, and a quick way to show the game off. **N** skips to the next
+match, **F** cycles 1×/2×/4× speed, **P** pauses, **Esc** leaves. No server
+needed.
 
 ## Tools
 

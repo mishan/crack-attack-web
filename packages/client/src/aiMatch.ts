@@ -140,8 +140,9 @@ export function bootAiMatch(
 
     const tag = document.createElement('div');
     tag.textContent = label;
+    // Below the top-right audio controls, which would otherwise cover the right tag.
     tag.style.cssText =
-      'position:absolute;top:10px;left:0;right:0;text-align:center;z-index:2;pointer-events:none;' +
+      'position:absolute;top:52px;left:0;right:0;text-align:center;z-index:2;pointer-events:none;' +
       'font:600 14px system-ui,sans-serif;letter-spacing:1px;color:#e7ebf3;text-transform:uppercase';
     container.appendChild(tag);
 

@@ -10,15 +10,23 @@
  * Solo and netplay are switchable in-client (each mode returns a disposable
  * handle); no URL parameters are required. `?net` still force-boots netplay
  * and `?relay=` still overrides the relay URL, for muscle memory and dev
- * convenience.
+ * convenience. `?demo` boots straight into the AI-vs-AI demo (`?demo=easy,hard`
+ * picks the bots) — handy for a showcase link or kiosk.
  *
  * The sim is authoritative and deterministic; everything here is replaceable
  * platform glue (and stays out of `packages/core`, which must not touch the DOM).
  */
 
-import { GameSim, GC_STEPS_PER_SECOND, generateSeed } from '@crack-attack/core';
+import {
+  GameSim,
+  GC_STEPS_PER_SECOND,
+  generateSeed,
+  type AiDifficultyLevel,
+} from '@crack-attack/core';
+import { bootAiDemo } from './aiDemo.js';
 import { bootAiMatch } from './aiMatch.js';
 import { pickAiDifficulty } from './render/aiDifficultyPicker.js';
+import { pickAiMatchup, type AiMatchup } from './render/aiMatchupPicker.js';
 import { KeyboardInput } from './input/keyboard.js';
 import { mountTouchControls } from './input/touchControls.js';
 import { BoardView, DEFAULT_RENDER_TUNING } from './render/boardView.js';
@@ -56,6 +64,7 @@ const SOLO_HELP = '←→↑↓ move · Z / Space swap · X raise · R restart �
 const AI_HELP = '←→↑↓ move · Z / Space swap · X raise · R restart · P pause · M mute · vs AI';
 const NET_HELP =
   '←→↑↓ move · Z / Space swap · X raise · R ready/rematch · Esc concede/stop watching · M mute';
+const DEMO_HELP = 'AI vs AI demo · N next match · F speed · P pause · M mute · Esc leave';
 
 /** A running mode (solo board or netplay shell); dispose to switch away. */
 interface ModeHandle {
@@ -76,6 +85,14 @@ function resolveRelayUrl(params: URLSearchParams): string {
   if (fromEnv) return fromEnv;
   const scheme = globalThis.location.protocol === 'https:' ? 'wss' : 'ws';
   return `${scheme}://${globalThis.location.hostname}:8080`;
+}
+
+/** `?demo=easy,hard` → that pairing (`?demo=easy` → easy vs easy); a bare or unknown value → hard vs hard. */
+function parseDemoMatchup(value: string | null): AiMatchup {
+  const tier = (s: string | undefined): AiDifficultyLevel =>
+    s === 'easy' || s === 'medium' || s === 'hard' ? s : 'hard';
+  const [left, right] = (value ?? '').split(',');
+  return { left: tier(left), right: tier(right ?? left) };
 }
 
 /** Whether an event target is a form control or editable element (keys should pass through). */
@@ -123,7 +140,9 @@ function boot(): void {
 
   let current: ModeHandle | null = null;
   // Chosen from the difficulty modal; drives an `enter('ai')`.
-  let aiDifficulty: import('@crack-attack/core').AiDifficultyLevel = 'medium';
+  let aiDifficulty: AiDifficultyLevel = 'medium';
+  // The AI-vs-AI demo's bots; seeded from `?demo=`, then the last picker choice.
+  let demoMatchup = parseDemoMatchup(params.get('demo'));
 
   // Open the difficulty modal, then boot a vs-AI match (or stay put if cancelled).
   const playAi = (): void => {
@@ -134,25 +153,36 @@ function boot(): void {
     });
   };
 
-  const enter = (mode: 'solo' | 'net' | 'ai'): void => {
+  // Pick the two bots, then boot the AI-vs-AI demo (or stay put if cancelled).
+  const watchAi = (): void => {
+    void pickAiMatchup(demoMatchup).then((matchup) => {
+      if (!matchup) return;
+      demoMatchup = matchup;
+      enter('demo');
+    });
+  };
+
+  const HELP = { solo: SOLO_HELP, net: NET_HELP, ai: AI_HELP, demo: DEMO_HELP };
+  const enter = (mode: 'solo' | 'net' | 'ai' | 'demo'): void => {
     current?.dispose();
     current = null;
     if (hudEl) hudEl.textContent = '';
-    // Netplay has its own controls (ready/concede); solo and vs-AI share the
-    // same ones (restart/pause), so a local AI match uses the solo hint.
-    if (help) help.textContent = mode === 'ai' ? AI_HELP : mode === 'net' ? NET_HELP : SOLO_HELP;
+    if (help) help.textContent = HELP[mode];
     if (mode === 'net') {
       void import('./netplay.js').then((m) => {
         current = m.bootNetplay(app, hudEl, relayUrl, () => enter('solo'), audio);
       });
     } else if (mode === 'ai') {
       current = bootAiMatch(app, hudEl, aiDifficulty, audio, () => enter('solo'));
+    } else if (mode === 'demo') {
+      const { left, right } = demoMatchup;
+      current = bootAiDemo(app, hudEl, left, right, audio, () => enter('solo'));
     } else {
-      current = bootSolo(app, hudEl, () => enter('net'), playAi, audio);
+      current = bootSolo(app, hudEl, () => enter('net'), playAi, watchAi, audio);
     }
   };
 
-  enter(params.has('net') ? 'net' : 'solo');
+  enter(params.has('demo') ? 'demo' : params.has('net') ? 'net' : 'solo');
 }
 
 function bootSolo(
@@ -160,6 +190,7 @@ function bootSolo(
   hudEl: HTMLElement | null,
   onPlayOnline: () => void,
   onPlayAi: () => void,
+  onWatchAi: () => void,
   audio: AudioManager,
 ): ModeHandle {
   // A fresh board every game, as the reference seeds each run
@@ -263,6 +294,14 @@ function bootSolo(
   aiBtn.style.cssText = 'position:fixed;top:52px;right:12px;z-index:5;padding:6px 12px;opacity:.85';
   aiBtn.onclick = onPlayAi;
   document.body.appendChild(aiBtn);
+
+  // Mode switch into the AI-vs-AI demo, third in the same column.
+  const demoBtn = document.createElement('button');
+  demoBtn.textContent = 'Watch AI vs AI';
+  demoBtn.style.cssText =
+    'position:fixed;top:92px;right:12px;z-index:5;padding:6px 12px;opacity:.85';
+  demoBtn.onclick = onWatchAi;
+  document.body.appendChild(demoBtn);
 
   // --- input ---------------------------------------------------------------
   const restart = (): void => {
@@ -464,6 +503,7 @@ function bootSolo(
       touch?.remove();
       onlineBtn.remove();
       aiBtn.remove();
+      demoBtn.remove();
       overlay.dispose();
       loseBar.dispose();
       view.dispose(); // release the WebGL context (browsers cap them)
