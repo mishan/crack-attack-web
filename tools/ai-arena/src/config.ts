@@ -29,6 +29,7 @@ const TUNING_FIELDS: Record<keyof AiTuning, 'number' | 'boolean'> = {
   undermine: 'boolean',
   chainSetup: 'boolean',
   chainLookahead: 'boolean',
+  bigComboSetupMaxCost: 'number',
   holdFireTicks: 'number',
   holdFireMinCells: 'number',
   fireMinChain: 'number',

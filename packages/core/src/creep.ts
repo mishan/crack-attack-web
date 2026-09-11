@@ -79,6 +79,11 @@ export class Creep {
   /** Manual-advance latch: once advancing, keep advancing until the row lands. `Creep.h:43` */
   private advance = false;
 
+  /** Whether a manual row advance is latched until the current row lands. */
+  get isAdvancing(): boolean {
+    return this.advance;
+  }
+
   /** Feed every gameplay field into the sim digest (digest.ts). Pure. */
   hashState(h: StateHasher): void {
     h.add(this.creep);

@@ -3,12 +3,19 @@
  *
  * Two `GameSim`s share a seed (identical starting boards), their garbage ports
  * are cross-wired exactly as in netplay / `aiMatch` / `tools/ai-arena`, and each
- * side is driven by its own `AiController`. DOM-free, so the match logic is
- * unit-tested; `aiDemo.ts` is the thin render/timing layer on top. A
- * `(seed, tierA, tierB)` triple always plays out the same game.
+ * side is driven by its own `AiController`, with a distinct judgment seed
+ * derived from the match seed and seat. The boards stay fair while equivalent
+ * decisions stop mirroring. DOM-free and replayable: a `(seed, tierA, tierB)`
+ * triple always plays out the same game.
  */
 
-import { AiController, GameSim, type AiDifficultyLevel, type AiTuning } from '@crack-attack/core';
+import {
+  AiController,
+  GameSim,
+  aiDecisionSeed,
+  type AiDifficultyLevel,
+  type AiTuning,
+} from '@crack-attack/core';
 
 /**
  * How a match ended: seat 0 (left) or seat 1 (right) won, a same-tick double
@@ -45,7 +52,10 @@ export class AiVsAiMatch {
     link(simA, simB);
     link(simB, simA);
     this.sims = [simA, simB];
-    this.ais = [new AiController(a), new AiController(b)];
+    this.ais = [
+      new AiController(a, aiDecisionSeed(seed, 0)),
+      new AiController(b, aiDecisionSeed(seed, 1)),
+    ];
   }
 
   /** Gameplay ticks played so far. */

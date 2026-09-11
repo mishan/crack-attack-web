@@ -3,7 +3,9 @@ import {
   PLAN_EMPTY,
   PLAN_GARBAGE,
   attackValue,
+  evaluateGravity,
   evaluateSwap,
+  planBigComboSetup,
   planChainSetup,
   planShatterSetup,
   planUndermine,
@@ -45,7 +47,7 @@ describe('aiPlanner cascade evaluator', () => {
   it('gravity forms a 4-wide combo (magnitude drives width garbage)', () => {
     // A floating 1 over a gap drops to complete a 4-in-a-row.
     const b = board(['...1', '111.']);
-    const c = evaluateSwap(b, 0, 1); // harmless empty swap; gravity does the work
+    const c = evaluateGravity(b);
     expect(c.chainDepth).toBe(1);
     expect(c.totalCleared).toBe(4);
     expect(c.maxRound).toBe(4);
@@ -255,6 +257,33 @@ describe('planChainSetup', () => {
   });
 });
 
+describe('planBigComboSetup', () => {
+  it('finishes a crossed five-row construction whose trigger clears x10', () => {
+    // Columns 0/1 are nearly the human x10 pattern: five 1/2 pairs with the
+    // centre pair crossed. The bottom pair is also crossed; fixing it is a
+    // non-clearing setup, after which swapping the centre clears both columns.
+    const b = board(['1234', '1256', '2156', '1234', '2134']);
+    const plan = planBigComboSetup(b, 18);
+    expect(plan).toEqual({ x: 0, y: 0, cost: 1, size: 10 });
+    applySwap(b, plan!.x, plan!.y);
+    const trigger = evaluateSwap(b, 0, 2);
+    expect(trigger.totalCleared).toBe(10);
+    expect(trigger.maxRound).toBe(5);
+  });
+
+  it('is reproducible for a seed and may choose differently across seeds', () => {
+    const b = board(['123456', '123456', '213465', '123456', '213465']);
+    expect(planBigComboSetup(b, 18, 7)).toEqual(planBigComboSetup(b, 18, 7));
+    const choices = new Set(
+      [1, 2, 3, 4, 5, 6, 7, 8].map((seed) => {
+        const plan = planBigComboSetup(b, 18, seed);
+        return plan ? `${plan.x},${plan.y}` : 'none';
+      }),
+    );
+    expect(choices.size).toBeGreaterThan(1);
+  });
+});
+
 describe('planUndermine', () => {
   it('digs the load-bearing block under a slab into the neighbouring gap', () => {
     // Tower at column 1 carries the slab; the top tower block (1,y2) can dig
@@ -268,7 +297,18 @@ describe('planUndermine', () => {
     // Same shape, no slab: nothing is load-bearing — undermining is not
     // generic flattening. And with a slab but no fall-through cell, null too.
     expect(planUndermine(board(['....', '.1..', '.2..', '3123']), 0, 0)).toBeNull();
-    expect(planUndermine(board(['.#..', '31.4', '324.', '3123']), 0, 0)).toBeNull();
+    expect(planUndermine(board(['.#..', '31.4', '3245', '3123']), 0, 0)).toBeNull();
+  });
+
+  it("first clears a lower pocket, then pulls a slab's sole support down", () => {
+    // The slab's only support is (0,y2). Its right-hand pocket is empty, but
+    // blocked one row down by the 2 at (1,y1), matching the screenshot shape.
+    // Move that 2 right first; the next pass can move support 1 right and down.
+    const b = board(['######', '1.....', '12....', '345634']);
+    const prep = planUndermine(b, 0, 0);
+    expect(prep).toEqual({ x: 1, y: 1 });
+    applySwap(b, prep!.x, prep!.y);
+    expect(planUndermine(b, 0, 2)).toEqual({ x: 0, y: 2 });
   });
 });
 

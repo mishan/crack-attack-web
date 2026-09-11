@@ -8,15 +8,12 @@
  * result, so a series over a seed batch is reproducible and any planner/tuning
  * change is *measurable* against a baseline rather than eyeballed.
  *
- * Seats are *near*- but not guaranteed symmetric: boards start identical, but
- * A steps before B within a tick, and a garbage enqueue draws the
- * **receiver's** gameplay RNG (`determineDropTime`) — so relative to the
- * receiver's own stream, a send lands one step earlier in seat B than the
- * mirror image. That reorders draws only when an enqueue coincides with the
- * receiver's own in-step draws (creep-row generation), so mirrors are
- * usually — but not provably — identical (measured: 20/20 hard-vs-medium
- * seeds mirrored exactly). For careful comparisons run both orientations
- * (the CLI's `--both`) and aggregate.
+ * Seats are intentionally asymmetric at the controller layer: each receives a
+ * distinct judgment seed derived from `(match seed, seat)`, so equally-ranked
+ * moves need not mirror. Gameplay boards still share the same seed. A also
+ * steps before B within a tick, and garbage enqueue timing can reorder the
+ * receiver's gameplay-RNG draws. For careful comparisons run both orientations
+ * (the CLI's `--both`) and aggregate out the seat personality/bias.
  *
  * A same-tick double loss is a draw (the netplay convention); hitting the tick
  * cap is reported separately as a timeout so stalemates don't masquerade as
@@ -32,6 +29,7 @@ import {
   GF_COLOR_4,
   GF_COLOR_5,
   GameSim,
+  aiDecisionSeed,
   type AiTuning,
 } from '@crack-attack/core';
 
@@ -112,8 +110,8 @@ export function runMatch(
 ): MatchResult {
   const simA = new GameSim(seed);
   const simB = new GameSim(seed);
-  const aiA = new AiController(tuningA);
-  const aiB = new AiController(tuningB);
+  const aiA = new AiController(tuningA, aiDecisionSeed(seed, 0));
+  const aiB = new AiController(tuningB, aiDecisionSeed(seed, 1));
   let sentA = 0;
   let sentB = 0;
   link(simA, simB, (cells) => (sentA += cells));

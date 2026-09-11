@@ -24,6 +24,17 @@ describe('AiVsAiMatch', () => {
     expect(a.sims[1].digest()).toBe(b.sims[1].digest());
   });
 
+  it('gives equal-tier seats reproducible but asymmetric judgment', () => {
+    const a = new AiVsAiMatch(42, 'hard', 'hard', 2000);
+    for (let t = 0; t < 500 && a.outcome === null; t++) a.step();
+    expect(a.sims[0].digest()).not.toBe(a.sims[1].digest());
+
+    const b = new AiVsAiMatch(42, 'hard', 'hard', 2000);
+    for (let t = 0; t < a.ticks; t++) b.step();
+    expect(b.sims[0].digest()).toBe(a.sims[0].digest());
+    expect(b.sims[1].digest()).toBe(a.sims[1].digest());
+  });
+
   it('plays to a decisive result, and the loser is the board that topped out', () => {
     const match = playOut(new AiVsAiMatch(7, 'hard', 'easy'));
     expect(match.outcome === 0 || match.outcome === 1).toBe(true);

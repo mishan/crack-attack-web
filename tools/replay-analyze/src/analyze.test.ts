@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { ActionState, AiController, GameSim } from '@crack-attack/core';
+import { ActionState, AiController, GameSim, aiDecisionSeed } from '@crack-attack/core';
 import { analyzeReplay, validateReplay, type VsAiReplay } from './analyze.js';
 
 /**
@@ -11,7 +11,7 @@ function synthesizeReplay(seed: number, ticks: number): VsAiReplay {
   const humanSim = new GameSim(seed);
   const aiSim = new GameSim(seed);
   const human = new AiController('easy');
-  const ai = new AiController('medium');
+  const ai = new AiController('medium', aiDecisionSeed(seed, 1));
   const link = (from: GameSim, to: GameSim): void => {
     from.garbageGenerator.outSink = {
       sendGarbage: (h, w, f) => to.garbageGenerator.addToQueue(h, w, f, from.clock.time_step),

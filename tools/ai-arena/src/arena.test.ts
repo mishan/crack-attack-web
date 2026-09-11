@@ -15,13 +15,14 @@ import { runMatch, runSeries, specialCells } from './arena.js';
 import { tuningFromJson } from './config.js';
 
 describe('arena', () => {
-  it('a mirror match (same tuning, same seed) is a perfect draw', () => {
-    // Both sims start identical and the controllers are deterministic functions
-    // of sim state, so the boards must evolve in lockstep and top out together.
+  it('same-tier seats make reproducible but asymmetric choices', () => {
+    // Gameplay boards share a seed, but each controller gets its own derived
+    // judgment seed. Equivalent choices diverge without sacrificing replay.
     const hard = aiTuningFor('hard');
     const result = runMatch(hard, hard, 42, 30_000);
-    expect(result.outcome === 'draw' || result.outcome === 'timeout').toBe(true);
-    expect(result.sentA).toBe(result.sentB);
+    expect(result.outcome === 'a' || result.outcome === 'b').toBe(true);
+    expect(result.sentA).not.toBe(result.sentB);
+    expect(runMatch(hard, hard, 42, 30_000)).toEqual(result);
   });
 
   it('is deterministic: same pairing + seed ⇒ identical result', () => {

@@ -9,7 +9,7 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import { AiController } from '@crack-attack/core';
+import { AiController, aiDecisionSeed } from '@crack-attack/core';
 import { LockstepSession } from './lockstep.js';
 import { SpectatorSession } from './spectator.js';
 
@@ -27,7 +27,7 @@ function humanInputs(): () => number {
 describe('netplay AI seat', () => {
   it('never stalls on the bot and reaches a decisive outcome', () => {
     const p = new LockstepSession(SEED, 0, INPUT_DELAY, undefined, {
-      controller: new AiController('hard'),
+      controller: new AiController('hard', aiDecisionSeed(SEED, AI_INDEX)),
       index: AI_INDEX,
     });
     const sample = humanInputs();
@@ -43,7 +43,7 @@ describe('netplay AI seat', () => {
   it('a spectator fed only the human stream reproduces both boards and the AI', () => {
     // Drive the player to the end, capturing the human frames it emits.
     const p = new LockstepSession(SEED, 0, INPUT_DELAY, undefined, {
-      controller: new AiController('medium'),
+      controller: new AiController('medium', aiDecisionSeed(SEED, AI_INDEX)),
       index: AI_INDEX,
     });
     const sample = humanInputs();
@@ -57,7 +57,7 @@ describe('netplay AI seat', () => {
     // A spectator gets the human's frames only (index 0); it computes the bot
     // (index 1) itself with the same controller/difficulty.
     const s = new SpectatorSession(SEED, [[], []], {
-      controller: new AiController('medium'),
+      controller: new AiController('medium', aiDecisionSeed(SEED, AI_INDEX)),
       index: AI_INDEX,
     });
     s.addFrames(0, 0, humanStream);
@@ -72,7 +72,7 @@ describe('netplay AI seat', () => {
   it('is reproducible: two independent players with the same seed match tick for tick', () => {
     const run = (): number[] => {
       const p = new LockstepSession(SEED, 0, INPUT_DELAY, undefined, {
-        controller: new AiController('hard'),
+        controller: new AiController('hard', aiDecisionSeed(SEED, AI_INDEX)),
         index: AI_INDEX,
       });
       const sample = humanInputs();
