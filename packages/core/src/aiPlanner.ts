@@ -21,6 +21,7 @@
  * Original work Copyright (C) 2000 Daniel Nelson. GPL-2.0-or-later.
  */
 
+import { BS_FALLING } from './block.js';
 import { GC_PLAY_HEIGHT, GC_PLAY_WIDTH } from './constants.js';
 import { GR_BLOCK, GR_GARBAGE, type Grid } from './grid.js';
 import { flavorMatch, mapFlavorToBaseFlavor } from './flavors.js';
@@ -65,6 +66,39 @@ export function readPlanBoard(grid: Grid): PlanBoard {
       if ((state & GR_GARBAGE) !== 0) cell[x * height + y] = PLAN_GARBAGE;
       else if ((state & GR_BLOCK) !== 0 && grid.blockAt(x, gy).isStatic())
         cell[x * height + y] = grid.flavorAt(x, gy);
+    }
+  }
+  return { cell, width, height };
+}
+
+/**
+ * Snapshot used while blocks are in their hang/fall window. Unlike
+ * {@link readPlanBoard}, this includes falling blocks at their current grid
+ * cells; the cascade evaluator then settles them after any candidate swap.
+ * Dying blocks are omitted because they will pop before gravity settles;
+ * awaking/swapping blocks remain absent because their eventual contents cannot
+ * be inferred safely from the grid alone.
+ *
+ * The extra height follows `top_occupied_row`, not `top_effective_row`, because
+ * a falling resident may currently sit above the resting stack.
+ */
+export function readGravityPlanBoard(grid: Grid): PlanBoard {
+  const width = GC_PLAY_WIDTH;
+  const top = Math.max(grid.top_occupied_row, grid.top_effective_row);
+  const height = Math.min(top + 1, GC_PLAY_HEIGHT - 1);
+  const cell = new Int16Array(width * height).fill(PLAN_EMPTY);
+  for (let y = 0; y < height; y++) {
+    const gy = y + 1;
+    for (let x = 0; x < width; x++) {
+      const resident = grid.residentTypeAt(x, gy);
+      if ((resident & GR_GARBAGE) !== 0) {
+        cell[x * height + y] = PLAN_GARBAGE;
+      } else if ((resident & GR_BLOCK) !== 0) {
+        const block = grid.blockAt(x, gy);
+        if (block.isStatic() || (block.state & BS_FALLING) !== 0) {
+          cell[x * height + y] = block.flavor;
+        }
+      }
     }
   }
   return { cell, width, height };
@@ -185,13 +219,7 @@ function shatterAdjacent(b: PlanBoard, marked: Set<number>): number {
  * Returns the chain depth, blocks cleared, largest round, and garbage shattered.
  * A swap that triggers nothing returns an all-zero cascade.
  */
-export function evaluateSwap(board: PlanBoard, x: number, y: number): Cascade {
-  const b: PlanBoard = { cell: board.cell.slice(), width: board.width, height: board.height };
-  // Apply the swap.
-  const tmp = at(b, x, y);
-  set(b, x, y, at(b, x + 1, y));
-  set(b, x + 1, y, tmp);
-
+function evaluateCascade(b: PlanBoard): Cascade {
   const result: Cascade = { chainDepth: 0, totalCleared: 0, maxRound: 0, garbageShattered: 0 };
   for (;;) {
     applyGravity(b);
@@ -204,6 +232,20 @@ export function evaluateSwap(board: PlanBoard, x: number, y: number): Cascade {
     for (const idx of marked) b.cell[idx] = PLAN_EMPTY;
   }
   return result;
+}
+
+/** Settle the board without a swap and report the cascade gravity alone creates. */
+export function evaluateGravity(board: PlanBoard): Cascade {
+  return evaluateCascade({ cell: board.cell.slice(), width: board.width, height: board.height });
+}
+
+export function evaluateSwap(board: PlanBoard, x: number, y: number): Cascade {
+  const b: PlanBoard = { cell: board.cell.slice(), width: board.width, height: board.height };
+  // Apply the swap.
+  const tmp = at(b, x, y);
+  set(b, x, y, at(b, x + 1, y));
+  set(b, x + 1, y, tmp);
+  return evaluateCascade(b);
 }
 
 /**
@@ -225,6 +267,25 @@ export interface SetupPlan {
   y: number;
   /** Lateral swaps the full plan still needs from here (≥ 1). */
   cost: number;
+}
+
+/** The next step toward a crossed-column combo worth 2×height blocks. */
+export interface BigComboSetupPlan extends SetupPlan {
+  /** Blocks the finished trigger clears (8 for four rows, 10 for five). */
+  size: number;
+}
+
+/** A deterministic pseudo-random rank used only to break equal planner choices. */
+function seededRank(seed: number | undefined, ...words: number[]): number {
+  if (seed === undefined) return 0;
+  let h = seed >>> 0;
+  for (const word of words) {
+    h ^= Math.imul((word + 1) | 0, 0x9e3779b1);
+    h ^= h >>> 16;
+    h = Math.imul(h, 0x85ebca6b);
+    h ^= h >>> 13;
+  }
+  return h >>> 0;
 }
 
 /** Whether `(x,y)` is 4-adjacent to a garbage cell. */
@@ -424,6 +485,146 @@ export function planShatterSetup(board: PlanBoard, maxCost: number): SetupPlan |
 }
 
 /**
+ * Minimum adjacent swaps needed to put `leftFlavor,rightFlavor` at `(x,x+1)`
+ * in one fully occupied row segment. The rest of the row may end in any order.
+ */
+function rowPairCost(
+  board: PlanBoard,
+  x: number,
+  y: number,
+  leftFlavor: number,
+  rightFlavor: number,
+): number {
+  const seg = segmentAround(board, x, y);
+  if (!seg || x + 1 > seg[1]) return Infinity;
+  let best = Infinity;
+  for (let left = seg[0]; left <= seg[1]; left++) {
+    if (mapFlavorToBaseFlavor(at(board, left, y)) !== leftFlavor) continue;
+    for (let right = seg[0]; right <= seg[1]; right++) {
+      if (mapFlavorToBaseFlavor(at(board, right, y)) !== rightFlavor) continue;
+      // If the sources are reversed, the one adjacent swap where they cross
+      // moves both into place, so the two individual distances double-count it.
+      const cost = Math.abs(left - x) + Math.abs(right - (x + 1)) - (left > right ? 1 : 0);
+      if (cost < best) best = cost;
+    }
+  }
+  return best;
+}
+
+interface BigComboCandidate {
+  x: number;
+  y0: number;
+  height: number;
+  leftFlavor: number;
+  rightFlavor: number;
+  cost: number;
+}
+
+/** Remaining lateral-swap cost for one crossed-column target. */
+function bigComboCost(board: PlanBoard, candidate: Omit<BigComboCandidate, 'cost'>): number {
+  const triggerRow = Math.floor(candidate.height / 2);
+  let cost = 0;
+  for (let row = 0; row < candidate.height; row++) {
+    const crossed = row === triggerRow;
+    const rowCost = rowPairCost(
+      board,
+      candidate.x,
+      candidate.y0 + row,
+      crossed ? candidate.rightFlavor : candidate.leftFlavor,
+      crossed ? candidate.leftFlavor : candidate.rightFlavor,
+    );
+    if (!Number.isFinite(rowCost)) return Infinity;
+    cost += rowCost;
+  }
+  return cost;
+}
+
+/** Find a non-clearing adjacent swap that reduces a crossed-column plan by one step. */
+function nextBigComboSwap(
+  board: PlanBoard,
+  candidate: BigComboCandidate,
+  tieSeed: number | undefined,
+): { x: number; y: number } | null {
+  let best: { x: number; y: number } | null = null;
+  let bestRank = 0;
+  const scratch: PlanBoard = { cell: board.cell.slice(), width: board.width, height: board.height };
+  for (let y = candidate.y0; y < candidate.y0 + candidate.height; y++) {
+    for (let x = 0; x < board.width - 1; x++) {
+      const a = at(board, x, y);
+      const c = at(board, x + 1, y);
+      if (a < 0 || c < 0 || mapFlavorToBaseFlavor(a) === mapFlavorToBaseFlavor(c)) continue;
+      // Setup moves must not accidentally fire a smaller clear and destroy the
+      // construction. The final crossed-row trigger belongs to the fire branch.
+      if (makesRun3(board, x, y)) continue;
+      scratch.cell.set(board.cell);
+      set(scratch, x, y, c);
+      set(scratch, x + 1, y, a);
+      if (bigComboCost(scratch, candidate) !== candidate.cost - 1) continue;
+      const rank = seededRank(tieSeed, 0x424947, x, y);
+      if (!best || (tieSeed !== undefined && rank > bestRank)) {
+        best = { x, y };
+        bestRank = rank;
+      }
+    }
+  }
+  return best;
+}
+
+/**
+ * Build the human crossed-column combo: two adjacent columns of different
+ * colours, four or five blocks tall, with their centre pair crossed. Swapping
+ * that pair completes both columns at once for an x8 or x10 clear.
+ *
+ * Setup moves are lateral block↔block swaps inside occupied rows, so gravity
+ * cannot invalidate the target. Every returned move reduces the exact adjacent-
+ * swap cost by one and completes no match itself; once the construction is
+ * ready, the normal fire search sees and executes the centre trigger. Five-row
+ * x10 targets outrank four-row x8 targets, then lower cost wins. A seeded rank
+ * breaks otherwise equal targets without changing reproducibility.
+ */
+export function planBigComboSetup(
+  board: PlanBoard,
+  maxCost: number,
+  tieSeed?: number,
+): BigComboSetupPlan | null {
+  const flavors = [
+    ...new Set([...board.cell].filter((v) => v >= 0).map(mapFlavorToBaseFlavor)),
+  ].sort((a, b) => a - b);
+  let best: (BigComboCandidate & { next: { x: number; y: number }; rank: number }) | null = null;
+  const maxHeight = Math.min(5, board.height);
+  for (let height = maxHeight; height >= 4; height--) {
+    for (let y0 = 0; y0 + height <= board.height; y0++) {
+      for (let x = 0; x < board.width - 1; x++) {
+        for (const leftFlavor of flavors) {
+          for (const rightFlavor of flavors) {
+            if (leftFlavor === rightFlavor) continue;
+            const base = { x, y0, height, leftFlavor, rightFlavor };
+            const cost = bigComboCost(board, base);
+            if (cost <= 0 || cost > maxCost) continue;
+            const candidate: BigComboCandidate = { ...base, cost };
+            const next = nextBigComboSwap(board, candidate, tieSeed);
+            if (!next) continue;
+            const rank = seededRank(tieSeed, 0x583130, x, y0, leftFlavor, rightFlavor);
+            if (
+              !best ||
+              height > best.height ||
+              (height === best.height && cost < best.cost) ||
+              (height === best.height &&
+                cost === best.cost &&
+                tieSeed !== undefined &&
+                rank > best.rank)
+            ) {
+              best = { ...candidate, next, rank };
+            }
+          }
+        }
+      }
+    }
+  }
+  return best ? { ...best.next, cost: best.cost, size: best.height * 2 } : null;
+}
+
+/**
  * Whether swapping `(x,y)`↔`(x+1,y)` immediately completes a 3+ run, checked
  * statically against post-swap flavours (base-flavour matching). On a settled
  * board (which a `readPlanBoard` snapshot always is, and which gravity-neutral
@@ -495,12 +696,18 @@ export interface ChainSetupPlan {
  * whose result *contains* a single enabler — a three-swap construction
  * (setup → setup → trigger). The same monotone ladder guarantees progress:
  * a 2-level plan becomes a 1-level plan after its first swap, then a fire.
- * Deterministic: scanned bottom-up/left-to-right, best score wins, first find
- * keeps ties. Pure function of the board; no RNG, no timing.
+ * Deterministic: best score wins; an optional seed ranks ties without drawing
+ * gameplay RNG. Pure function of the board and options, with no timing.
  */
 export function planChainSetup(
   board: PlanBoard,
-  opts: { minChain: number; minRun: number; shatterWeight: number; lookahead?: boolean },
+  opts: {
+    minChain: number;
+    minRun: number;
+    shatterWeight: number;
+    lookahead?: boolean;
+    tieSeed?: number;
+  },
 ): ChainSetupPlan | null {
   const direct = searchEnabler(board, opts);
   if (direct || !opts.lookahead) return direct;
@@ -510,6 +717,7 @@ export function planChainSetup(
   // enabler's eventual score. Only runs in enabler-less positions, and the
   // run3 prefilter keeps the inner searches cheap.
   let best: ChainSetupPlan | null = null;
+  let bestRank = 0;
   const b2: PlanBoard = { cell: board.cell.slice(), width: board.width, height: board.height };
   for (let sy = 0; sy < board.height; sy++) {
     for (let sx = 0; sx < board.width - 1; sx++) {
@@ -522,8 +730,15 @@ export function planChainSetup(
       b2.cell[sx * b2.height + sy] = c;
       b2.cell[(sx + 1) * b2.height + sy] = a;
       const enabled = searchEnabler(b2, opts);
-      if (enabled && (!best || enabled.score > best.score)) {
+      const rank = seededRank(opts.tieSeed, 0x4c4f4f4b, sx, sy);
+      if (
+        enabled &&
+        (!best ||
+          enabled.score > best.score ||
+          (enabled.score === best.score && opts.tieSeed !== undefined && rank > bestRank))
+      ) {
         best = { x: sx, y: sy, score: enabled.score };
+        bestRank = rank;
       }
     }
   }
@@ -550,9 +765,10 @@ export function hashPlanBoard(b: PlanBoard): number {
 /** The single-enabler search behind {@link planChainSetup} (one setup + trigger). */
 function searchEnabler(
   board: PlanBoard,
-  opts: { minChain: number; minRun: number; shatterWeight: number },
+  opts: { minChain: number; minRun: number; shatterWeight: number; tieSeed?: number },
 ): ChainSetupPlan | null {
   let best: ChainSetupPlan | null = null;
+  let bestRank = 0;
   const b2: PlanBoard = { cell: board.cell.slice(), width: board.width, height: board.height };
 
   for (let sy = 0; sy < board.height; sy++) {
@@ -585,7 +801,15 @@ function searchEnabler(
           const cas = evaluateSwap(b2, tx, ty);
           if (cas.chainDepth < opts.minChain && cas.maxRound < opts.minRun) continue;
           const score = attackValue(cas) + cas.garbageShattered * opts.shatterWeight;
-          if (!best || score > best.score) best = { x: sx, y: sy, score };
+          const rank = seededRank(opts.tieSeed, 0x43484149, sx, sy);
+          if (
+            !best ||
+            score > best.score ||
+            (score === best.score && opts.tieSeed !== undefined && rank > bestRank)
+          ) {
+            best = { x: sx, y: sy, score };
+            bestRank = rank;
+          }
         }
       }
     }
@@ -601,22 +825,22 @@ function searchEnabler(
  * neighbouring gap so they fall away and the slab descends, row by row, onto
  * the wider stack — where {@link planShatterSetup} takes over.
  *
- * A candidate is a dig swap (a block moved into a laterally-adjacent empty
- * cell it can fall through, exactly {@link AiController.findFlatten}'s rule)
- * whose block is **load-bearing under garbage**: the cells above it in its
- * column are contiguous blocks capped by a garbage cell. Every such dig
- * strictly lowers the total potential energy of the stack, so repeated
- * undermining always terminates (the slab keeps descending). Nearest to the
- * cursor wins; scan order (bottom-up, left-to-right) breaks ties. Returns the
+ * The direct candidate is a dig swap (a load-bearing block moved into an empty
+ * cell it can fall through). If a sole slab support has an adjacent empty cell
+ * but the cell below that pocket is occupied, the planner first slides that
+ * lower blocker aside; the next pass can pull the support down one row. Direct
+ * digs win, then cursor distance; an optional seed ranks exact ties. Returns a
  * swap in plan coordinates, or null.
  */
 export function planUndermine(
   board: PlanBoard,
   cursorX: number,
   cursorY: number,
+  tieSeed?: number,
 ): { x: number; y: number } | null {
   let best: { x: number; y: number } | null = null;
   let bestDist = Infinity;
+  let bestRank = 0;
   const empty = (x: number, y: number): boolean => at(board, x, y) === PLAN_EMPTY;
   const supportsGarbage = (x: number, y: number): boolean => {
     for (let yy = y + 1; yy < board.height; yy++) {
@@ -636,9 +860,75 @@ export function planUndermine(
         isBlock(board, x + 1, y) && empty(x, y) && empty(x, y - 1) && supportsGarbage(x + 1, y);
       if (!digRight && !digLeft) continue;
       const dist = Math.abs(x - cursorX) + Math.abs(y - cursorY);
-      if (dist < bestDist) {
+      const rank = seededRank(tieSeed, 0x444947, x, y);
+      if (dist < bestDist || (dist === bestDist && tieSeed !== undefined && rank > bestRank)) {
         bestDist = dist;
+        bestRank = rank;
         best = { x, y };
+      }
+    }
+  }
+  if (best) return best;
+
+  // A common perched-slab shape has an empty cell beside its sole support, but
+  // a block immediately below that destination. A human first moves that lower
+  // blocker sideways, creating a one-row-deeper pocket; the next planning pass
+  // can then move the support into the pocket and let the slab descend.
+  const soleSupport = (x: number, y: number): boolean => {
+    if (y + 1 >= board.height || at(board, x, y + 1) !== PLAN_GARBAGE) return false;
+    const seen = new Set<number>();
+    const pending = [x * board.height + y + 1];
+    const supports = new Set<number>();
+    while (pending.length > 0) {
+      const idx = pending.pop()!;
+      if (seen.has(idx)) continue;
+      seen.add(idx);
+      const gx = Math.floor(idx / board.height);
+      const gy = idx % board.height;
+      if (gy > 0 && isBlock(board, gx, gy - 1)) supports.add(gx * board.height + gy - 1);
+      for (const [nx, ny] of [
+        [gx - 1, gy],
+        [gx + 1, gy],
+        [gx, gy - 1],
+        [gx, gy + 1],
+      ] as const) {
+        if (
+          nx >= 0 &&
+          nx < board.width &&
+          ny >= 0 &&
+          ny < board.height &&
+          at(board, nx, ny) === PLAN_GARBAGE
+        ) {
+          pending.push(nx * board.height + ny);
+        }
+      }
+    }
+    return supports.size === 1 && supports.has(x * board.height + y);
+  };
+
+  best = null;
+  bestDist = Infinity;
+  bestRank = 0;
+  for (let y = 1; y + 1 < board.height; y++) {
+    for (let supportX = 0; supportX < board.width; supportX++) {
+      if (!isBlock(board, supportX, y) || !soleSupport(supportX, y)) continue;
+      for (const dir of [-1, 1] as const) {
+        const pocketX = supportX + dir;
+        if (pocketX < 0 || pocketX >= board.width || !empty(pocketX, y)) continue;
+        if (!isBlock(board, pocketX, y - 1)) continue;
+        for (const clearDir of [-1, 1] as const) {
+          const clearX = pocketX + clearDir;
+          if (clearX < 0 || clearX >= board.width || !empty(clearX, y - 1)) continue;
+          const swapX = Math.min(pocketX, clearX);
+          if (makesRun3(board, swapX, y - 1)) continue;
+          const dist = Math.abs(swapX - cursorX) + Math.abs(y - 1 - cursorY);
+          const rank = seededRank(tieSeed, 0x50554c4c, swapX, y - 1);
+          if (dist < bestDist || (dist === bestDist && tieSeed !== undefined && rank > bestRank)) {
+            best = { x: swapX, y: y - 1 };
+            bestDist = dist;
+            bestRank = rank;
+          }
+        }
       }
     }
   }

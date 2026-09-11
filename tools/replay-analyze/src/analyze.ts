@@ -31,6 +31,7 @@ import {
   GC_SAFE_HEIGHT,
   GameSim,
   SS_SWAPPING,
+  aiDecisionSeed,
   evaluateSwap,
   readPlanBoard,
   type AiDifficultyLevel,
@@ -194,7 +195,7 @@ export function analyzeReplay(replay: VsAiReplay): Analysis {
 
   const humanSim = new GameSim(replay.seed);
   const aiSim = new GameSim(replay.seed);
-  const ai = new AiController(replay.difficulty);
+  const ai = new AiController(replay.difficulty, aiDecisionSeed(replay.seed, 1));
 
   const human = newSeatReport();
   const aiReport = newSeatReport();

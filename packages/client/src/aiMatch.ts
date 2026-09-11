@@ -17,6 +17,7 @@ import {
   AiController,
   GameSim,
   GC_STEPS_PER_SECOND,
+  aiDecisionSeed,
   generateSeed,
   type AiDifficultyLevel,
 } from '@crack-attack/core';
@@ -74,7 +75,7 @@ export function bootAiMatch(
   let seed = generateSeed();
   let humanSim = new GameSim(seed);
   let aiSim = new GameSim(seed);
-  let ai = new AiController(difficulty);
+  let ai = new AiController(difficulty, aiDecisionSeed(seed, 1));
   crossWire();
 
   // --- Replay capture: the human's per-tick inputs (sparse — only nonzero
@@ -184,7 +185,7 @@ export function bootAiMatch(
     seed = generateSeed();
     humanSim = new GameSim(seed);
     aiSim = new GameSim(seed);
-    ai = new AiController(difficulty);
+    ai = new AiController(difficulty, aiDecisionSeed(seed, 1));
     crossWire();
     recTicks = 0;
     recActions = [];

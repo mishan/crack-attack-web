@@ -5,37 +5,53 @@
  * Unlike the reference's gridless `ComputerPlayer`, this drives an actual
  * `GameSim`: each tick it reads the board and the swap cursor and returns the
  * next input (`ActionState`), so its play is fully visible. It is a pure,
- * deterministic function of the sim state plus its own small plan/timer — no
- * clocks, no RNG — which is what lets a vs-AI netplay match stay in sync across
- * every client: both players and all spectators run the same controller over
- * the same (lockstep-identical) AI sim and therefore see identical moves,
- * without any AI input crossing the wire.
+ * deterministic function of the sim state, its own small plan/timer, and an
+ * optional judgment seed — no clocks and no gameplay-RNG draws. That is what
+ * lets a vs-AI netplay match stay in sync across every client: players and
+ * spectators run the same seeded controller over the same lockstep-identical
+ * AI sim and therefore see identical moves without AI input crossing the wire.
  *
- * Strategy (deliberately simple but functional): find a single horizontal swap
- * of two resting blocks that completes a 3-in-a-row (or 3-in-a-column), prefer
- * the lowest such swap (clear from the bottom), walk the cursor there, and swap.
- * A per-difficulty "think delay" paces it so Easy plays slowly and Hard reacts
- * almost instantly.
+ * Hard evaluates cascades, builds short chains and crossed-column x8/x10
+ * combos and dismantles garbage supports. During a block pop/hang/fall it
+ * evaluates swaps against the gravity-settled future, while preserving a chain
+ * that gravity is already primed to trigger. A per-difficulty think delay paces
+ * the visible reactions.
  */
 
-import { ActionState, CC_DOWN, CC_LEFT, CC_RIGHT, CC_SWAP, CC_UP } from './controller.js';
+import {
+  ActionState,
+  CC_ADVANCE,
+  CC_DOWN,
+  CC_LEFT,
+  CC_RIGHT,
+  CC_SWAP,
+  CC_UP,
+} from './controller.js';
 import { GC_PLAY_HEIGHT, GC_PLAY_WIDTH, GC_SAFE_HEIGHT } from './constants.js';
-import { GR_BLOCK, GR_EMPTY, GR_GARBAGE, type Grid } from './grid.js';
+import { BS_DYING, BS_FALLING } from './block.js';
+import { GR_BLOCK, GR_EMPTY, GR_FALLING, GR_GARBAGE, GR_HANGING, type Grid } from './grid.js';
 import { flavorMatch } from './flavors.js';
+import { GS_STATIC } from './garbage.js';
 import { SS_SWAPPING, type Swapper } from './swapper.js';
 import type { Clock } from './clock.js';
+import type { Creep } from './creep.js';
 import type { GarbageGenerator } from './garbageGenerator.js';
 import {
   PLAN_GARBAGE,
   attackValue,
   canSwap,
+  evaluateGravity,
   evaluateSwap,
   hashPlanBoard,
+  planBigComboSetup,
   planChainSetup,
   planShatterSetup,
   planUndermine,
+  readGravityPlanBoard,
   readPlanBoard,
+  type BigComboSetupPlan,
   type ChainSetupPlan,
+  type PlanBoard,
 } from './aiPlanner.js';
 
 export type AiDifficultyLevel = 'easy' | 'medium' | 'hard';
@@ -44,7 +60,7 @@ export type AiDifficultyLevel = 'easy' | 'medium' | 'hard';
  * Every behavioural knob the controller has, exposed so variants can be paired
  * against each other in the AI-vs-AI arena (`tools/ai-arena`) and tuned by
  * measurement. The named difficulty tiers are presets over this struct
- * ({@link aiTuningFor}); the defaults reproduce their behaviour exactly.
+ * ({@link aiTuningFor}).
  */
 export interface AiTuning {
   /** Ticks the bot pauses after each swap (reaction pacing). */
@@ -87,6 +103,9 @@ export interface AiTuning {
    * deeper for a setup→setup→trigger construction ({@link planChainSetup}
    * lookahead). Only active with `chainSetup`. */
   readonly chainLookahead: boolean;
+  /** Strategic only: pursue the crossed-column x8/x10 combo construction while
+   * safe, up to this many lateral setup swaps. 0 disables it. */
+  readonly bigComboSetupMaxCost: number;
   /** Strategic only: **trigger timing** — hold a ready non-shattering fire when
    * an opponent slab will land within this many ticks, so the cascade fires
    * *through* the fresh slab (shattering it) instead of being spent just before
@@ -127,6 +146,7 @@ const BASE_TUNING: Omit<AiTuning, 'cooldown' | 'flatten' | 'strategic'> = {
   undermine: true,
   chainSetup: true,
   chainLookahead: true,
+  bigComboSetupMaxCost: 18,
   holdFireTicks: 0, // measured neutral-to-negative; see the AiTuning docs
   holdFireMinCells: GC_PLAY_WIDTH,
   fireMinChain: 2,
@@ -138,12 +158,12 @@ const BASE_TUNING: Omit<AiTuning, 'cooldown' | 'flatten' | 'strategic'> = {
 // Difficulty is behavioural, not just paced: reaction speed (cooldown) barely
 // affects survival — the bot is limited by how well it *finds/creates* matches,
 // not how fast it acts — so the tiers differ in strategy, not reflexes.
-//   easy   — reactive only: clears what's one swap away, else idles.
+//   easy   — reactive only: clears what's one swap away, else advances a row.
 //   medium — strategic-lite: fires chains/combos/shatters it sees, survival-
 //            clears in danger, undermines garbage towers — but no shatter
 //            setups and no chain building. (With `strategic: false` it falls
 //            back to the old reactive digger, kept for experiments.)
-//   hard   — full strategic: + multi-swap shatter setups and chain building.
+//   hard   — full strategic: + shatter setups, chains, and x8/x10 building.
 // Arena-measured ladder (seeds 1–60): hard > medium 77%, medium > easy 93%,
 // each tier decisive but beatable — and medium out-attacks the old digger 3×.
 // Cooldown is kept only for *feel* (easy visibly calmer, hard snappier).
@@ -156,6 +176,7 @@ const TUNING: Record<AiDifficultyLevel, AiTuning> = {
     strategic: true,
     shatterSetupMaxCost: 0,
     chainSetup: false,
+    bigComboSetupMaxCost: 0,
   },
   hard: { ...BASE_TUNING, cooldown: 8, flatten: true, strategic: true },
 };
@@ -166,8 +187,8 @@ export function aiTuningFor(difficulty: AiDifficultyLevel): AiTuning {
 }
 
 /**
- * What the controller needs from a sim: the grid, the swap cursor, and — for
- * trigger timing — the clock and the incoming-garbage queue. All lockstep-
+ * What the controller needs from a sim: grid/cursor state, creep state for safe
+ * manual advance, and clock/incoming garbage for trigger timing. All lockstep-
  * deterministic state of the AI's own sim, so netplay stays in sync.
  */
 export interface AiSimView {
@@ -175,6 +196,7 @@ export interface AiSimView {
   readonly swapper: Swapper;
   readonly clock: Clock;
   readonly garbageGenerator: GarbageGenerator;
+  readonly creep: Creep;
 }
 
 interface SwapPlan {
@@ -182,8 +204,25 @@ interface SwapPlan {
   y: number;
 }
 
+/**
+ * Derive a controller-only judgment seed for one seat. Gameplay RNG remains
+ * shared; this seed varies only equally-valued planner choices. The transform
+ * is deterministic, so peers and spectators regenerate the same bot inputs.
+ */
+export function aiDecisionSeed(matchSeed: number, seat: number): number {
+  let h = (matchSeed ^ Math.imul(seat + 1, 0x9e3779b1)) >>> 0;
+  h ^= h >>> 16;
+  h = Math.imul(h, 0x85ebca6b);
+  h ^= h >>> 13;
+  h = Math.imul(h, 0xc2b2ae35);
+  h ^= h >>> 16;
+  return h >>> 0;
+}
+
 export class AiController {
   private readonly tuning: AiTuning;
+  /** Optional seed for reproducible variety among otherwise equal choices. */
+  private readonly decisionSeed: number | null;
   /**
    * The Swapper debounces held keys (a move/swap only triggers on a *fresh*
    * press), so the bot alternates a press with a neutral "release" tick. This
@@ -200,9 +239,16 @@ export class AiController {
    */
   private chainCacheHash = -1;
   private chainCachePlan: ChainSetupPlan | null = null;
+  /** The more ambitious crossed-column setup is board-pure too. */
+  private bigComboCacheHash = -1;
+  private bigComboCachePlan: BigComboSetupPlan | null = null;
+  /** Board before the last issued swap, used to reject an exact immediate undo. */
+  private lastSwapBoardHash = -1;
+  private lastSwapPlan: SwapPlan | null = null;
 
-  constructor(difficulty: AiDifficultyLevel | AiTuning) {
+  constructor(difficulty: AiDifficultyLevel | AiTuning, decisionSeed?: number) {
     this.tuning = typeof difficulty === 'string' ? TUNING[difficulty] : difficulty;
+    this.decisionSeed = decisionSeed === undefined ? null : decisionSeed >>> 0;
   }
 
   /** Reset to a clean state for a new game (mirrors the sim's gameStart). */
@@ -211,6 +257,24 @@ export class AiController {
     this.cooldown = 0;
     this.chainCacheHash = -1;
     this.chainCachePlan = null;
+    this.bigComboCacheHash = -1;
+    this.bigComboCachePlan = null;
+    this.lastSwapBoardHash = -1;
+    this.lastSwapPlan = null;
+  }
+
+  /** Stable pseudo-random rank for an equal choice; 0 preserves scan order when unseeded. */
+  private tieRank(kind: number, x: number, y: number): number {
+    if (this.decisionSeed === null) return 0;
+    let h =
+      (this.decisionSeed ^ kind ^ Math.imul(x + 1, 0x9e3779b1) ^ Math.imul(y + 1, 0x85ebca6b)) >>>
+      0;
+    h ^= h >>> 16;
+    h = Math.imul(h, 0x7feb352d);
+    h ^= h >>> 15;
+    h = Math.imul(h, 0x846ca68b);
+    h ^= h >>> 16;
+    return h >>> 0;
   }
 
   /**
@@ -229,30 +293,61 @@ export class AiController {
       return new ActionState(0);
     }
 
+    // Manual advance is latched by Creep until the row lands. Keep the button
+    // released during that interval so the latch drops at the landing tick;
+    // holding it would accidentally request another whole row immediately.
+    if (sim.creep.isAdvancing) return new ActionState(0);
+
     // Wait out an in-progress swap, and pace by difficulty after each swap.
     if ((swapper.state & SS_SWAPPING) !== 0) return new ActionState(0);
+    const motion = this.boardMotion(grid);
+    // Falling blocks and the holes dying blocks will leave can be projected.
+    // Awaking blocks and moving garbage cannot: their future shape/content
+    // needs more than a grid copy.
+    if (motion === 'other') return new ActionState(0);
     if (this.cooldown > 0) {
       this.cooldown--;
       return new ActionState(0);
     }
 
+    const planningBoard = motion === 'gravity' ? readGravityPlanBoard(grid) : readPlanBoard(grid);
+    const avoidUndo = this.immediateUndo(planningBoard);
+
     // The current nearest clearing swap (re-evaluated every action tick); if
     // none, a dig that shifts a block into a gap (harder AIs only) to flatten
     // the surface and open up new matches.
     let target: SwapPlan | null;
-    if (this.tuning.strategic) {
+    if (motion === 'gravity') {
+      // A fall linked to an active combo will score as a chain when it lands.
+      // If gravity alone already forms a match, status quo is the best plan:
+      // touching its supports could turn a guaranteed chain into a lesser move.
+      if (this.hasLinkedGravity(grid) && evaluateGravity(planningBoard).chainDepth > 0) {
+        return new ActionState(0);
+      }
+      target = this.planDuringGravity(grid, planningBoard, swapper.x, swapper.y, avoidUndo);
+    } else if (this.tuning.strategic) {
       // Trigger timing input: is a real opponent slab about to land?
       const holdFire =
         this.tuning.holdFireTicks > 0 &&
         sim.garbageGenerator.pendingCellsWithin(sim.clock.time_step, this.tuning.holdFireTicks) >=
           this.tuning.holdFireMinCells;
-      target = this.planStrategic(grid, swapper.x, swapper.y, holdFire);
+      target = this.planStrategic(grid, swapper.x, swapper.y, holdFire, avoidUndo);
     } else {
       target =
         this.findSwap(grid, swapper.x, swapper.y) ??
         (this.tuning.flatten ? this.findFlatten(grid, swapper.x, swapper.y) : null);
+      if (target && this.samePlan(target, avoidUndo)) target = null;
     }
-    if (!target) return new ActionState(0); // nothing to do — idle
+    if (!target) {
+      // Do not raise the board during a live fall. Even with no useful swap,
+      // gravity is already supplying the next position to evaluate.
+      if (motion === 'gravity') return new ActionState(0);
+      // A stable position with no useful swap is not a reason to wait for the
+      // slow automatic creep: pull in the next row and give the planners fresh
+      // material. Creep ignores this during a freeze/transient, so it is safe to
+      // retry until the command latches.
+      return new ActionState(sim.creep.creep_freeze ? 0 : CC_ADVANCE);
+    }
 
     // Walk the cursor toward it, one axis at a time, pulsing each press.
     let dir = 0;
@@ -267,9 +362,151 @@ export class AiController {
     }
 
     // Aligned: swap, then pace by difficulty.
+    this.lastSwapBoardHash = hashPlanBoard(planningBoard);
+    this.lastSwapPlan = { x: target.x, y: target.y };
     this.cooldown = this.tuning.cooldown;
     this.releaseNext = true;
     return new ActionState(CC_SWAP);
+  }
+
+  /** Classify a settled board, predictable block gravity, or another transient. */
+  private boardMotion(grid: Grid): 'settled' | 'gravity' | 'other' {
+    let gravity = false;
+    for (let y = 1; y < GC_PLAY_HEIGHT; y++) {
+      for (let x = 0; x < GC_PLAY_WIDTH; x++) {
+        const resident = grid.residentTypeAt(x, y);
+        if (resident === GR_BLOCK && !grid.blockAt(x, y).isStatic()) {
+          if ((grid.blockAt(x, y).state & (BS_FALLING | BS_DYING)) === 0) return 'other';
+          gravity = true;
+        }
+        if (resident === GR_GARBAGE && (grid.garbageAt(x, y).state & GS_STATIC) === 0) {
+          return 'other';
+        }
+      }
+    }
+    return gravity ? 'gravity' : 'settled';
+  }
+
+  /** Whether a falling/dying block belongs to the combo whose next landing can extend it. */
+  private hasLinkedGravity(grid: Grid): boolean {
+    for (let y = 1; y < GC_PLAY_HEIGHT; y++) {
+      for (let x = 0; x < GC_PLAY_WIDTH; x++) {
+        if (grid.residentTypeAt(x, y) !== GR_BLOCK) continue;
+        const block = grid.blockAt(x, y);
+        if ((block.state & (BS_FALLING | BS_DYING)) !== 0 && block.current_combo !== null) {
+          return true;
+        }
+      }
+    }
+    return false;
+  }
+
+  /** Exact copy of the Swapper's per-cell legality checks for a swap rightward. */
+  private canSwapNow(grid: Grid, x: number, y: number): boolean {
+    if (x < 0 || x >= GC_PLAY_WIDTH - 1 || y < 1 || y >= GC_SAFE_HEIGHT) return false;
+    let blocks = 0;
+    for (const cx of [x, x + 1]) {
+      const state = grid.stateAt(cx, y);
+      if ((state & GR_BLOCK) !== 0) {
+        blocks++;
+        continue;
+      }
+      if ((state & GR_EMPTY) === 0) return false;
+      if ((grid.stateAt(cx, y - 1) & GR_FALLING) !== 0) return false;
+      if (y + 1 < GC_PLAY_HEIGHT && (grid.stateAt(cx, y + 1) & GR_HANGING) !== 0) return false;
+    }
+    return blocks > 0;
+  }
+
+  /**
+   * Pick a currently legal swap while blocks hang, but score it only after all
+   * live gravity has settled. This finds the human timing move: arrange resting
+   * blocks during the pause so a combo appears when the linked blocks land.
+   */
+  private planDuringGravity(
+    grid: Grid,
+    board: ReturnType<typeof readGravityPlanBoard>,
+    cursorX: number,
+    cursorY: number,
+    avoid: SwapPlan | null,
+  ): SwapPlan | null {
+    const linkedGravity = this.hasLinkedGravity(grid);
+    let best: SwapPlan | null = null;
+    let bestScore = -1;
+    let bestCleared = -1;
+    let bestDist = Infinity;
+    let bestRank = 0;
+    for (let by = 0; by < board.height; by++) {
+      const gy = by + 1;
+      for (let x = 0; x < board.width - 1; x++) {
+        if (this.samePlan({ x, y: gy }, avoid)) continue;
+        if (!this.canSwapNow(grid, x, gy)) continue;
+        const a = board.cell[x * board.height + by]!;
+        const c = board.cell[(x + 1) * board.height + by]!;
+        if (a === c || a === PLAN_GARBAGE || c === PLAN_GARBAGE) continue;
+        const cascade = evaluateSwap(board, x, by);
+        if (cascade.chainDepth === 0) continue;
+        // A non-clearing setup made during a linked fall turns the first future
+        // match into a real x2 chain. Account for that full-width garbage row,
+        // which the board-only evaluator cannot infer from combo ownership.
+        const immediateClear =
+          (grid.stateAt(x, gy) & GR_BLOCK) !== 0 &&
+          (grid.stateAt(x + 1, gy) & GR_BLOCK) !== 0 &&
+          this.swapMakesMatch(grid, x, gy);
+        const landingChainBonus = linkedGravity && !immediateClear ? GC_PLAY_WIDTH : 0;
+        const score =
+          attackValue(cascade) +
+          cascade.garbageShattered * this.tuning.shatterWeight +
+          landingChainBonus;
+        const dist = Math.abs(x - cursorX) + Math.abs(gy - cursorY);
+        const rank = this.tieRank(0x47524156, x, gy);
+        if (
+          score > bestScore ||
+          (score === bestScore && cascade.totalCleared > bestCleared) ||
+          (score === bestScore &&
+            cascade.totalCleared === bestCleared &&
+            this.decisionSeed !== null &&
+            rank > bestRank) ||
+          (score === bestScore &&
+            cascade.totalCleared === bestCleared &&
+            (this.decisionSeed === null || rank === bestRank) &&
+            dist < bestDist)
+        ) {
+          best = { x, y: gy };
+          bestScore = score;
+          bestCleared = cascade.totalCleared;
+          bestDist = dist;
+          bestRank = rank;
+        }
+      }
+    }
+    return best;
+  }
+
+  private samePlan(a: SwapPlan | null, b: SwapPlan | null): boolean {
+    return a !== null && b !== null && a.x === b.x && a.y === b.y;
+  }
+
+  /**
+   * Return the last swap when performing it again would recreate the exact
+   * board from before that swap. Constructive planners may change targets after
+   * every move; this prevents two attractive targets from selecting inverse
+   * first steps forever.
+   */
+  private immediateUndo(board: PlanBoard): SwapPlan | null {
+    const plan = this.lastSwapPlan;
+    if (!plan || this.lastSwapBoardHash < 0) return null;
+    const y = plan.y - 1;
+    if (y < 0 || y >= board.height || plan.x < 0 || plan.x + 1 >= board.width) return null;
+    const left = plan.x * board.height + y;
+    const right = (plan.x + 1) * board.height + y;
+    const tmp = board.cell[left]!;
+    board.cell[left] = board.cell[right]!;
+    board.cell[right] = tmp;
+    const undoHash = hashPlanBoard(board);
+    board.cell[right] = board.cell[left]!;
+    board.cell[left] = tmp;
+    return undoHash === this.lastSwapBoardHash ? plan : null;
   }
 
   /**
@@ -282,6 +519,7 @@ export class AiController {
     const maxRow = Math.min(grid.top_effective_row + 1, GC_PLAY_HEIGHT - 1);
     let best: SwapPlan | null = null;
     let bestDist = Infinity;
+    let bestRank = 0;
     for (let y = 2; y <= maxRow; y++) {
       for (let x = 0; x < GC_PLAY_WIDTH - 1; x++) {
         const leftBlock = this.swappableBlock(grid, x, y);
@@ -295,8 +533,13 @@ export class AiController {
           (rightBlock && leftEmpty && (grid.stateAt(x, y - 1) & GR_EMPTY) !== 0);
         if (!canDig) continue;
         const dist = Math.abs(x - cursorX) + Math.abs(y - cursorY);
-        if (dist < bestDist) {
+        const rank = this.tieRank(0x464c4154, x, y);
+        if (
+          dist < bestDist ||
+          (dist === bestDist && this.decisionSeed !== null && rank > bestRank)
+        ) {
           bestDist = dist;
+          bestRank = rank;
           best = { x, y };
         }
       }
@@ -317,6 +560,7 @@ export class AiController {
     let best: SwapPlan | null = null;
     let bestGain = 0;
     let bestDist = Infinity;
+    let bestRank = 0;
     for (let y = 1; y <= maxRow; y++) {
       for (let x = 0; x < GC_PLAY_WIDTH - 1; x++) {
         if (!this.swappableBlock(grid, x, y) || !this.swappableBlock(grid, x + 1, y)) continue;
@@ -331,9 +575,17 @@ export class AiController {
         const gain = after - before;
         if (gain <= 0) continue;
         const dist = Math.abs(x - cursorX) + Math.abs(y - cursorY);
-        if (gain > bestGain || (gain === bestGain && dist < bestDist)) {
+        const rank = this.tieRank(0x4255494c, x, y);
+        if (
+          gain > bestGain ||
+          (gain === bestGain && this.decisionSeed !== null && rank > bestRank) ||
+          (gain === bestGain &&
+            (this.decisionSeed === null || rank === bestRank) &&
+            dist < bestDist)
+        ) {
           bestGain = gain;
           bestDist = dist;
+          bestRank = rank;
           best = { x, y };
         }
       }
@@ -385,16 +637,17 @@ export class AiController {
    *    survive;
    *  - otherwise, if garbage is on the board with no one-swap shatter, works
    *    toward the cheapest multi-swap shatter setup ({@link planShatterSetup});
-   *  - otherwise (safe, nothing worth firing) *banks*: prefers a chain-enabling
-   *    setup swap ({@link planChainSetup} — after it, a worth-firing cascade is
-   *    one trigger away), falling back to constructive same-colour clustering.
-   * Returns the grid cell to swap rightward, or null to idle. Deterministic.
+   *  - otherwise (safe, nothing worth firing) *banks*: first a crossed-column
+   *    x8/x10, then a chain-enabling setup ({@link planChainSetup}), then a
+   *    productive gravity/plain clear before generic clustering.
+   * Returns the grid cell to swap rightward, or null to advance. Deterministic.
    */
   private planStrategic(
     grid: Grid,
     cursorX: number,
     cursorY: number,
     holdFire: boolean,
+    avoid: SwapPlan | null,
   ): SwapPlan | null {
     const board = readPlanBoard(grid);
     const H = board.height;
@@ -402,11 +655,14 @@ export class AiController {
     let bestFireScore = -1;
     let bestFireDist = Infinity;
     let bestFireShattered = 0;
+    let bestFireRank = 0;
     let bestClear: SwapPlan | null = null;
     let bestClearDist = Infinity;
+    let bestClearRank = 0;
 
     for (let by = 0; by < H; by++) {
       for (let x = 0; x < board.width - 1; x++) {
+        if (this.samePlan({ x, y: by + 1 }, avoid)) continue;
         if (!canSwap(board, x, by)) continue;
         const a = board.cell[x * H + by]!;
         const c = board.cell[(x + 1) * H + by]!;
@@ -423,17 +679,31 @@ export class AiController {
           cascade.garbageShattered > 0;
         if (worthFiring) {
           const score = attackValue(cascade) + cascade.garbageShattered * this.tuning.shatterWeight;
-          // Highest value wins; the nearest *fire* candidate breaks ties (lands
-          // before the creep shifts).
-          if (score > bestFireScore || (score === bestFireScore && dist < bestFireDist)) {
+          // Highest value wins; a controller-seeded rank separates equal bots,
+          // with cursor distance as the final stable tie-break.
+          const rank = this.tieRank(0x46495245, x, gy);
+          if (
+            score > bestFireScore ||
+            (score === bestFireScore && this.decisionSeed !== null && rank > bestFireRank) ||
+            (score === bestFireScore &&
+              (this.decisionSeed === null || rank === bestFireRank) &&
+              dist < bestFireDist)
+          ) {
             bestFireScore = score;
             bestFireDist = dist;
+            bestFireRank = rank;
             bestFire = { x, y: gy };
             bestFireShattered = cascade.garbageShattered;
           }
         }
-        if (dist < bestClearDist) {
+        const clearRank = this.tieRank(0x434c4541, x, gy);
+        if (
+          bestClear === null ||
+          (this.decisionSeed !== null && clearRank > bestClearRank) ||
+          ((this.decisionSeed === null || clearRank === bestClearRank) && dist < bestClearDist)
+        ) {
           bestClearDist = dist;
+          bestClearRank = clearRank;
           bestClear = { x, y: gy };
         }
       }
@@ -442,16 +712,36 @@ export class AiController {
     // Garbage-aware danger: dead-weight cells make the stack effectively
     // taller than its height says, so they widen the survival margin.
     let garbageCells = 0;
-    if (this.tuning.garbageDangerCells > 0) {
-      for (const v of board.cell) if (v === PLAN_GARBAGE) garbageCells++;
-    }
+    for (const v of board.cell) if (v === PLAN_GARBAGE) garbageCells++;
     const margin =
       this.tuning.dangerMargin +
       (this.tuning.garbageDangerCells > 0
         ? Math.floor(garbageCells / this.tuning.garbageDangerCells)
         : 0);
     const danger = grid.top_effective_row >= GC_SAFE_HEIGHT - margin;
+
+    // On a clean, safe board, compare any immediate fire with the larger
+    // crossed-column construction. This is what lets the bot actually finish
+    // an x8/x10 instead of abandoning it whenever an incidental x4 appears.
+    let big: BigComboSetupPlan | null = null;
+    if (!danger && garbageCells === 0 && this.tuning.bigComboSetupMaxCost > 0) {
+      const hash = hashPlanBoard(board);
+      if (hash !== this.bigComboCacheHash) {
+        this.bigComboCacheHash = hash;
+        this.bigComboCachePlan = planBigComboSetup(
+          board,
+          this.tuning.bigComboSetupMaxCost,
+          this.decisionSeed === null ? undefined : this.decisionSeed,
+        );
+      }
+      big = this.bigComboCachePlan;
+      if (big && this.samePlan({ x: big.x, y: big.y + 1 }, avoid)) big = null;
+    }
     if (bestFire) {
+      const bigPayoff = big ? big.size - 3 : -1;
+      if (big && bestFireShattered === 0 && bestFireScore < bigPayoff) {
+        return { x: big.x, y: big.y + 1 };
+      }
       // Trigger timing: a ready fire that shatters nothing is *held* while a
       // real slab is about to land — fired after the slab arrives, the same
       // (or a bigger) cascade shatters it too, instead of being spent just
@@ -470,19 +760,31 @@ export class AiController {
     // swap from done, the fire branch above executes it.
     if (this.tuning.shatterSetupMaxCost > 0) {
       const setup = planShatterSetup(board, this.tuning.shatterSetupMaxCost);
-      if (setup) return { x: setup.x, y: setup.y + 1 }; // plan rows are grid rows − 1
+      const plan = setup ? { x: setup.x, y: setup.y + 1 } : null;
+      if (plan && !this.samePlan(plan, avoid)) return plan; // plan rows are grid rows − 1
     }
     // No setup reaches the garbage (it's typically perched on a tower): dig
     // the tower out from under it so the slab descends into setup range.
     if (this.tuning.undermine) {
-      const dig = planUndermine(board, cursorX, cursorY - 1);
-      if (dig) return { x: dig.x, y: dig.y + 1 };
+      const dig = planUndermine(
+        board,
+        cursorX,
+        cursorY - 1,
+        this.decisionSeed === null ? undefined : this.decisionSeed,
+      );
+      const plan = dig ? { x: dig.x, y: dig.y + 1 } : null;
+      if (plan && !this.samePlan(plan, avoid)) return plan;
     }
+    // With room to think, pursue the recognisable human x8/x10 construction:
+    // two tall colour columns with their centre pair crossed. It is more
+    // ambitious than the short chain enabler below, so give it first refusal.
+    if (big) return { x: big.x, y: big.y + 1 };
     if (danger) {
       // Nothing clearable and no garbage plan: dig peaks into gaps — it drops
       // blocks (lowering the stack) and churns up new matches. Far better for
       // survival than standing still.
-      return this.tuning.flatten ? this.findFlatten(grid, cursorX, cursorY) : null;
+      const flatten = this.tuning.flatten ? this.findFlatten(grid, cursorX, cursorY) : null;
+      return flatten && !this.samePlan(flatten, avoid) ? flatten : null;
     }
     // Safe and nothing worth firing: bank blocks. Prefer a *chain enabler* —
     // one setup swap after which a worth-firing cascade is a single trigger
@@ -499,19 +801,25 @@ export class AiController {
           minRun: this.tuning.fireMinRun,
           shatterWeight: this.tuning.shatterWeight,
           lookahead: this.tuning.chainLookahead,
+          ...(this.decisionSeed === null ? {} : { tieSeed: this.decisionSeed }),
         });
       }
       const chain = this.chainCachePlan;
-      if (chain) return { x: chain.x, y: chain.y + 1 }; // plan rows are grid rows − 1
+      const plan = chain ? { x: chain.x, y: chain.y + 1 } : null;
+      if (plan && !this.samePlan(plan, avoid)) return plan; // plan rows are grid rows − 1
     }
-    // Last resort before idling: cluster-bank, else dig — measured, the
+    // No larger construction is available: take a productive plain clear
+    // before shuffling or raising the board. This includes the human tactic of
+    // sliding a support sideways so its cap falls next to a matching pair.
+    if (bestClear) return bestClear;
+    // Last swap fallback before advancing: cluster-bank, else dig — measured, the
     // strategic tier otherwise stands still for seconds at a time (the board
     // offers no positive-gain move until creep changes it; digging changes it
     // *now* and feeds the planners fresh shapes).
-    return (
-      this.findBuild(grid, cursorX, cursorY) ??
-      (this.tuning.flatten ? this.findFlatten(grid, cursorX, cursorY) : null)
-    );
+    const build = this.findBuild(grid, cursorX, cursorY);
+    if (build && !this.samePlan(build, avoid)) return build;
+    const flatten = this.tuning.flatten ? this.findFlatten(grid, cursorX, cursorY) : null;
+    return flatten && !this.samePlan(flatten, avoid) ? flatten : null;
   }
 
   /**
@@ -519,10 +827,9 @@ export class AiController {
    * completes a 3+ run. Prefers a swap that also *shatters garbage* (its match
    * lands next to a garbage slab) — the single most important thing a player
    * does under garbage pressure, since a shatter turns a whole slab back into
-   * matchable blocks and relieves the stack. Among equally-preferred swaps it
-   * picks the one closest to the cursor (fewest moves, so it lands before the
-   * creep shifts the board). Deterministic: ties broken by the bottom-up,
-   * left-to-right scan order.
+   * matchable blocks and relieves the stack. A seeded rank chooses among
+   * equally useful swaps; an unseeded controller preserves nearest-cursor,
+   * bottom-up/left-to-right behavior.
    */
   private findSwap(grid: Grid, cursorX: number, cursorY: number): SwapPlan | null {
     const maxRow = Math.min(grid.top_effective_row + 1, GC_PLAY_HEIGHT - 1);
@@ -530,22 +837,35 @@ export class AiController {
     let bestDist = Infinity;
     let shatter: SwapPlan | null = null;
     let shatterDist = Infinity;
+    let bestRank = 0;
+    let shatterRank = 0;
     for (let y = 1; y <= maxRow; y++) {
       for (let x = 0; x < GC_PLAY_WIDTH - 1; x++) {
         if (!this.swappableBlock(grid, x, y) || !this.swappableBlock(grid, x + 1, y)) continue;
         if (grid.flavorAt(x, y) === grid.flavorAt(x + 1, y)) continue; // no-op swap
         if (!this.swapMakesMatch(grid, x, y)) continue;
         const dist = Math.abs(x - cursorX) + Math.abs(y - cursorY);
+        const rank = this.tieRank(0x53574150, x, y);
         // A match on a cell touching garbage shatters that slab (the eliminated
         // block is adjacent to it). Either swapped cell anchors the match.
         if (this.garbageNeighbor(grid, x, y) || this.garbageNeighbor(grid, x + 1, y)) {
-          if (dist < shatterDist) {
+          if (
+            shatter === null ||
+            (this.decisionSeed !== null && rank > shatterRank) ||
+            ((this.decisionSeed === null || rank === shatterRank) && dist < shatterDist)
+          ) {
             shatterDist = dist;
+            shatterRank = rank;
             shatter = { x, y };
           }
         }
-        if (dist < bestDist) {
+        if (
+          best === null ||
+          (this.decisionSeed !== null && rank > bestRank) ||
+          ((this.decisionSeed === null || rank === bestRank) && dist < bestDist)
+        ) {
           bestDist = dist;
+          bestRank = rank;
           best = { x, y };
         }
       }

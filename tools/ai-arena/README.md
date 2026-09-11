@@ -5,13 +5,12 @@ other over a batch of seeds and report wins, survival, and garbage throughput.
 This is the fitness function for tuning the bot — every planner or tuning
 change should be measured here against a baseline, not eyeballed.
 
-Both sims share a seed (identical starting boards) with garbage ports
-cross-wired exactly as in netplay, so a `(tuningA, tuningB, seed)` triple is
-fully deterministic and any series is reproducible by naming the same seed
-range. Seats are _near_- but not exactly symmetric (seat A steps first each
-tick, and garbage enqueues draw the receiver's RNG), so for careful
-comparisons pass `--both` to replay every seed with the seats swapped and
-aggregate both orientations.
+Both sims share a gameplay seed (identical starting boards) with garbage ports
+cross-wired exactly as in netplay. Each controller also gets a distinct
+seat-derived judgment seed that breaks ties between equally good moves, so
+same-tier matches are intentionally asymmetric but remain fully reproducible.
+For careful comparisons pass `--both` to replay every seed with the tunings in
+both seats and aggregate out seat personality/order effects.
 
 ## Usage
 

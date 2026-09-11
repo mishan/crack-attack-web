@@ -510,6 +510,33 @@ A generator header that a real, non-AI tool always writes (e.g. a lockfile's own
       sampled "worth-firing swap existed" opportunity rate — plus a
       `--timeline` of every fire. The planner exports now ship from the core
       barrel (`aiPlanner.js` in `index.ts`) for exactly this kind of tooling.
+- [x] **Seeded variety + gravity-aware construction landed**. AI controllers
+      now take a deterministic judgment seed, derived from the match seed and
+      seat (`aiDecisionSeed`): gameplay boards still share one fair seed, while
+      equal-value choices stop mirroring. Peers/spectators regenerate the same
+      bot exactly; Hard-vs-Hard is reproducible but asymmetric. When no useful
+      move exists, every tier pulses manual advance and releases the Creep latch
+      until the new row lands instead of waiting. Hard's safe-state planner adds
+      `planBigComboSetup`, a monotone lateral construction of the human crossed-
+      column x8/x10 pattern; it defers incidental smaller fires so the pattern
+      can finish. Defensive `planUndermine` now handles a slab perched on one
+      block even when its adjacent drop pocket must first be cleared one row
+      lower. During predictable block pop/hang/fall physics, the live controller
+      omits blocks that will pop, snapshots falling blocks at their current cells,
+      and scores only swaps that are currently legal against the gravity-settled
+      future. It preserves status quo when a combo-linked fall already guarantees
+      a match, so it does not cancel an incoming chain; awaking and moving-garbage
+      states still wait because their future contents are not safely inferable.
+      Constructive moves also remember their pre-swap board and reject an exact
+      immediate undo, preventing competing x8/x10 targets from toggling one pair
+      forever. Once settled, the controller takes a productive gravity/plain
+      clear before generic shuffling or advance. After these follow-ups, seeded
+      Hard-vs-Hard split 6-4 with no timeouts over 10 seeds, and Hard retained its
+      ladder edge over Medium (48-12 over 60 orientations) while both tiers
+      attacked more often. In the earlier isolated construction sweep, enabling
+      the big-combo planner beat disabling it 32-23 with 5 timeouts over 60
+      orientations; in 20 isolated Hard runs, it completed eight x8+ combos,
+      including two x10s.
 - [x] **AI-vs-AI demo mode landed** (`client/aiDemo.ts`): the arena, but
       watchable — two visible bot boards play back-to-back matches with a
       running tally, for amusement and as a showcase. The match is the DOM-free

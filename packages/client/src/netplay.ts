@@ -13,7 +13,7 @@
  * Everything deterministic lives in the session; this file is DOM/WebGL glue.
  */
 
-import { AiController, GameSim, GC_STEPS_PER_SECOND } from '@crack-attack/core';
+import { AiController, GameSim, GC_STEPS_PER_SECOND, aiDecisionSeed } from '@crack-attack/core';
 import {
   DEFAULT_RECONNECT_GRACE_MS,
   PROTOCOL_VERSION,
@@ -55,8 +55,13 @@ import { pickAiDifficulty } from './render/aiDifficultyPicker.js';
 import type { AudioManager } from './audio/audioManager.js';
 
 /** Build the local bot seat from a match's {@link AiOpponentInfo} descriptor. */
-function makeAiSeat(info: AiOpponentInfo | undefined): AiSeat | undefined {
-  return info ? { controller: new AiController(info.difficulty), index: info.index } : undefined;
+function makeAiSeat(info: AiOpponentInfo | undefined, matchSeed: number): AiSeat | undefined {
+  return info
+    ? {
+        controller: new AiController(info.difficulty, aiDecisionSeed(matchSeed, info.index)),
+        index: info.index,
+      }
+    : undefined;
 }
 
 const MS_PER_TICK = 1000 / GC_STEPS_PER_SECOND;
@@ -677,7 +682,7 @@ export function bootNetplay(
         msg.playerIndex,
         msg.inputDelay,
         undefined,
-        makeAiSeat(msg.aiOpponent),
+        makeAiSeat(msg.aiOpponent, msg.seed),
       ),
       msg.players,
       false,
@@ -688,7 +693,7 @@ export function bootNetplay(
   function startSpectating(msg: SpectateStartMessage): void {
     // The bot's stream is absent from the ledgers; the watcher computes it with
     // the same controller, so it sees the identical AI moves the players do.
-    spectator = new SpectatorSession(msg.seed, msg.frames, makeAiSeat(msg.aiOpponent));
+    spectator = new SpectatorSession(msg.seed, msg.frames, makeAiSeat(msg.aiOpponent, msg.seed));
     session = null;
     names = msg.players;
     phase = 'spectating';
