@@ -58,7 +58,8 @@ top-level code running when merely imported would silently break in production b
 ## Toolchain
 
 pnpm workspaces, TypeScript (strict, project references), Vitest, ESLint (flat
-config) + Prettier. Node `^20.19.0 || >=22.12.0` (the client's Vite 8 requirement).
+config) + Prettier. Node `>=22.13.0` (the relay's built-in `node:sqlite`; the
+client alone would run on Vite 8's `^20.19.0 || >=22.12.0`).
 
 ```sh
 pnpm install
@@ -328,7 +329,9 @@ A generator header that a real, non-AI tool always writes (e.g. a lockfile's own
       client burns down the backlog in 500-tick chunks. Game outcomes are
       client-reported (`result`) and cross-checked; agreement records W-L through
       the abstract async `LobbyStore` (`store.ts` memory impl + `sqliteStore.ts`
-      better-sqlite3; Redis-swappable — the relay only sees the interface), as do
+      on Node's built-in `node:sqlite` — no native add-on, so the server's
+      `bundle` script packages the relay as one standalone `dist/relay.mjs`;
+      Redis-swappable — the relay only sees the interface), as do
       concessions and expired grace. `main.ts` wires SQLite via the `DB` env var
       (default `./crack-attack.db`). e2e: mid-match drop → rejoin by token →
       resume → identical deterministic outcome, zero desyncs. Deferred: best-of-3

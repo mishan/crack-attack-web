@@ -1,5 +1,6 @@
 /**
- * main.ts — CLI entry: `node dist/main.js` (or `pnpm --filter @crack-attack/server start`).
+ * main.ts — CLI entry: `node dist/main.js` (or `pnpm --filter @crack-attack/server start`),
+ * and the entry point of the standalone bundle (`node dist/relay.mjs`, see scripts/bundle.mjs).
  * PORT/HOST come from the environment; defaults to 8080 on all interfaces.
  * DB selects the SQLite file for identities/records (default
  * ./crack-attack.db; set DB=:memory: for an ephemeral server).
