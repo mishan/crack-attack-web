@@ -217,7 +217,11 @@ function boot(): void {
   const bootAttract = (toSolo: () => void): void => {
     const attract = new AttractOverlay(prefersTouchControls());
     const onKeyDown = (e: KeyboardEvent): void => {
-      if (isTypingTarget(e.target) || !startsPlay(e)) return;
+      // Space/Enter on a focused button (e.g. mute) activate it rather than start.
+      const onControl = e.target instanceof Element && e.target.closest('button, a[href]') !== null;
+      const { code, repeat, ctrlKey, metaKey, altKey } = e;
+      if (isTypingTarget(e.target)) return;
+      if (!startsPlay({ code, repeat, ctrlKey, metaKey, altKey, onControl })) return;
       e.preventDefault();
       toSolo();
     };

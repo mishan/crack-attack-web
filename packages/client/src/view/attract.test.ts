@@ -29,6 +29,14 @@ describe('startsPlay', () => {
     }
   });
 
+  it('leaves Space and Enter to a focused control, but other keys still start', () => {
+    expect(startsPlay(key('Space', { onControl: true }))).toBe(false);
+    expect(startsPlay(key('Enter', { onControl: true }))).toBe(false);
+    expect(startsPlay(key('NumpadEnter', { onControl: true }))).toBe(false);
+    expect(startsPlay(key('KeyZ', { onControl: true }))).toBe(true);
+    expect(startsPlay(key('Space', { onControl: false }))).toBe(true);
+  });
+
   it('ignores browser shortcuts and auto-repeat', () => {
     expect(startsPlay(key('KeyR', { ctrlKey: true }))).toBe(false);
     expect(startsPlay(key('KeyL', { metaKey: true }))).toBe(false);

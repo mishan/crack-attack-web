@@ -46,18 +46,28 @@ export class AttractOverlay {
       'pointer-events:none;filter:drop-shadow(0 1px 3px #000)';
     this.banner.append(this.makePrompt(prompt, 22));
     document.body.appendChild(this.banner);
+    this.setTitleShown(true);
   }
 
   /** Fade the title card in over the demo. */
   showTitle(): void {
-    this.title.style.opacity = '1';
-    this.title.style.pointerEvents = 'auto';
+    this.setTitleShown(true);
   }
 
   /** Fade the title card out, revealing the demo (the bottom prompt stays). */
   hideTitle(): void {
-    this.title.style.opacity = '0';
-    this.title.style.pointerEvents = 'none';
+    this.setTitleShown(false);
+  }
+
+  /**
+   * Opacity alone doesn't hide an element from assistive tech, so keep
+   * `aria-hidden` in step: the faded-out title, or the banner it covers.
+   */
+  private setTitleShown(shown: boolean): void {
+    this.title.style.opacity = shown ? '1' : '0';
+    this.title.style.pointerEvents = shown ? 'auto' : 'none';
+    this.title.setAttribute('aria-hidden', String(!shown));
+    this.banner.setAttribute('aria-hidden', String(shown));
   }
 
   /** Whether `node` is part of the overlay (a click on it starts play). */

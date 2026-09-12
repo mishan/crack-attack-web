@@ -29,7 +29,12 @@ export interface StartKey {
   readonly ctrlKey: boolean;
   readonly metaKey: boolean;
   readonly altKey: boolean;
+  /** Whether focus is on an on-screen control (a button or link), e.g. the mute button. */
+  readonly onControl?: boolean;
 }
+
+/** Keys that activate a focused button or link. */
+const ACTIVATION_KEYS = new Set(['Space', 'Enter', 'NumpadEnter']);
 
 /**
  * Keys that never start play: mute (M keeps its global meaning), focus
@@ -58,11 +63,13 @@ const PASSIVE_KEYS = new Set([
 /**
  * Whether a key press should leave attract mode and start play. "Any key",
  * minus the ones a visitor presses without meaning to play: auto-repeat, the
- * {@link PASSIVE_KEYS}, function keys (refresh, fullscreen, devtools), and
- * browser/OS shortcuts (anything chorded with Ctrl, Meta, or Alt).
+ * {@link PASSIVE_KEYS}, function keys (refresh, fullscreen, devtools),
+ * browser/OS shortcuts (anything chorded with Ctrl, Meta, or Alt), and Space /
+ * Enter while an on-screen control has focus (they activate it instead).
  */
 export function startsPlay(e: StartKey): boolean {
   if (e.repeat || e.ctrlKey || e.metaKey || e.altKey) return false;
   if (/^F\d+$/.test(e.code)) return false;
+  if (e.onControl && ACTIVATION_KEYS.has(e.code)) return false;
   return !PASSIVE_KEYS.has(e.code);
 }
