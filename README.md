@@ -6,6 +6,10 @@ real-time block-matching game in the browser with Three.js rendering and
 server-relayed lockstep multiplayer plus a lobby, plus solo play and an AI
 opponent.
 
+**Play it: [c-a.foggyden.org](https://c-a.foggyden.org/)** — solo, against the
+AI, or in the multiplayer lobby. Or just watch: the AI-vs-AI demo mode plays
+itself.
+
 The project is a pnpm monorepo:
 
 | Package             | What it is                                                          |
