@@ -10,9 +10,16 @@
  * two-board layout. A few seconds after a match ends the next one kicks off on
  * a fresh seed, keeping a running tally. The viewer can pause, skip ahead, and
  * run the game at 1×/2×/4× speed.
+ *
+ * It also runs as the attract mode (the default landing screen; see
+ * `view/attract.ts`): given an {@link AttractOverlay}, the demo is silent and
+ * watch-only, holds on the title card before each match, and brings the title
+ * back after each result, resetting the boards behind it.
  */
 
 import { GC_STEPS_PER_SECOND, generateSeed, type AiDifficultyLevel } from '@crack-attack/core';
+import type { AttractOverlay } from './render/attractOverlay.js';
+import { TITLE_FADE_TICKS, TITLE_HOLD_TICKS, TITLE_RETURN_TICKS } from './view/attract.js';
 import { BoardView } from './render/boardView.js';
 import { GarbageDecalView } from './render/garbageDecalView.js';
 import { LevelLightsView } from './render/levelLightsView.js';
@@ -56,7 +63,11 @@ interface Board {
   celebration: Celebration;
 }
 
-/** Start the demo: `left` and `right` bots play back-to-back matches until disposed. */
+/**
+ * Start the demo: `left` and `right` bots play back-to-back matches until
+ * disposed. Pass `attract` (owned by the caller, and showing its title card)
+ * to run it as the attract mode.
+ */
 export function bootAiDemo(
   app: HTMLElement,
   hudEl: HTMLElement | null,
@@ -64,6 +75,7 @@ export function bootAiDemo(
   right: AiDifficultyLevel,
   audio: AudioManager,
   onExit: () => void,
+  attract: AttractOverlay | null = null,
 ): AiDemoHandle {
   const clock = new FixedTimestep();
   let match = new AiVsAiMatch(generateSeed(), left, right);
@@ -87,9 +99,15 @@ export function bootAiDemo(
   let gameMusicOn = false;
   let disposed = false;
   let rafId = 0;
+  /** Attract mode: wall ticks left on the title card before the countdown starts. */
+  let kickoffWait = attract ? TITLE_HOLD_TICKS : 0;
 
-  audio.resetCountdown();
-  audio.fadeoutMusic(3000);
+  // Attract mode is silent, like an arcade cabinet's: the menu music (if on)
+  // plays on, and no countdown beeps, cues, or stingers sound.
+  if (!attract) {
+    audio.resetCountdown();
+    audio.fadeoutMusic(3000);
+  }
 
   function makeBoard(sim: GameSim, label: string, side: 0 | 1): Board {
     const container = document.createElement('div');
@@ -154,8 +172,11 @@ export function bootAiDemo(
     endWait = 0;
     celebAccum = 0;
     gameMusicOn = false;
-    audio.resetCountdown();
-    audio.fadeoutMusic(3000);
+    kickoffWait = attract ? TITLE_HOLD_TICKS : 0;
+    if (!attract) {
+      audio.resetCountdown();
+      audio.fadeoutMusic(3000);
+    }
   };
 
   const togglePause = (): void => {
@@ -186,17 +207,22 @@ export function bootAiDemo(
     buttons.push(btn);
     return btn;
   };
-  addButton('Leave demo', onExit);
-  addButton('Next match', nextMatch);
-  const speedBtn = addButton('', () => cycleSpeed());
+  let speedBtn: HTMLButtonElement | null = null;
   const syncSpeedBtn = (): void => {
-    speedBtn.textContent = `Speed ${SPEEDS[speedIdx]}×`;
+    if (speedBtn) speedBtn.textContent = `Speed ${SPEEDS[speedIdx]}×`;
   };
   const cycleSpeed = (): void => {
     speedIdx = (speedIdx + 1) % SPEEDS.length;
     syncSpeedBtn();
   };
-  syncSpeedBtn();
+  // Attract mode is watch-only (any key starts play, handled by main.ts), so it
+  // gets no controls and no tally.
+  if (!attract) {
+    addButton('Leave demo', onExit);
+    addButton('Next match', nextMatch);
+    speedBtn = addButton('', cycleSpeed);
+    syncSpeedBtn();
+  }
 
   // Running tally + match clock, centred between the boards.
   const scoreboard = document.createElement('div');
@@ -204,7 +230,7 @@ export function bootAiDemo(
     'position:fixed;top:36px;left:50%;transform:translateX(-50%);z-index:6;pointer-events:none;' +
     'text-align:center;white-space:pre;font:600 14px system-ui,sans-serif;color:#e7ebf3;' +
     'font-variant-numeric:tabular-nums;text-shadow:0 1px 3px #000';
-  document.body.appendChild(scoreboard);
+  if (!attract) document.body.appendChild(scoreboard);
   let scoreText = '';
   const renderScoreboard = (): void => {
     const secs = Math.floor(match.ticks / GC_STEPS_PER_SECOND);
@@ -226,12 +252,15 @@ export function bootAiDemo(
     else if (e.code === 'KeyF') cycleSpeed();
     else if (e.code === 'KeyP') togglePause();
   };
-  globalThis.addEventListener('keydown', onKeyDown);
+  if (!attract) globalThis.addEventListener('keydown', onKeyDown);
 
   /** The big per-board message: countdown / paused while live, the result after. */
   const messageFor = (side: number): MessageKind | null => {
     const outcome = match.outcome;
-    if (outcome === null) return paused ? 'message_paused' : countdownMessage(metaTicks);
+    if (outcome === null) {
+      if (kickoffWait > 0) return null; // "3" waits for the title to lift
+      return paused ? 'message_paused' : countdownMessage(metaTicks);
+    }
     if (outcome === side) return 'message_winner';
     return outcome === 0 || outcome === 1 ? 'message_loser' : 'message_game_over';
   };
@@ -243,7 +272,11 @@ export function bootAiDemo(
     const due = clock.sample(nowMs);
     let stepped = 0;
     let gateTicks = 0;
-    if (!paused && match.outcome === null) {
+    if (kickoffWait > 0) {
+      // Attract mode: hold on the title card, then lift it and count down.
+      kickoffWait -= due;
+      if (kickoffWait <= 0) attract?.hideTitle();
+    } else if (!paused && match.outcome === null) {
       // The countdown gate runs on wall time (so 3-2-1 and its beeps aren't
       // sped up); the rest of the due ticks play at the chosen speed.
       gateTicks = Math.min(due, Math.max(0, COUNTDOWN_GATE_TICKS - metaTicks));
@@ -261,13 +294,16 @@ export function bootAiDemo(
       }
     }
 
-    audio.updateCountdown(metaTicks);
-    if (!gameMusicOn && metaTicks >= COUNTDOWN_GATE_TICKS) {
+    if (!attract) audio.updateCountdown(metaTicks);
+    if (!attract && !gameMusicOn && metaTicks >= COUNTDOWN_GATE_TICKS) {
       gameMusicOn = true;
       audio.playGame();
     }
-    // Both boards are the show, so both are heard.
-    for (const sim of match.sims) audio.playCues(sim.drainSoundEvents());
+    // Both boards are the show, so both are heard (attract mode only drains them).
+    for (const sim of match.sims) {
+      const cues = sim.drainSoundEvents();
+      if (!attract) audio.playCues(cues);
+    }
 
     const outcome = match.outcome;
     if (outcome !== null && !tallied) {
@@ -275,8 +311,10 @@ export function bootAiDemo(
       if (outcome === 0 || outcome === 1) wins[outcome]++;
       else draws++;
       boards.forEach((b, i) => b.celebration.start(outcome === i ? 'win' : 'loss'));
-      if (outcome === 0 || outcome === 1) audio.playYouWin();
-      else audio.playGameOver();
+      if (!attract) {
+        if (outcome === 0 || outcome === 1) audio.playYouWin();
+        else audio.playGameOver();
+      }
     }
 
     const dtTicks = Math.min(MAX_SIGN_DT_TICKS, (nowMs - lastMs) / MS_PER_TICK);
@@ -326,7 +364,11 @@ export function bootAiDemo(
     });
     renderScoreboard();
 
-    if (endWait >= NEXT_MATCH_DELAY_TICKS) nextMatch();
+    // Attract mode brings the title back once the celebration has played, and
+    // resets for the next match behind it once it's fully faded in.
+    if (attract && endWait >= TITLE_RETURN_TICKS) attract.showTitle();
+    const nextAt = attract ? TITLE_RETURN_TICKS + TITLE_FADE_TICKS : NEXT_MATCH_DELAY_TICKS;
+    if (endWait >= nextAt) nextMatch();
     rafId = globalThis.requestAnimationFrame(frame);
   };
   rafId = globalThis.requestAnimationFrame(frame);

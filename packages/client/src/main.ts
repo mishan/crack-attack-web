@@ -7,11 +7,14 @@
  * turns each tick's sim state into sprites, {@link ViewInterpolator} smooths the
  * motion between ticks by the render `alpha`, and {@link BoardView} draws it.
  *
- * Solo and netplay are switchable in-client (each mode returns a disposable
- * handle); no URL parameters are required. `?net` still force-boots netplay
- * and `?relay=` still overrides the relay URL, for muscle memory and dev
- * convenience. `?demo` boots straight into the AI-vs-AI demo (`?demo=easy,hard`
- * picks the bots) — handy for a showcase link or kiosk.
+ * The page opens in attract mode, like an arcade cabinet: the title card, then
+ * hard-vs-hard AI matches behind a PRESS ANY KEY prompt; a key press or click
+ * starts play on the solo screen. Solo and netplay are switchable in-client
+ * (each mode returns a disposable handle); no URL parameters are required.
+ * `?solo` skips attract mode, `?net` force-boots netplay, and `?relay=`
+ * overrides the relay URL, for muscle memory and dev convenience. `?demo` boots
+ * straight into the interactive AI-vs-AI demo (`?demo=easy,hard` picks the
+ * bots) — handy for a showcase link or kiosk.
  *
  * The sim is authoritative and deterministic; everything here is replaceable
  * platform glue (and stays out of `packages/core`, which must not touch the DOM).
@@ -25,6 +28,8 @@ import {
 } from '@crack-attack/core';
 import { pickAiDifficulty } from './render/aiDifficultyPicker.js';
 import { pickAiMatchup } from './render/aiMatchupPicker.js';
+import { AttractOverlay } from './render/attractOverlay.js';
+import { startsPlay } from './view/attract.js';
 import {
   NO_WEBGL_MESSAGE,
   START_FAILED_MESSAGE,
@@ -33,7 +38,7 @@ import {
 } from './render/fatalMessage.js';
 import { parseDemoMatchup } from './view/demoMatchup.js';
 import { KeyboardInput } from './input/keyboard.js';
-import { mountTouchControls } from './input/touchControls.js';
+import { mountTouchControls, prefersTouchControls } from './input/touchControls.js';
 import { BoardView, DEFAULT_RENDER_TUNING } from './render/boardView.js';
 import { GarbageDecalView } from './render/garbageDecalView.js';
 import { HudView } from './render/hudView.js';
@@ -69,6 +74,7 @@ const AI_HELP = '←→↑↓ move · Z / Space swap · X raise · R restart · 
 const NET_HELP =
   '←→↑↓ move · Z / Space swap · X raise · R ready/rematch · Esc concede/stop watching · M mute';
 const DEMO_HELP = 'AI vs AI demo · N next match · F speed · P pause · M mute · Esc leave';
+const ATTRACT_HELP = 'AI vs AI demo · press any key or click to play · M mute';
 
 /** A running mode (solo board or netplay shell); dispose to switch away. */
 interface ModeHandle {
@@ -205,8 +211,52 @@ function boot(): void {
     );
   };
 
-  const HELP = { solo: SOLO_HELP, net: NET_HELP, ai: AI_HELP, demo: DEMO_HELP };
-  const enter = (mode: 'solo' | 'net' | 'ai' | 'demo'): void => {
+  // Attract mode: the title card (from the entry bundle, so it shows at once),
+  // then the AI-vs-AI demo behind it once its chunk lands. A key press or a
+  // click on the boards or title starts play; the audio controls stay usable.
+  const bootAttract = (toSolo: () => void): void => {
+    const attract = new AttractOverlay(prefersTouchControls());
+    const onKeyDown = (e: KeyboardEvent): void => {
+      // Space/Enter on a focused button (e.g. mute) activate it rather than start.
+      const onControl = e.target instanceof Element && e.target.closest('button, a[href]') !== null;
+      const { code, repeat, ctrlKey, metaKey, altKey } = e;
+      if (isTypingTarget(e.target)) return;
+      if (!startsPlay({ code, repeat, ctrlKey, metaKey, altKey, onControl })) return;
+      e.preventDefault();
+      toSolo();
+    };
+    const onClick = (e: MouseEvent): void => {
+      const t = e.target;
+      if (t instanceof Node && (app.contains(t) || attract.contains(t))) toSolo();
+    };
+    globalThis.addEventListener('keydown', onKeyDown);
+    globalThis.addEventListener('click', onClick);
+    const teardown = (): void => {
+      globalThis.removeEventListener('keydown', onKeyDown);
+      globalThis.removeEventListener('click', onClick);
+      attract.dispose();
+    };
+    current = { dispose: teardown }; // until the demo lands
+    const { left, right } = demoMatchup;
+    bootLazy(loadAiDemo, (m) => {
+      const demo = m.bootAiDemo(app, hudEl, left, right, audio, toSolo, attract);
+      return {
+        dispose(): void {
+          demo.dispose();
+          teardown();
+        },
+      };
+    });
+  };
+
+  const HELP = {
+    attract: ATTRACT_HELP,
+    solo: SOLO_HELP,
+    net: NET_HELP,
+    ai: AI_HELP,
+    demo: DEMO_HELP,
+  };
+  const enter = (mode: 'attract' | 'solo' | 'net' | 'ai' | 'demo'): void => {
     current?.dispose();
     current = null;
     modeGen++;
@@ -214,7 +264,9 @@ function boot(): void {
     if (help) help.textContent = HELP[mode];
     const toSolo = (): void => enter('solo');
     try {
-      if (mode === 'net') {
+      if (mode === 'attract') {
+        bootAttract(toSolo);
+      } else if (mode === 'net') {
         bootLazy(loadNetplay, (m) => m.bootNetplay(app, hudEl, relayUrl, toSolo, audio));
       } else if (mode === 'ai') {
         bootLazy(loadAiMatch, (m) => m.bootAiMatch(app, hudEl, aiDifficulty, audio, toSolo));
@@ -229,7 +281,15 @@ function boot(): void {
     }
   };
 
-  enter(params.has('demo') ? 'demo' : params.has('net') ? 'net' : 'solo');
+  enter(
+    params.has('demo')
+      ? 'demo'
+      : params.has('net')
+        ? 'net'
+        : params.has('solo')
+          ? 'solo'
+          : 'attract',
+  );
   // Booted: drop the placeholder (a failed start has already replaced it).
   document.getElementById('loading')?.remove();
 }

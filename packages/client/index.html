@@ -49,16 +49,29 @@
         position: fixed;
         inset: 0;
         display: flex;
+        flex-direction: column;
         align-items: center;
         justify-content: center;
+        gap: 4vmin;
         font-size: 15px;
+        line-height: 28px;
         letter-spacing: 1px;
+      }
+      /* Laid out like attract mode's title card, which replaces it on boot. */
+      #loading img {
+        width: min(70vmin, 320px);
+        height: auto;
+      }
+      #loading span {
         opacity: 0.7;
       }
     </style>
   </head>
   <body>
-    <div id="loading">Loading Crack Attack!…</div>
+    <div id="loading">
+      <img src="/textures/logo.png" alt="Crack Attack!" width="256" height="256" />
+      <span>Loading…</span>
+    </div>
     <div id="app"></div>
     <div id="hud"></div>
     <div id="help">
