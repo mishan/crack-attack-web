@@ -552,6 +552,18 @@ A generator header that a real, non-AI tool always writes (e.g. a lockfile's own
       speed (the countdown stays on wall time), P pause, Esc leave. Entered via
       "Watch AI vs AI" on the solo screen (a left/right tier picker,
       `render/aiMatchupPicker.ts`) or directly with `?demo[=left,right]`.
+- [x] **Attract mode landed** (the default landing screen): like an arcade
+      cabinet, the page opens on a title card (the reference `logo.png`,
+      also shown by the static `#loading` placeholder so first paint matches),
+      then the demo plays hard-vs-hard matches — silent and watch-only — behind a
+      blinking PRESS ANY KEY / TAP TO PLAY prompt. The title returns after each
+      result (post-celebration) and the next match resets behind it. Any key
+      or a click on the boards starts solo play; the start rule
+      (`view/attract.ts` `startsPlay`, unit-tested) ignores M (mute), Tab,
+      function keys, lone modifiers, chorded shortcuts, and auto-repeat, and
+      the audio controls stay clickable. `render/attractOverlay.ts` is the DOM
+      layer; `bootAiDemo` takes it as an optional `attract` argument. `?solo`
+      skips attract mode.
 - [ ] Phase 6 stretch (X-mode, replays, WebRTC, binary codec if
       measurements demand it)
 

@@ -109,7 +109,8 @@ For a fast first load, configure the server to:
   picked up immediately. The other files (`textures/`, `music/`, `sounds/`,
   `models/`) aren't hashed, so give them a modest max-age.
 
-Only the solo board loads up front; vs-AI, the AI-vs-AI demo, and netplay are
+Only the solo board and the attract-mode title load up front; vs-AI, the
+AI-vs-AI demo (which attract mode fetches straight away), and netplay are
 fetched when first opened. If a tab left open across a redeploy can't find its
 old chunk, it falls back to the solo screen — keeping the previous deploy's
 `assets/` files around for a while avoids even that.
@@ -125,11 +126,17 @@ gzip_types application/javascript model/gltf+json;
 
 ### Client URL parameters
 
+With no parameters the game opens in attract mode, like an arcade cabinet: the
+title card, then hard-vs-hard AI matches that play until you press a key or
+click, which starts a solo game.
+
 Append these to the client URL (e.g. `http://localhost:5173/?net`):
 
-- `?net` — boot straight into netplay instead of solo.
-- `?demo` — boot straight into the AI-vs-AI demo (hard vs hard);
-  `?demo=easy,hard` picks the left and right bots. Handy as a showcase link.
+- `?solo` — skip attract mode and boot straight into solo play.
+- `?net` — boot straight into netplay instead.
+- `?demo` — boot straight into the AI-vs-AI demo with its viewer controls
+  (hard vs hard); `?demo=easy,hard` picks the left and right bots. Handy as a
+  showcase link.
 - `?relay=<url>` — override the relay WebSocket URL for this session, e.g.
   `?relay=ws://localhost:8080` or `?relay=wss://example.com/ws`.
 - `?tune` — open the lighting/material render tuner (dev aid).
