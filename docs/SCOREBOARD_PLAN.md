@@ -142,7 +142,7 @@ unranked run can never become ranked.
 
 Each phase is one PR.
 
-### Phase 1 — core: shared score math and solo replays (no server)
+### Phase 1 — core: shared score math and solo replays (no server) — DONE
 
 - Move `ScoreState`/`scorePoints` from `client/src/view/score.ts` to
   `core/src/scoreState.ts`. The code is already pure. Keep core free of
@@ -153,10 +153,12 @@ Each phase is one PR.
     holds `[tickDelta, command]` pairs recording each input _change_. That
     keeps a long game to a few KB.
   - **`SoloRecorder`.**
-  - **`verifySoloReplay(replay, maxTicks)`.** Validates the replay the same
-    way `replay-check`'s `indexActions` does, then steps `GameSim` until the
-    loss, draining score events each tick. Returns
-    `{lost, ticks, score, topMultiplier, digest}`.
+  - **`verifySoloReplay(value, maxTicks)`.** Validates the replay
+    (`parseSoloReplay`: shape, the tick cap, a canonical input encoding), then
+    steps `GameSim` to the end, draining score events each tick
+    (`runSoloReplay`). Returns `{ticks, score, topMultiplier, digest}`, or
+    throws `SoloReplayError` if the replay is malformed or the game isn't lost
+    exactly on its last tick.
 - The client records every solo run. The game-over score it shows comes from
   the same core function the server will run. Add a "Save replay" button in
   solo.

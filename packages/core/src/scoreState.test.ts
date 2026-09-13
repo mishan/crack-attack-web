@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import type { ScoreEvent } from '@crack-attack/core';
-import { ScoreState, scorePoints, SPECIAL_BLOCK_SCORES } from './score.js';
+import type { ScoreEvent } from './score.js';
+import { ScoreState, scorePoints, SPECIAL_BLOCK_SCORES } from './scoreState.js';
 
 const ev = (over: Partial<ScoreEvent> = {}): ScoreEvent => ({
   id: 0,

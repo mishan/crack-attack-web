@@ -6,8 +6,8 @@
  * computed from combo state that only the core sees, and only at the exact
  * moment `ComboManager::timeStep` reports an elimination (ComboManager.cxx:73).
  * So the core emits a cosmetic {@link ScoreEvent} snapshot of the reporting
- * combo at that point, and the client's Score port (`view/score.ts`) turns the
- * snapshots into points, the backlog drip, and the record tables.
+ * combo at that point, and the Score port (`scoreState.ts`, outside the sim)
+ * turns the snapshots into points and the backlog drip.
  *
  * Like signs/sparkles/sound, emitting a snapshot draws **no** gameplay RNG and
  * never enters the digest, so it can't perturb determinism. The snapshot is

@@ -597,6 +597,19 @@ A generator header that a real, non-AI tool always writes (e.g. a lockfile's own
       `settleBelowChrome` (`render/chrome.ts`) drops the HUD below any chrome
       it would sit under (the audio controls on a phone) before the boards are
       framed.
+- [~] **Solo scoreboard** (plan: `docs/SCOREBOARD_PLAN.md`) — phase 1
+  landed: the solo score math (`ScoreState`, `scorePoints`) moved from the
+  client into `core/scoreState.ts`, so the solo screen and a scoreboard server
+  replaying a run compute the same score. `core/soloReplay.ts`:
+  `SoloRecorder` records a run as `{version, seed, ticks, inputs}`, with
+  inputs stored as canonical `[tickDelta, command]` changes (~6 KB for a
+  4,800-tick game); `parseSoloReplay` validates untrusted JSON and
+  `runSoloReplay` re-simulates it, scores it exactly as the solo screen does,
+  and rejects a game not lost exactly on its last tick
+  (`verifySoloReplay` = both). The solo screen records every run and offers
+  "Save replay" after a loss. Tests pin an AI-played golden fixture
+  (`core/src/fixtures/solo-hard-2026.replay.json`). Next: the relay's HTTP API
+  (run tickets, verified submissions, all-time/monthly boards).
 - [ ] Phase 6 stretch (X-mode, replays, WebRTC, binary codec if
       measurements demand it)
 
