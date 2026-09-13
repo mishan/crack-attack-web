@@ -95,6 +95,19 @@ describe('runSoloReplay', () => {
     });
   });
 
+  // playAiGame(459, 4000): a longer run with a gray-garbage elimination and an
+  // x6 chain. Special blocks only come from X-mode creep, which isn't ported.
+  it('matches the longer golden fixture', () => {
+    const path = fileURLToPath(new URL('./fixtures/solo-hard-459.replay.json', import.meta.url));
+    const fixture: unknown = JSON.parse(readFileSync(path, 'utf8'));
+    expect(verifySoloReplay(fixture)).toEqual({
+      ticks: 4445,
+      score: 206,
+      topMultiplier: 6,
+      digest: 3526844717,
+    });
+  });
+
   it('rejects a game that is still in play at the last tick', () => {
     const { replay } = playAiGame(777, 1500);
     // Drop the last tick (and an input change on it, if there is one).
@@ -137,6 +150,8 @@ describe('parseSoloReplay', () => {
     ['a zero tick delta', json(base, { inputs: [[0, CC_LEFT]] })],
     ['a change past the last tick', json(base, { inputs: [[11, CC_LEFT]] })],
     ['a stray command bit', json(base, { inputs: [[1, 1 << 6]] })],
+    // Bitwise operators truncate to int32: 2**32 & ~63 is 0.
+    ['a command past 32 bits', json(base, { inputs: [[1, 2 ** 32]] })],
     ['a change that repeats the held command', json(base, { inputs: [[1, 0]] })],
   ])('rejects %s', (_label, value) => {
     expect(() => parseSoloReplay(value)).toThrow(SoloReplayError);

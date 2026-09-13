@@ -151,7 +151,14 @@ export function parseSoloReplay(value: unknown, maxTicks = SOLO_REPLAY_MAX_TICKS
     if (tick > ticks) {
       throw new SoloReplayError(`input at tick ${tick} is past the last tick ${ticks}`);
     }
-    if (!isInt(command) || command < 0 || (command & ~ALL_COMMAND_BITS) !== 0) {
+    // Range before mask: bitwise operators truncate to int32, so 2**32 would
+    // pass the mask test alone.
+    if (
+      !isInt(command) ||
+      command < 0 ||
+      command > ALL_COMMAND_BITS ||
+      (command & ~ALL_COMMAND_BITS) !== 0
+    ) {
       throw new SoloReplayError(`input at tick ${tick} is not a valid CC_* mask`);
     }
     if (command === held) {

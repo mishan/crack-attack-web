@@ -607,8 +607,11 @@ A generator header that a real, non-AI tool always writes (e.g. a lockfile's own
   `runSoloReplay` re-simulates it, scores it exactly as the solo screen does,
   and rejects a game not lost exactly on its last tick
   (`verifySoloReplay` = both). The solo screen records every run and offers
-  "Save replay" after a loss. Tests pin an AI-played golden fixture
-  (`core/src/fixtures/solo-hard-2026.replay.json`). Next: the relay's HTTP API
+  "Save replay" after a loss. Tests pin two AI-played golden fixtures in
+  `core/src/fixtures/`: `solo-hard-2026.replay.json` (short) and
+  `solo-hard-459.replay.json` (longer, with a gray-garbage elimination and an
+  x6 chain). Special-block scoring can't be pinned yet: special blocks only
+  come from X-mode creep, which isn't ported. Next: the relay's HTTP API
   (run tickets, verified submissions, all-time/monthly boards).
 - [ ] Phase 6 stretch (X-mode, replays, WebRTC, binary codec if
       measurements demand it)

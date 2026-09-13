@@ -163,7 +163,8 @@ Each phase is one PR.
   the same core function the server will run. Add a "Save replay" button in
   solo.
 - Tests:
-  - a golden fixture replay with a known score
+  - golden fixture replays with known scores: a short one, and a longer one
+    with a gray-garbage elimination and a chain of x4 or more
   - the recorder and verifier agree
   - replays that are truncated, run past the loss, or contain malformed input
     are rejected
