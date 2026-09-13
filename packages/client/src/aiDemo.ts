@@ -21,7 +21,7 @@ import { GC_STEPS_PER_SECOND, generateSeed, type AiDifficultyLevel } from '@crac
 import type { AttractOverlay } from './render/attractOverlay.js';
 import { TITLE_FADE_TICKS, TITLE_HOLD_TICKS, TITLE_RETURN_TICKS } from './view/attract.js';
 import { BoardView } from './render/boardView.js';
-import { fitBoards, markChrome, placeLabel } from './render/chrome.js';
+import { fitBoards, markChrome, onChromeResize, placeLabel } from './render/chrome.js';
 import { GarbageDecalView } from './render/garbageDecalView.js';
 import { LevelLightsView } from './render/levelLightsView.js';
 import { LoseBarView } from './render/loseBarView.js';
@@ -44,6 +44,8 @@ const MAX_SIGN_DT_TICKS = 10;
 const SPEEDS = [1, 2, 4] as const;
 /** Scoreboard line height, px (it's always two lines: tally, then match/clock). */
 const SCOREBOARD_LINE = 18;
+/** The scoreboard's home spot, px from the top (centred between the boards). */
+const SCOREBOARD_TOP = 36;
 /** Wall ticks from a match's end to the next kickoff: the celebration (225) plus a beat. */
 const NEXT_MATCH_DELAY_TICKS = 350;
 
@@ -226,19 +228,23 @@ export function bootAiDemo(
     'position:fixed;top:36px;left:50%;transform:translateX(-50%);z-index:6;pointer-events:none;' +
     `text-align:center;white-space:pre;font:600 14px/${SCOREBOARD_LINE}px system-ui,sans-serif;` +
     'color:#e7ebf3;font-variant-numeric:tabular-nums;text-shadow:0 1px 3px #000';
-  if (!attract) document.body.appendChild(scoreboard);
+  if (!attract) document.body.appendChild(markChrome(scoreboard));
 
-  // Board name tags ride just above the boards; the (two-line) scoreboard sits
-  // above them — pushed down from its usual spot when the boards are (a narrow
-  // portrait screen frames them small, mid-screen), so it clears the chrome.
+  // Board name tags ride just above the boards. The (two-line) scoreboard is
+  // chrome at its home spot, so the boards frame clear of it; then, if the
+  // boards sit lower (a narrow portrait screen frames them small, mid-screen),
+  // it moves down to sit just above their tags.
   const fitToWindow = (): void => {
+    scoreboard.style.top = `${SCOREBOARD_TOP}px`;
     fitBoards(boards);
     for (const b of boards) placeLabel(b.tag, b.view);
     const labelTop = boards[0].view.labelAnchor().y;
-    scoreboard.style.top = `${Math.max(36, labelTop - 2 * SCOREBOARD_LINE - 8)}px`;
+    const hugTags = labelTop - 2 * SCOREBOARD_LINE - 8;
+    scoreboard.style.top = `${Math.max(SCOREBOARD_TOP, hugTags)}px`;
   };
   fitToWindow();
   globalThis.addEventListener('resize', fitToWindow);
+  const stopWatchingChrome = onChromeResize(fitToWindow);
   let scoreText = '';
   const renderScoreboard = (): void => {
     const secs = Math.floor(match.ticks / GC_STEPS_PER_SECOND);
@@ -387,6 +393,7 @@ export function bootAiDemo(
       disposed = true;
       cancelAnimationFrame(rafId);
       globalThis.removeEventListener('resize', fitToWindow);
+      stopWatchingChrome();
       globalThis.removeEventListener('keydown', onKeyDown);
       for (const btn of buttons) btn.remove();
       scoreboard.remove();
