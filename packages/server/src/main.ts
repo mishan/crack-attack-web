@@ -2,10 +2,16 @@
  * main.ts — CLI entry: `node dist/main.js` (or `pnpm --filter @crack-attack/server start`),
  * and the entry point of the standalone bundle (`node dist/relay.mjs`, see scripts/bundle.mjs).
  * PORT/HOST come from the environment; defaults to 8080 on all interfaces.
- * DB selects the SQLite file for identities/records (default
- * ./crack-attack.db; set DB=:memory: for an ephemeral server).
+ * DB selects the SQLite file for identities, records and the solo scoreboard
+ * (default ./crack-attack.db; set DB=:memory: for an ephemeral server).
+ * TRUST_PROXY=1 reads client addresses from X-Forwarded-For (behind nginx);
+ * CORS_ORIGIN lets a client on another origin call the scoreboard API.
+ * `admin …` runs a scoreboard moderation command instead (see admin.ts).
  */
 
+import { ADMIN_USAGE, runAdmin } from './admin.js';
+import { createScoreboardApi } from './httpApi.js';
+import { SoloScoreboard } from './scoreboard.js';
 import { SqliteStore } from './sqliteStore.js';
 import { DEFAULT_PORT, startRelayWsServer } from './wsServer.js';
 
@@ -24,12 +30,40 @@ function parsePort(raw: string | undefined): number {
   return port;
 }
 
-const port = parsePort(process.env['PORT']);
-const host = process.env['HOST'];
+/** Parse an on/off variable: 1/true or 0/false (unset = off), else exit. */
+function parseFlag(name: string, raw: string | undefined): boolean {
+  if (raw === undefined || raw === '' || raw === '0' || raw === 'false') return false;
+  if (raw === '1' || raw === 'true') return true;
+  console.error(`invalid ${name} ${JSON.stringify(raw)}: expected 1/true or 0/false`);
+  process.exit(1);
+}
+
 const dbPath = process.env['DB'] ?? './crack-attack.db';
 
+if (process.argv[2] === 'admin') {
+  if (dbPath === ':memory:') {
+    console.error(`admin needs DB set to the relay's database file\n${ADMIN_USAGE}`);
+    process.exit(2);
+  }
+  const store = new SqliteStore(dbPath);
+  const code = await runAdmin(process.argv.slice(3), store, (line) => console.log(line));
+  await store.close();
+  process.exit(code);
+}
+
+const port = parsePort(process.env['PORT']);
+const host = process.env['HOST'];
+const trustProxy = parseFlag('TRUST_PROXY', process.env['TRUST_PROXY']);
+const corsOrigin = process.env['CORS_ORIGIN'] || undefined;
+
 const store = new SqliteStore(dbPath);
-const server = await startRelayWsServer({ port, host, store });
+const scoreboard = new SoloScoreboard({ store });
+const server = await startRelayWsServer({
+  port,
+  host,
+  store,
+  http: createScoreboardApi(scoreboard, { trustProxy, corsOrigin }),
+});
 console.log(`crack-attack relay listening on :${server.port} (db: ${dbPath})`);
 
 // Last-resort handlers, installed once listening (startup failures still exit

@@ -77,6 +77,7 @@ export default tseslint.config(
         clearTimeout: 'readonly',
         URL: 'readonly',
         WebSocket: 'readonly',
+        fetch: 'readonly',
       },
     },
   },

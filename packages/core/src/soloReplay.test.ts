@@ -12,6 +12,7 @@ import {
   SOLO_REPLAY_VERSION,
   SoloRecorder,
   SoloReplayError,
+  SoloReplayRunner,
   verifySoloReplay,
   type SoloReplay,
 } from './soloReplay.js';
@@ -84,6 +85,17 @@ describe('runSoloReplay', () => {
     expect(result.score).toBeGreaterThan(0);
   });
 
+  it('gives the same result run a slice at a time', () => {
+    const { replay } = playAiGame(12345, 1500);
+    const runner = new SoloReplayRunner(replay);
+    let slices = 1;
+    while (!runner.advance(97)) slices++;
+    expect(slices).toBe(Math.ceil(replay.ticks / 97));
+    expect(runner.result()).toEqual(runSoloReplay(replay));
+  });
+
+  // If a rules change breaks this, update the expected values and bump
+  // SIM_VERSION: runs recorded under the old rules no longer replay the same.
   it('matches the golden fixture', () => {
     const path = fileURLToPath(new URL('./fixtures/solo-hard-2026.replay.json', import.meta.url));
     const fixture: unknown = JSON.parse(readFileSync(path, 'utf8'));

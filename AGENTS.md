@@ -611,8 +611,24 @@ A generator header that a real, non-AI tool always writes (e.g. a lockfile's own
   `core/src/fixtures/`: `solo-hard-2026.replay.json` (short) and
   `solo-hard-459.replay.json` (longer, with a gray-garbage elimination and an
   x6 chain). Special-block scoring can't be pinned yet: special blocks only
-  come from X-mode creep, which isn't ported. Next: the relay's HTTP API
-  (run tickets, verified submissions, all-time/monthly boards).
+  come from X-mode creep, which isn't ported. **Phase 2 landed**: the
+  relay serves the scoreboard's HTTP API on its WebSocket port
+  (`wsServer.ts` now owns the `http` server; routes in `httpApi.ts`, shapes in
+  `protocol/src/scoreboard.ts`). The transport-free `SoloScoreboard`
+  (`scoreboard.ts`) issues single-use, 24 h run tickets (a CSPRNG seed +
+  core `SIM_VERSION`), and on submit checks the ticket (expiry, rules
+  version, seed, a pacing floor of `ticks / 50` s), then re-simulates the
+  replay through `SoloVerifier`: one at a time, in 2000-tick
+  `SoloReplayRunner` slices between event-loop turns, so netplay never
+  stalls (no worker thread — the bundle stays one file). Resubmits are
+  idempotent; failures use up the ticket, "busy" doesn't. Storage is a
+  separate `ScoreStore` interface (`scoreStore.ts`, memory + SQLite);
+  `SqliteStore` gained a `PRAGMA user_version` migration list (v1 =
+  `solo_tickets`, `solo_scores`). All-time and monthly (UTC) boards by score
+  or multiplier, every run its own row; per-client token buckets (IPv6 per
+  /64, `TRUST_PROXY` for `X-Forwarded-For`), `CORS_ORIGIN`, name cleanup,
+  and `relay.mjs admin recent|hide|unhide` moderation. Next: phase 3, the
+  client (ranked toggle, tickets, submission outbox, scoreboard screen).
 - [ ] Phase 6 stretch (X-mode, replays, WebRTC, binary codec if
       measurements demand it)
 

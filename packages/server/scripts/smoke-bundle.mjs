@@ -2,8 +2,10 @@
  * smoke-bundle.mjs — prove `dist/relay.mjs` really stands alone. Copies it by
  * itself into an empty temp directory (no node_modules to lean on), starts it
  * there on an ephemeral port with an on-disk database, completes a hello →
- * welcome handshake over a real WebSocket, then stops it with SIGTERM and
- * expects a clean exit and a written database. Run after the `bundle` script.
+ * welcome handshake over a real WebSocket, gets a solo run ticket and the
+ * (empty) board from the scoreboard's HTTP API on the same port, then stops it
+ * with SIGTERM and expects a clean exit and a written database. Run after the
+ * `bundle` script.
  */
 
 import { spawn } from 'node:child_process';
@@ -79,7 +81,21 @@ const welcome = await new Promise((resolve, reject) => {
   ws.onerror = () => reject(new Error('WebSocket error'));
 }).catch((err) => finish(false, err.message));
 
-// 3. A graceful stop, with the player row written to the SQLite file.
+// 3. The scoreboard API on the same port: a run ticket, then the empty board.
+const api = `http://127.0.0.1:${port}/api/solo`;
+const ticket = await (async () => {
+  const res = await fetch(`${api}/ticket`, { method: 'POST' });
+  if (res.status !== 200) throw new Error(`ticket request returned ${res.status}`);
+  const body = await res.json();
+  if (typeof body.runId !== 'string' || typeof body.seed !== 'number') {
+    throw new Error(`malformed ticket ${JSON.stringify(body)}`);
+  }
+  const board = await (await fetch(`${api}/scores`)).json();
+  if (board.total !== 0) throw new Error(`expected an empty board, got ${JSON.stringify(board)}`);
+  return body;
+})().catch((err) => finish(false, `scoreboard API: ${err.message}`));
+
+// 4. A graceful stop, with the player row written to the SQLite file.
 stopping = true;
 const exitCode = await new Promise((resolve) => {
   relay.once('exit', (code) => resolve(code));
@@ -87,4 +103,8 @@ const exitCode = await new Promise((resolve) => {
 });
 if (exitCode !== 0) finish(false, `relay exited with code ${exitCode} on SIGTERM`);
 if (!existsSync(join(dir, 'lobby.db'))) finish(false, 'no database file was written');
-finish(true, `port ${port}, welcomed "${welcome.name}", clean shutdown, database written`);
+finish(
+  true,
+  `port ${port}, welcomed "${welcome.name}", ticket ${ticket.runId.slice(0, 8)}…, ` +
+    'clean shutdown, database written',
+);

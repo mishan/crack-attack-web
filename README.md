@@ -155,7 +155,9 @@ pnpm --filter @crack-attack/server start
 
 It listens on **:8080** by default and prints the address it bound to. The relay
 forwards input frames, assigns rooms/seeds, compares digests, and persists
-win/loss records — it never runs the simulation itself.
+win/loss records — it never runs a netplay simulation itself. The same port
+also serves the [solo scoreboard](#solo-scoreboard), the one place the server
+does run the game: to verify submitted runs.
 
 Abuse limits: incoming WebSocket messages are capped at **16 KiB** (the largest
 legitimate one is under 1 KiB; ws closes an offending connection with code
@@ -166,11 +168,13 @@ are logged to stderr and the relay keeps serving.
 
 ### Server environment variables
 
-| Var    | Default             | Meaning                                                            |
-| ------ | ------------------- | ------------------------------------------------------------------ |
-| `PORT` | `8080`              | TCP port. Base-10 integer `0..65535`; `0` lets the OS pick a port. |
-| `HOST` | all interfaces      | Interface to bind (e.g. `127.0.0.1` for local-only).               |
-| `DB`   | `./crack-attack.db` | SQLite file for identities/records. Use `:memory:` for ephemeral.  |
+| Var           | Default             | Meaning                                                                                                                                               |
+| ------------- | ------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `PORT`        | `8080`              | TCP port. Base-10 integer `0..65535`; `0` lets the OS pick a port.                                                                                    |
+| `HOST`        | all interfaces      | Interface to bind (e.g. `127.0.0.1` for local-only).                                                                                                  |
+| `DB`          | `./crack-attack.db` | SQLite file for identities, records and the solo scoreboard. Use `:memory:` for ephemeral.                                                            |
+| `TRUST_PROXY` | off                 | `1` to take client addresses (for the scoreboard's rate limits) from the last `X-Forwarded-For` hop. Set it only behind a proxy that sets the header. |
+| `CORS_ORIGIN` | unset               | `Access-Control-Allow-Origin` for the scoreboard API, if the client is served from another origin (e.g. `https://example.com`, or `*`).               |
 
 Examples:
 
@@ -181,6 +185,42 @@ PORT=9000 HOST=127.0.0.1 DB=:memory: pnpm --filter @crack-attack/server start
 # Persist records to a specific file:
 DB=/var/lib/crack-attack/lobby.db pnpm --filter @crack-attack/server start
 ```
+
+### Solo scoreboard
+
+The relay also hosts the solo high-score boards, over plain HTTP on the same
+port. A ranked run starts from a server-issued ticket (a fresh seed). At game
+over the client submits its replay, and the relay re-simulates it and ranks the
+score _it_ computed, so a client can't claim a score it didn't play. The design
+is in [`docs/SCOREBOARD_PLAN.md`](docs/SCOREBOARD_PLAN.md).
+
+| Route                      | What it does                                                                        |
+| -------------------------- | ----------------------------------------------------------------------------------- |
+| `POST /api/solo/ticket`    | Issues a run ticket: `{runId, seed, simVersion, expiresAt}`.                        |
+| `POST /api/solo/submit`    | `{runId, name, replay}` → the verified score, with its all-time and monthly rank.   |
+| `GET /api/solo/scores`     | A board: `board=score\|mult`, `period=all\|month`, `month=YYYY-MM`, `limit=1..100`. |
+| `GET /api/solo/replay/:id` | A run's replay.                                                                     |
+
+Limits:
+
+- Tickets are single-use and expire after 24 h.
+- A run can't be submitted sooner than it takes to play.
+- Submissions are capped at 256 KiB.
+- Each client address gets a burst of 30 tickets (then one every 10 s) and 20
+  submissions (then one every 20 s).
+- Replays are verified one at a time in short slices, so a long one never
+  stalls netplay. If too many are waiting, the API answers 503.
+
+Every run's replay is kept. To take a run off the boards, find it with
+`recent` and hide it. This works while the relay is running:
+
+```sh
+DB=/var/lib/crack-attack/lobby.db node relay.mjs admin recent 50
+DB=/var/lib/crack-attack/lobby.db node relay.mjs admin hide 1234
+DB=/var/lib/crack-attack/lobby.db node relay.mjs admin unhide 1234
+```
+
+In development, run `node packages/server/dist/main.js admin …` instead.
 
 ### Standalone build (for deploying)
 
@@ -202,7 +242,8 @@ It inlines the game packages and `ws`, and keeps records with Node's built-in
 SQLite (`node:sqlite`), so there's no native add-on to install. On Node 22 it
 prints a one-time `ExperimentalWarning` about SQLite (the module is still
 labelled experimental there); it's harmless. A database written by an earlier
-version of the relay opens unchanged.
+version of the relay opens as is, and is upgraded in place to add the
+scoreboard's tables (older relays can still use it).
 
 ### Production: TLS termination with nginx (recommended)
 
@@ -215,11 +256,12 @@ terminates TLS. With nginx:
    outside:
 
    ```sh
-   HOST=127.0.0.1 PORT=8080 DB=/var/lib/crack-attack/lobby.db node relay.mjs
+   HOST=127.0.0.1 PORT=8080 TRUST_PROXY=1 DB=/var/lib/crack-attack/lobby.db node relay.mjs
    ```
 
-2. **Proxy a path on your HTTPS site to it.** The relay accepts WebSocket
-   upgrades on any path, so it needs no extra configuration for `/ws`:
+2. **Proxy two paths on your HTTPS site to it:** `/ws` for the WebSocket and
+   `/api/` for the scoreboard. The relay accepts WebSocket upgrades on any
+   path, so it needs no extra configuration for `/ws`:
 
    ```nginx
    server {
@@ -242,6 +284,14 @@ terminates TLS. With nginx:
        proxy_read_timeout 1h;
        proxy_send_timeout 1h;
      }
+
+     location /api/ {
+       proxy_pass http://127.0.0.1:8080;
+       proxy_set_header Host $host;
+       # The scoreboard rate-limits per client; with TRUST_PROXY=1 it reads
+       # the address nginx appends here.
+       proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+     }
    }
    ```
 
@@ -259,8 +309,10 @@ Notes:
 - The relay can also live on its own host or subdomain (e.g.
   `wss://relay.example.com/`); point `VITE_RELAY_URL` at it. Serving both from
   one site keeps it to a single certificate.
-- Behind the proxy, every connection reaches the relay from nginx's address (it
-  doesn't read `X-Forwarded-For`), so the relay has no per-client IPs.
+- Behind the proxy, every connection reaches the relay from nginx's address.
+  With `TRUST_PROXY=1` the scoreboard reads each client's address from the last
+  `X-Forwarded-For` hop, the one nginx adds; the WebSocket side doesn't use
+  client addresses.
 - To keep the relay running, a systemd unit works well (it shuts down cleanly
   on `systemctl stop`):
 
@@ -272,7 +324,7 @@ Notes:
   [Service]
   WorkingDirectory=/opt/crack-attack
   ExecStart=/usr/bin/node /opt/crack-attack/relay.mjs
-  Environment=HOST=127.0.0.1 PORT=8080 DB=/var/lib/crack-attack/lobby.db
+  Environment=HOST=127.0.0.1 PORT=8080 TRUST_PROXY=1 DB=/var/lib/crack-attack/lobby.db
   StateDirectory=crack-attack
   User=crack-attack
   Restart=on-failure

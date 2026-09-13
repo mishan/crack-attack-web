@@ -26,17 +26,17 @@ spot. Hosted by the relay (`packages/server`) alongside the lobby.
 
 ## Trust model: server-verified replays
 
-The client never reports a score. It submits `(runId, ticks, inputs)`; the
-server re-simulates and computes the score itself.
+The client never reports a score. It submits `{runId, name, replay}`; the
+server re-simulates the replay and computes the score itself.
 
 1. **Server-issued run tickets.** Before a ranked run the client holds a
    ticket `{runId, seed, simVersion}`. Tickets are single-use and expire
    (24 h — longer than any plausible game including pauses). This stops forged
    seeds, replaying one good run many times, and submitting someone else's
    replay.
-2. **Replay to the loss.** The server steps the replay in a worker thread and
-   accepts it only if the game ends in a loss exactly at the claimed tick. It
-   stores the score and top multiplier _it_ computed.
+2. **Replay to the loss.** The server steps the replay in short time slices
+   and accepts it only if the game ends in a loss exactly at the claimed tick.
+   It stores the score and top multiplier _it_ computed.
 3. **Pacing floor.** Wall time from ticket issue to submission must be at least
    `ticks / 50` seconds. This catches offline runs played faster than real time;
    it can't catch slow motion or pausing to think.
@@ -169,42 +169,68 @@ Each phase is one PR.
   - replays that are truncated, run past the loss, or contain malformed input
     are rejected
 
-### Phase 2 — server: HTTP API, schema and verification
+### Phase 2 — server: HTTP API, schema and verification — DONE
 
-- **HTTP server.** Create it with `http.createServer` and pass `{ server }` to
-  `WebSocketServer`. WebSocket behaviour doesn't change.
+- **HTTP server.** `wsServer.ts` creates the HTTP server itself and hands it to
+  `WebSocketServer`, so one port serves both. WebSocket behaviour doesn't
+  change; plain requests go to the scoreboard routes (`httpApi.ts`) or get a 404.
+- **Shared API types.** The request/response shapes, limits, name cleanup and
+  month helpers live in `protocol/src/scoreboard.ts`, for phase 3's client.
 
-| Route                                        | Purpose                                                                           |
-| -------------------------------------------- | --------------------------------------------------------------------------------- |
-| `POST /api/solo/ticket`                      | Returns `{runId, seed, simVersion}`                                               |
-| `POST /api/solo/submit`                      | `{runId, name, ticks, inputs}` → `{id, rank: {all, month}, total: {all, month}}`  |
-| `GET /api/solo/scores?board=&period=&month=` | Top 30 scores (`board=score`) or top 10 multipliers (`board=mult`) for the period |
-| `GET /api/solo/replay/:id`                   | The stored replay                                                                 |
+| Route                      | Purpose                                                                             |
+| -------------------------- | ----------------------------------------------------------------------------------- |
+| `POST /api/solo/ticket`    | Returns `{runId, seed, simVersion, expiresAt}`                                      |
+| `POST /api/solo/submit`    | `{runId, name, replay}` → `{id, name, score, topMultiplier, ticks, standing}`       |
+| `GET /api/solo/scores`     | `board=score\|mult`, `period=all\|month`, `month=YYYY-MM`, `limit` → ranked entries |
+| `GET /api/solo/replay/:id` | The run and its stored replay                                                       |
 
-- **Schema.** Add a `PRAGMA user_version` migration step so existing databases
-  upgrade in place. Then add:
-  - `solo_runs(run_id PK, seed, sim_version, issued_at, submitted_at)`
-  - `solo_scores(id PK, run_id UNIQUE, name, score, top_multiplier, ticks, created_at, sim_version, replay BLOB, hidden)`,
-    indexed on `(score)` and `(created_at, score)`
+`standing` is `{all, month}`, each `{rank, total}` on the score board.
 
-  Both go behind new `LobbyStore` methods, with conformance tests against the
-  memory and SQLite stores.
+- **Service.** `scoreboard.ts` (`SoloScoreboard`) is transport-free, like
+  `RelayServer`. A submission is checked in this order:
+  1. the envelope and name
+  2. the replay's shape
+  3. the ticket: unknown, expired, older rules, wrong seed, or submitted too
+     soon
+  4. re-simulation
 
-- **Sim version.** `simVersion` identifies the core build's rules. A change
-  that breaks determinism rejects old tickets, and older scores keep their
-  version label. Deploy the client and relay together.
+  A ticket that fails a check is used up. A busy verifier leaves the ticket
+  intact, so the client can retry. Resubmitting a run that's already recorded
+  returns its standing, so the phase 3 outbox can retry safely.
+
+- **Schema.** A `PRAGMA user_version` migration list in `sqliteStore.ts`
+  upgrades existing databases in place. Version 1 adds:
+  - `solo_tickets(run_id PK, seed, sim_version, issued_at)`: outstanding
+    tickets only. Using one deletes it, and expired ones are swept.
+  - `solo_scores(id PK, run_id UNIQUE, name, score, top_multiplier, ticks, sim_version, created_at, replay TEXT, hidden)`,
+    indexed for both boards and by time.
+
+  A separate `ScoreStore` interface (`scoreStore.ts`) sits beside
+  `LobbyStore`; `SqliteStore` implements both on one file. `recordRun` uses
+  up the ticket and stores the run in one transaction. Conformance tests run
+  against the memory and SQLite stores.
+
+- **Sim version.** Core's `SIM_VERSION` identifies the rules. Tickets carry
+  it, a mismatch is rejected as `stale_version`, and stored runs keep theirs.
+  The golden fixture test says to bump it. Deploy the client and relay
+  together.
+- **Verification without a worker thread.** Core's `SoloReplayRunner` steps a
+  replay a slice at a time (2000 ticks, a few ms). `SoloVerifier` runs one
+  replay at a time and yields to the event loop between slices, so netplay
+  input keeps flowing. A worker thread would have split the single-file
+  bundle.
 - **Limits:**
-  - a worker thread with a queue cap, so verification never delays live
-    netplay
-  - a tick cap on replays
-  - a request body cap of about 256 KiB
-  - per-IP rate limits on tickets and submissions. Behind nginx this needs a
-    `TRUST_PROXY` env var so the server reads `X-Forwarded-For`; today it sees
-    no client IPs.
-- **Names:** trim them, strip control and zero-width characters, cap the
-  length for the board, and reply `bad_name` when a name is empty afterwards.
-- **Moderation:** an admin subcommand to hide an entry, e.g.
-  `node relay.mjs admin hide <id>`.
+  - at most 32 replays queued, then 503
+  - a one-hour tick cap
+  - a 256 KiB body cap
+  - per-client token buckets (IPv6 per /64): tickets burst 30, then 1 per
+    10 s; submissions burst 20, then 1 per 20 s
+  - `TRUST_PROXY=1` reads the last `X-Forwarded-For` hop
+  - `CORS_ORIGIN` for a client on another origin
+- **Names:** NFC; whitespace collapsed; control, format (zero-width, bidi),
+  private-use and unassigned characters stripped; stacked combining marks
+  capped at two; 16 code points; `bad_name` if nothing is left.
+- **Moderation:** `node relay.mjs admin recent [n] | hide <id> | unhide <id>`.
 
 ### Phase 3 — client: ranked runs, submitting and the scoreboard screen
 

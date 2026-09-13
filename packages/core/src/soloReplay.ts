@@ -37,6 +37,15 @@ export const SOLO_REPLAY_VERSION = 1;
 /** Default cap on a replay's length: an hour of play. */
 export const SOLO_REPLAY_MAX_TICKS = 60 * 60 * GC_STEPS_PER_SECOND;
 
+/**
+ * Version of the game rules a replay plays out under. Bump it whenever a change
+ * makes an existing replay play out differently — the golden fixture test in
+ * `soloReplay.test.ts` fails when that happens. A scoreboard server rejects
+ * runs started under another version, and stored scores keep the version they
+ * were verified with.
+ */
+export const SIM_VERSION = 1;
+
 /** Every valid command bit OR'd together; a command must be a subset of these. */
 const ALL_COMMAND_BITS = CC_LEFT | CC_RIGHT | CC_UP | CC_DOWN | CC_SWAP | CC_ADVANCE;
 
@@ -172,42 +181,73 @@ export function parseSoloReplay(value: unknown, maxTicks = SOLO_REPLAY_MAX_TICKS
 }
 
 /**
- * Re-simulate a well-formed replay and score it. The game must be lost exactly
- * on its last tick: inputs past the loss, or a game still in play at the end,
- * throw {@link SoloReplayError}. Scoring matches the solo screen: every combo
- * report folds into a {@link ScoreState}, and the backlog is flushed at the end.
+ * Re-simulates a well-formed replay a slice at a time, so a server can verify a
+ * long game without blocking its event loop ({@link runSoloReplay} runs one to
+ * completion). The game must be lost exactly on its last tick: inputs past the
+ * loss, or a game still in play at the end, throw {@link SoloReplayError}.
+ * Scoring matches the solo screen: every combo report folds into a
+ * {@link ScoreState}, and the backlog is flushed at the end.
  */
+export class SoloReplayRunner {
+  private readonly sim: GameSim;
+  private readonly score = new ScoreState();
+  private held = new ActionState(0);
+  private next = 0;
+  private changeAt: number;
+  private tick = 0;
+
+  constructor(private readonly replay: SoloReplay) {
+    this.sim = new GameSim(replay.seed);
+    this.changeAt = replay.inputs[0]?.[0] ?? Infinity;
+  }
+
+  /** Whether every tick has been played. */
+  get done(): boolean {
+    return this.tick >= this.replay.ticks;
+  }
+
+  /** Play up to `budget` more ticks; returns {@link done}. */
+  advance(budget: number): boolean {
+    const { sim, replay } = this;
+    const { inputs } = replay;
+    const end = Math.min(replay.ticks, this.tick + budget);
+    while (this.tick < end) {
+      if (sim.lost) {
+        throw new SoloReplayError(`the game was lost at tick ${this.tick}, before the last tick`);
+      }
+      const t = ++this.tick;
+      if (t === this.changeAt) {
+        this.held = new ActionState(inputs[this.next]![1]);
+        this.next++;
+        this.changeAt = this.next < inputs.length ? t + inputs[this.next]![0] : Infinity;
+      }
+      sim.step(this.held);
+      for (const ev of sim.drainScoreEvents()) this.score.report(ev);
+    }
+    if (this.done && !sim.lost) {
+      throw new SoloReplayError(`the game is still in play at the last tick ${replay.ticks}`);
+    }
+    return this.done;
+  }
+
+  /** The verified result, once {@link advance} has returned true. */
+  result(): SoloResult {
+    if (!this.done || !this.sim.lost) throw new Error('the replay has not finished');
+    this.score.flush();
+    return {
+      ticks: this.replay.ticks,
+      score: this.score.score,
+      topMultiplier: this.score.topMultiplier,
+      digest: this.sim.digest(),
+    };
+  }
+}
+
+/** Re-simulate a well-formed replay in one go and score it (see {@link SoloReplayRunner}). */
 export function runSoloReplay(replay: SoloReplay): SoloResult {
-  const sim = new GameSim(replay.seed);
-  const score = new ScoreState();
-  const { inputs } = replay;
-  let held = new ActionState(0);
-  let next = 0;
-  let changeAt = inputs[0]?.[0] ?? Infinity;
-
-  for (let t = 1; t <= replay.ticks; t++) {
-    if (sim.lost) {
-      throw new SoloReplayError(`the game was lost at tick ${t - 1}, before the last tick`);
-    }
-    if (t === changeAt) {
-      held = new ActionState(inputs[next]![1]);
-      next++;
-      changeAt = next < inputs.length ? t + inputs[next]![0] : Infinity;
-    }
-    sim.step(held);
-    for (const ev of sim.drainScoreEvents()) score.report(ev);
-  }
-  if (!sim.lost) {
-    throw new SoloReplayError(`the game is still in play at the last tick ${replay.ticks}`);
-  }
-
-  score.flush();
-  return {
-    ticks: replay.ticks,
-    score: score.score,
-    topMultiplier: score.topMultiplier,
-    digest: sim.digest(),
-  };
+  const runner = new SoloReplayRunner(replay);
+  runner.advance(replay.ticks);
+  return runner.result();
 }
 
 /** {@link parseSoloReplay} then {@link runSoloReplay}: what a scoreboard server calls. */
