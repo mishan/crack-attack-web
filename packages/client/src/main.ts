@@ -39,6 +39,7 @@ import {
 import { parseDemoMatchup } from './view/demoMatchup.js';
 import { KeyboardInput } from './input/keyboard.js';
 import { mountTouchControls, prefersTouchControls } from './input/touchControls.js';
+import { fitBoards, markChrome, onChromeResize } from './render/chrome.js';
 import { BoardView, DEFAULT_RENDER_TUNING } from './render/boardView.js';
 import { GarbageDecalView } from './render/garbageDecalView.js';
 import { HudView } from './render/hudView.js';
@@ -386,8 +387,8 @@ function bootSolo(
     });
   }
 
-  const fitToWindow = (): void => view.resize(globalThis.innerWidth, globalThis.innerHeight);
-  fitToWindow();
+  // First fit runs once the touch controls are up (below), so it frames around them.
+  const fitToWindow = (): void => fitBoards([{ container: app, view }]);
   globalThis.addEventListener('resize', fitToWindow);
 
   // Mode switch into netplay.
@@ -396,7 +397,7 @@ function bootSolo(
   onlineBtn.style.cssText =
     'position:fixed;top:12px;right:12px;z-index:5;padding:6px 12px;opacity:.85';
   onlineBtn.onclick = onPlayOnline;
-  document.body.appendChild(onlineBtn);
+  document.body.appendChild(markChrome(onlineBtn));
 
   // Mode switch into a local vs-AI match (two visible boards). Stacked directly
   // below "Play online" on the far right; the audio controls live at right:120px,
@@ -405,7 +406,7 @@ function bootSolo(
   aiBtn.textContent = 'Play vs AI';
   aiBtn.style.cssText = 'position:fixed;top:52px;right:12px;z-index:5;padding:6px 12px;opacity:.85';
   aiBtn.onclick = onPlayAi;
-  document.body.appendChild(aiBtn);
+  document.body.appendChild(markChrome(aiBtn));
 
   // Mode switch into the AI-vs-AI demo, third in the same column.
   const demoBtn = document.createElement('button');
@@ -413,7 +414,7 @@ function bootSolo(
   demoBtn.style.cssText =
     'position:fixed;top:92px;right:12px;z-index:5;padding:6px 12px;opacity:.85';
   demoBtn.onclick = onWatchAi;
-  document.body.appendChild(demoBtn);
+  document.body.appendChild(markChrome(demoBtn));
 
   // --- input ---------------------------------------------------------------
   const restart = (): void => {
@@ -490,6 +491,8 @@ function bootSolo(
     const help = document.getElementById('help');
     if (help) help.style.display = 'none';
   }
+  fitToWindow();
+  const stopWatchingChrome = onChromeResize(fitToWindow);
 
   // --- loop ----------------------------------------------------------------
   let lastMs = performance.now();
@@ -609,6 +612,7 @@ function bootSolo(
       disposed = true;
       cancelAnimationFrame(rafId);
       globalThis.removeEventListener('resize', fitToWindow);
+      stopWatchingChrome();
       globalThis.removeEventListener('keydown', onKeyDown);
       globalThis.removeEventListener('keyup', onKeyUp);
       globalThis.removeEventListener('blur', onBlur);

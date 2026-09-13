@@ -564,6 +564,22 @@ A generator header that a real, non-AI tool always writes (e.g. a lockfile's own
       the audio controls stay clickable. `render/attractOverlay.ts` is the DOM
       layer; `bootAiDemo` takes it as an optional `attract` argument. `?solo`
       skips attract mode.
+- [x] **Mobile fit landed**: boards scale to the screen. `BoardView.resize`
+      dollies the camera back when the viewport is too narrow for the board's
+      full width (level lights included) — a portrait phone, or half of one
+      with two boards side by side — never closer than the base framing, so
+      wide viewports frame as before; fog and the far plane move with it.
+      Fixed overlays (HUD, mode/action buttons, audio controls, the touch
+      pad's button groups) are marked with `markChrome` (`render/chrome.ts`);
+      each screen's resize handler hands their measured rects to the board
+      views via `fitBoards`, and the pure, unit-tested `view/cameraFit.ts`
+      `frameBoards` finds the largest board, nearest its centred spot, that
+      no chrome covers — sliding sideways where there's room (a landscape
+      phone's corner touch pad), else shrinking and sliding vertically (a
+      portrait phone's HUD and pad). Side-by-side boards share a size and
+      height; each slides sideways alone. Name tags and the demo scoreboard
+      follow the framing (`BoardView.labelAnchor`, `placeLabel`). **New fixed overlays should call
+      `markChrome`** so boards keep clear of them.
 - [ ] Phase 6 stretch (X-mode, replays, WebRTC, binary codec if
       measurements demand it)
 

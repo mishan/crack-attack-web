@@ -49,9 +49,22 @@ import type { BoardViewModel } from '../view/boardViewModel.js';
 import { dyingPose } from '../view/dyingAnim.js';
 import { blockColor, garbageColor } from './palette.js';
 import { swapperCursorGeometry } from './cursorGeometry.js';
+import { type BoardFit, type BoardFrame, frameBoard } from '../view/cameraFit.js';
 
 const CELL = 1;
 const BLOCK_SIZE = 0.92;
+const CAMERA_FOV = 48;
+const CAMERA_FAR = 100;
+const FOG_NEAR = 22;
+const FOG_FAR = 40;
+/** How far the level-light arrow tips reach past the board edge (levelLightsView.ts). */
+const LEVEL_LIGHT_OUTER = 0.7 + 0.96 * 0.55;
+/** How far the lose bar's bottom edge sits below the board (loseBarView.ts). */
+const LOSE_BAR_BELOW = 1.0 + 0.6 / 2;
+/** Breathing room kept around the board when fitting it to a viewport. */
+const FIT_MARGIN = 0.35;
+/** Name-label anchor: half a cell above the top level light (at halfH + 1). */
+const LABEL_ABOVE = 1.5;
 /** Radius the key light orbits the board at (only its *direction* matters). */
 const KEY_LIGHT_RADIUS = 16;
 
@@ -110,6 +123,14 @@ export class BoardView {
 
   private readonly halfW: number;
   private readonly halfH: number;
+  private readonly fog: Fog;
+  /** The board's extents + base camera framing, for fitting it to a viewport. */
+  readonly fit: BoardFit;
+  /** The camera's offset at the base framing; a narrower viewport scales it back. */
+  private readonly cameraOffset = new Vector3();
+  private readonly labelPoint = new Vector3();
+  private viewWidth = 1;
+  private viewHeight = 1;
   /**
    * The play-floor clip plane. Faithful to the original's
    * `GL_CLIP_PLANE_PLAY_FLOOR`: it hides everything below the boundary between the
@@ -163,11 +184,22 @@ export class BoardView {
     this.floorPlane = new Plane(new Vector3(0, 1, 0), -floorY);
 
     this.scene.background = new Color(0x0b0d12);
-    this.scene.fog = new Fog(0x0b0d12, 22, 40);
+    this.fog = new Fog(0x0b0d12, FOG_NEAR, FOG_FAR);
+    this.scene.fog = this.fog;
 
-    this.camera = new PerspectiveCamera(48, 1, 0.1, 100);
-    this.camera.position.set(0, 0.5, Math.max(14, visibleHeight * 1.5));
+    this.camera = new PerspectiveCamera(CAMERA_FOV, 1, 0.1, CAMERA_FAR);
+    const baseDistance = Math.max(14, visibleHeight * 1.5);
+    this.camera.position.set(0, 0.5, baseDistance);
     this.camera.lookAt(0, 0, 0);
+    this.cameraOffset.copy(this.camera.position);
+    this.fit = {
+      baseDistance,
+      fovDeg: CAMERA_FOV,
+      // Widest: the outer tips of the level-light arrows. Tallest: the lose bar
+      // below the board (the top light row reaches a little less far above).
+      halfExtentX: this.halfW + LEVEL_LIGHT_OUTER + FIT_MARGIN,
+      halfExtentY: this.halfH + LOSE_BAR_BELOW + FIT_MARGIN,
+    };
 
     // Lighting: an ambient lift, a key "headlight" that comes from above and to
     // the side (so the block's beveled facets shade directionally and the glossy
@@ -505,11 +537,50 @@ export class BoardView {
     this.renderer.render(this.scene, this.camera);
   }
 
-  /** Match the renderer + camera to a new viewport size. */
-  resize(width: number, height: number): void {
+  /**
+   * Match the renderer + camera to a new viewport size. A viewport too narrow
+   * for the board (a portrait phone) dollies the camera back so the whole board
+   * still fits; fog and the far plane move with it so the framing looks the same.
+   * `frame` places the board clear of on-screen chrome (see `fitBoards` in
+   * `chrome.ts`); by default it's centred.
+   */
+  resize(width: number, height: number, frame?: BoardFrame): void {
+    frame ??= frameBoard(this.fit, width, height);
+    const base = this.fit.baseDistance;
+    const extra = frame.distance - base;
+    this.camera.position.copy(this.cameraOffset).multiplyScalar(frame.distance / base);
+    this.camera.lookAt(0, 0, 0);
+    this.camera.updateMatrixWorld();
+    this.camera.far = CAMERA_FAR + extra;
+    this.fog.near = FOG_NEAR + extra;
+    this.fog.far = FOG_FAR + extra;
     this.camera.aspect = width / Math.max(1, height);
+    // Slide the image, not the camera, so the viewing angle stays the same: the
+    // board centre (the origin, at the image centre) moves to the frame's.
+    const offX = width / 2 - (frame.rect.left + frame.rect.right) / 2;
+    const offY = height / 2 - (frame.rect.top + frame.rect.bottom) / 2;
+    if (offX !== 0 || offY !== 0) {
+      this.camera.setViewOffset(width, height, offX, offY, width, height);
+    } else {
+      this.camera.clearViewOffset();
+    }
     this.camera.updateProjectionMatrix();
     this.renderer.setSize(width, height);
+    this.viewWidth = width;
+    this.viewHeight = height;
+  }
+
+  /**
+   * Where a name label over this board goes: its top-centre, in CSS px from the
+   * canvas's top-left, just above the top level light. Follows the board's
+   * framing (call after resize).
+   */
+  labelAnchor(): { x: number; y: number } {
+    this.labelPoint.set(0, this.halfH + LABEL_ABOVE, 0).project(this.camera);
+    return {
+      x: ((1 + this.labelPoint.x) / 2) * this.viewWidth,
+      y: ((1 - this.labelPoint.y) / 2) * this.viewHeight,
+    };
   }
 
   /**
