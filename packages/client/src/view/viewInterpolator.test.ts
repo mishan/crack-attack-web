@@ -40,7 +40,6 @@ function model(
       awakingCount: 0,
       dyingCount: 0,
       topEffectiveRow: 0,
-      dangerFraction: 0,
       lossCountdown: null,
       lost: false,
     },

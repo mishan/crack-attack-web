@@ -1,22 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { dangerTier, formatClock } from './hud.js';
-
-describe('dangerTier', () => {
-  it('is safe below half', () => {
-    expect(dangerTier(0)).toBe('safe');
-    expect(dangerTier(0.49)).toBe('safe');
-  });
-
-  it('is warning from half to 0.8', () => {
-    expect(dangerTier(0.5)).toBe('warning');
-    expect(dangerTier(0.79)).toBe('warning');
-  });
-
-  it('is danger at 0.8 and above', () => {
-    expect(dangerTier(0.8)).toBe('danger');
-    expect(dangerTier(1)).toBe('danger');
-  });
-});
+import { formatClock } from './hud.js';
 
 describe('formatClock', () => {
   it('formats sub-minute times with zero-padded seconds', () => {

@@ -36,6 +36,32 @@ export function fitBoards(
   boards.forEach((b, i) => b.view.resize(viewports[i]!.width, viewports[i]!.height, frames[i]));
 }
 
+/**
+ * Move fixed chrome `el` down, from its stylesheet position, below any other
+ * chrome that starts above it and would cover it — the HUD under the audio
+ * controls on a narrow screen. Run before {@link fitBoards}, which then frames
+ * the boards around it where it settled.
+ */
+export function settleBelowChrome(el: HTMLElement, gap = 6): void {
+  el.style.top = '';
+  const others = [...document.querySelectorAll<HTMLElement>('[data-chrome]')].filter(
+    (o) => o !== el && !el.contains(o),
+  );
+  for (let pass = 0; pass < 4; pass++) {
+    const r = el.getBoundingClientRect();
+    let top = r.top;
+    for (const o of others) {
+      const q = o.getBoundingClientRect();
+      if (q.width === 0 || q.height === 0 || q.top > r.top) continue;
+      if (q.left < r.right && r.left < q.right && q.top < r.bottom && r.top < q.bottom) {
+        top = Math.max(top, q.bottom + gap);
+      }
+    }
+    if (top === r.top) return;
+    el.style.top = `${top}px`;
+  }
+}
+
 /** Pin a label's top-centre to its board's label anchor ({@link BoardView.labelAnchor}). */
 export function placeLabel(label: HTMLElement, view: BoardView): void {
   const { x, y } = view.labelAnchor();

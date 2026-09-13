@@ -27,7 +27,7 @@ import {
 import { KeyboardInput } from './input/keyboard.js';
 import { mountTouchControls } from './input/touchControls.js';
 import { BoardView } from './render/boardView.js';
-import { fitBoards, markChrome, placeLabel } from './render/chrome.js';
+import { fitBoards, markChrome, placeLabel, settleBelowChrome } from './render/chrome.js';
 import { GarbageDecalView } from './render/garbageDecalView.js';
 import { HudView } from './render/hudView.js';
 import { LevelLightsView } from './render/levelLightsView.js';
@@ -605,6 +605,7 @@ export function bootNetplay(
   }
 
   function fitToWindow(): void {
+    if (hudEl) settleBelowChrome(hudEl);
     if (!boards) return;
     fitBoards(boards);
     for (const b of boards) placeLabel(b.nameBar, b.view);

@@ -24,7 +24,7 @@ import {
 import { KeyboardInput } from './input/keyboard.js';
 import { mountTouchControls } from './input/touchControls.js';
 import { BoardView } from './render/boardView.js';
-import { fitBoards, markChrome, placeLabel } from './render/chrome.js';
+import { fitBoards, markChrome, placeLabel, settleBelowChrome } from './render/chrome.js';
 import { GarbageDecalView } from './render/garbageDecalView.js';
 import { HudView } from './render/hudView.js';
 import { LevelLightsView } from './render/levelLightsView.js';
@@ -210,6 +210,7 @@ export function bootAiMatch(
 
   // First fit runs once the touch controls are up (below), so it frames around them.
   const fitToWindow = (): void => {
+    if (hudEl) settleBelowChrome(hudEl);
     fitBoards(boards);
     for (const b of boards) placeLabel(b.tag, b.view);
   };

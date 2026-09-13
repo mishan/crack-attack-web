@@ -39,12 +39,11 @@ import {
 import { parseDemoMatchup } from './view/demoMatchup.js';
 import { KeyboardInput } from './input/keyboard.js';
 import { mountTouchControls, prefersTouchControls } from './input/touchControls.js';
-import { fitBoards, markChrome } from './render/chrome.js';
+import { fitBoards, markChrome, settleBelowChrome } from './render/chrome.js';
 import { BoardView, DEFAULT_RENDER_TUNING } from './render/boardView.js';
 import { GarbageDecalView } from './render/garbageDecalView.js';
 import { HudView } from './render/hudView.js';
 import { LevelLightsView } from './render/levelLightsView.js';
-import { LoseBarView } from './render/loseBarView.js';
 import { SignsView } from './render/signsView.js';
 import { MessageOverlay } from './render/messageOverlay.js';
 import { SparklesView } from './render/sparklesView.js';
@@ -318,11 +317,11 @@ function bootSolo(
   const signs = new SignsView(view.scene, halfW, halfH);
   const decals = new GarbageDecalView(view.scene, halfW, halfH);
   const levelLights = new LevelLightsView(view.scene, halfW, halfH);
-  const loseBar = new LoseBarView(view.scene, halfW, halfH);
   const sparkles = new SparklesView(view.scene, halfW, halfH);
   const spring = new Spring();
   const overlay = new MessageOverlay(app);
-  const hud = hudEl ? new HudView(hudEl) : null;
+  // Solo shows the lose bar in the HUD, where the original's side column had it.
+  const hud = hudEl ? new HudView(hudEl, { loseBar: true }) : null;
   let disposed = false;
   let rafId = 0;
   /** Ticks since game start, counting the held countdown gate. */
@@ -388,7 +387,10 @@ function bootSolo(
   }
 
   // First fit runs once the touch controls are up (below), so it frames around them.
-  const fitToWindow = (): void => fitBoards([{ container: app, view }]);
+  const fitToWindow = (): void => {
+    if (hudEl) settleBelowChrome(hudEl);
+    fitBoards([{ container: app, view }]);
+  };
   globalThis.addEventListener('resize', fitToWindow);
 
   // Mode switch into netplay.
@@ -430,7 +432,7 @@ function bootSolo(
     spring.gameStart();
     view.setShake(0);
     levelLights.reset(fresh.hud.topEffectiveRow);
-    loseBar.reset();
+    hud?.loseBar?.reset();
     metaTicks = 0;
     // Fade the ending stinger over the new countdown, then game music at GO
     // (C++ gameStart → Music::fadeout(3000); GO → Music::play).
@@ -557,9 +559,10 @@ function bootSolo(
     for (let t = 0; t < stepped; t++) spring.timeStep();
     view.setShake(spring.offsetCells);
 
-    // Danger bar: tracks the Creep loss countdown, ticking with the sim (only in
-    // play, so pass `stepped`, not the gate ticks — LoseBar::timeStep is post-gate).
-    loseBar.update(stepped, sim.creep.creep_freeze, sim.creep.loss_alarm);
+    // Lose bar (in the HUD): tracks the Creep loss countdown, ticking with the sim
+    // (only in play, so pass `stepped`, not the gate ticks — LoseBar::timeStep is
+    // post-gate).
+    hud?.loseBar?.update(stepped, sim.creep.creep_freeze, sim.creep.loss_alarm);
 
     // Death sparks + reward motes, ticking with the sim like the spring.
     for (const ev of sim.drainSparkEvents()) sparkles.spawnSparks(ev.x, ev.y, ev.flavor, ev.count);
@@ -619,7 +622,6 @@ function bootSolo(
       aiBtn.remove();
       demoBtn.remove();
       overlay.dispose();
-      loseBar.dispose();
       view.dispose(); // release the WebGL context (browsers cap them)
     },
   };
