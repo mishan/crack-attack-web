@@ -70,6 +70,19 @@ export function placeLabel(label: HTMLElement, view: BoardView): void {
 }
 
 /**
+ * Call `refit` whenever chrome marked so far changes size — shown, hidden, or
+ * relabelled (a Save replay or Rematch button appearing, a status banner) — so
+ * boards re-frame around it, not only on window resizes. The framing only moves
+ * when that chrome would cover a board. Returns a function that stops watching.
+ */
+export function onChromeResize(refit: () => void): () => void {
+  if (typeof ResizeObserver === 'undefined') return () => {};
+  const observer = new ResizeObserver(() => refit());
+  for (const el of document.querySelectorAll('[data-chrome]')) observer.observe(el);
+  return () => observer.disconnect();
+}
+
+/**
  * The rectangles of all visible chrome, relative to `viewport`'s top-left (so
  * they line up with a board canvas filling it). Hidden chrome has no box and is
  * skipped.

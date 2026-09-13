@@ -27,7 +27,13 @@ import {
 import { KeyboardInput } from './input/keyboard.js';
 import { mountTouchControls } from './input/touchControls.js';
 import { BoardView } from './render/boardView.js';
-import { fitBoards, markChrome, placeLabel, settleBelowChrome } from './render/chrome.js';
+import {
+  fitBoards,
+  markChrome,
+  onChromeResize,
+  placeLabel,
+  settleBelowChrome,
+} from './render/chrome.js';
 import { GarbageDecalView } from './render/garbageDecalView.js';
 import { HudView } from './render/hudView.js';
 import { LevelLightsView } from './render/levelLightsView.js';
@@ -156,7 +162,7 @@ export function bootNetplay(
     'position:fixed;top:18px;left:50%;transform:translateX(-50%);z-index:5;' +
     'font-size:15px;background:rgba(22,26,34,.9);padding:8px 16px;border-radius:6px;' +
     'border:1px solid #2a3140;display:none';
-  document.body.appendChild(banner);
+  document.body.appendChild(markChrome(banner));
   const showBanner = (text: string): void => {
     banner.textContent = text;
     banner.style.display = text ? 'block' : 'none';
@@ -772,6 +778,9 @@ export function bootNetplay(
     'position:fixed;top:12px;right:12px;z-index:7;display:flex;flex-direction:column;' +
     'align-items:flex-end;gap:8px';
   document.body.appendChild(markChrome(actionBar));
+  // Refit as chrome comes and goes: the action buttons change with the phase, and
+  // the banner shows reconnect / catch-up / result messages.
+  const stopWatchingChrome = onChromeResize(fitToWindow);
   const actionButton = (onClick: () => void): HTMLButtonElement => {
     const btn = document.createElement('button');
     btn.type = 'button';
@@ -1114,6 +1123,7 @@ export function bootNetplay(
       globalThis.removeEventListener('keyup', onKeyUp);
       globalThis.removeEventListener('blur', onBlur);
       globalThis.removeEventListener('resize', fitToWindow);
+      stopWatchingChrome();
       if (boards) {
         for (const b of boards) {
           b.loseBar.dispose();

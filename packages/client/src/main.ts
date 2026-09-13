@@ -39,7 +39,7 @@ import {
 import { parseDemoMatchup } from './view/demoMatchup.js';
 import { KeyboardInput } from './input/keyboard.js';
 import { mountTouchControls, prefersTouchControls } from './input/touchControls.js';
-import { fitBoards, markChrome, settleBelowChrome } from './render/chrome.js';
+import { fitBoards, markChrome, onChromeResize, settleBelowChrome } from './render/chrome.js';
 import { BoardView, DEFAULT_RENDER_TUNING } from './render/boardView.js';
 import { GarbageDecalView } from './render/garbageDecalView.js';
 import { HudView } from './render/hudView.js';
@@ -494,6 +494,7 @@ function bootSolo(
     if (help) help.style.display = 'none';
   }
   fitToWindow();
+  const stopWatchingChrome = onChromeResize(fitToWindow);
 
   // --- loop ----------------------------------------------------------------
   let lastMs = performance.now();
@@ -614,6 +615,7 @@ function bootSolo(
       disposed = true;
       cancelAnimationFrame(rafId);
       globalThis.removeEventListener('resize', fitToWindow);
+      stopWatchingChrome();
       globalThis.removeEventListener('keydown', onKeyDown);
       globalThis.removeEventListener('keyup', onKeyUp);
       globalThis.removeEventListener('blur', onBlur);

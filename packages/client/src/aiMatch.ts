@@ -24,7 +24,13 @@ import {
 import { KeyboardInput } from './input/keyboard.js';
 import { mountTouchControls } from './input/touchControls.js';
 import { BoardView } from './render/boardView.js';
-import { fitBoards, markChrome, placeLabel, settleBelowChrome } from './render/chrome.js';
+import {
+  fitBoards,
+  markChrome,
+  onChromeResize,
+  placeLabel,
+  settleBelowChrome,
+} from './render/chrome.js';
 import { GarbageDecalView } from './render/garbageDecalView.js';
 import { HudView } from './render/hudView.js';
 import { LevelLightsView } from './render/levelLightsView.js';
@@ -266,6 +272,8 @@ export function bootAiMatch(
     restart,
   });
   fitToWindow();
+  // Also refit as chrome comes and goes (Save replay appears once the match ends).
+  const stopWatchingChrome = onChromeResize(fitToWindow);
 
   let lastMs = performance.now();
   const frame = (nowMs: number): void => {
@@ -380,6 +388,7 @@ export function bootAiMatch(
       disposed = true;
       cancelAnimationFrame(rafId);
       globalThis.removeEventListener('resize', fitToWindow);
+      stopWatchingChrome();
       globalThis.removeEventListener('keydown', onKeyDown);
       globalThis.removeEventListener('keyup', onKeyUp);
       globalThis.removeEventListener('blur', onBlur);
