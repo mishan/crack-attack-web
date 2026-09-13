@@ -48,6 +48,17 @@ describe('layout', () => {
     expect(l.width).toBe(24 + 14 + 24 + 24);
   });
 
+  it("spans the last clock digit's ink, which overhangs its advance", () => {
+    const l = layout('0000', CLOCK);
+    expect(l.width).toBe(4 * 24);
+    expect(l.extent).toBe(3 * 24 + 28); // last '0' drawn at 72, ink to 28 in its cell
+  });
+
+  it('extent equals the advance width when no ink overhangs', () => {
+    const l = layout('12', FONT0);
+    expect(l.extent).toBe(l.width);
+  });
+
   it('advances a space by the font space width and skips unmapped chars', () => {
     const l = layout('A B', FONT0); // space between, then 'B'
     // 'A' at 0 (w 28), space (+10), 'B' at 38

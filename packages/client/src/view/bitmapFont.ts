@@ -24,6 +24,12 @@ export const GLYPH_CELL = 32;
 export interface Glyph {
   readonly index: number;
   readonly width: number;
+  /**
+   * Right edge of the glyph's ink within its cell, where that reaches past
+   * `width` (the clock digits' ink is centred in the cell, so it overhangs a
+   * narrower advance). Omitted when the ink stays within the advance.
+   */
+  readonly ink?: number;
 }
 
 export interface Font {
@@ -76,10 +82,11 @@ export const FONT0 = buildFont0();
 // Atlas cells 0–9 are the digits, cell 10 is `clock_extra` (the ':' separator).
 // The digit ink is centred in each cell, so a fixed pitch reads as monospace.
 
+// Ink right edges measured from the clock atlas (widest digit, '0', ends at 28).
 function buildClock(): Font {
   const glyphs = new Map<string, Glyph>();
-  for (let d = 0; d < 10; d++) glyphs.set(String(d), { index: d, width: 24 });
-  glyphs.set(':', { index: 10, width: 14 });
+  for (let d = 0; d < 10; d++) glyphs.set(String(d), { index: d, width: 24, ink: 28 });
+  glyphs.set(':', { index: 10, width: 14, ink: 21 });
   return { atlas: 'clock', cell: GLYPH_CELL, space: 12, glyphs };
 }
 
@@ -96,6 +103,12 @@ export interface Layout {
   readonly glyphs: Placement[];
   /** Total advance width, in glyph px. */
   readonly width: number;
+  /**
+   * Width the glyphs' ink actually spans, in glyph px: the advance width, or
+   * more where a glyph's ink overhangs its advance. Size canvases to this so
+   * the last glyph isn't clipped.
+   */
+  readonly extent: number;
 }
 
 /**
@@ -107,6 +120,7 @@ export interface Layout {
 export function layout(text: string, font: Font): Layout {
   const glyphs: Placement[] = [];
   let x = 0;
+  let extent = 0;
   for (const ch of text) {
     if (ch === ' ') {
       x += font.space;
@@ -115,7 +129,8 @@ export function layout(text: string, font: Font): Layout {
     const g = font.glyphs.get(ch);
     if (!g) continue; // unmapped char — skipped, as mapCharToCode == -1 does
     glyphs.push({ index: g.index, x });
+    extent = Math.max(extent, x + (g.ink ?? g.width));
     x += g.width;
   }
-  return { glyphs, width: x };
+  return { glyphs, width: x, extent: Math.max(x, extent) };
 }

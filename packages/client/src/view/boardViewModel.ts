@@ -137,8 +137,6 @@ export interface Hud {
   readonly awakingCount: number;
   readonly dyingCount: number;
   readonly topEffectiveRow: number;
-  /** Fraction of the way to the safe-height loss line, clamped to [0, 1]. */
-  readonly dangerFraction: number;
   /**
    * Ticks left before losing while the stack is frozen against the safe height,
    * or null when not in the loss countdown. Drives the urgent HUD warning.
@@ -248,9 +246,6 @@ export function deriveViewModel(sim: GameSim): BoardViewModel {
     }
   }
 
-  const dangerLine = GC_SAFE_HEIGHT - 1;
-  const dangerFraction = Math.max(0, Math.min(1, grid.top_effective_row / dangerLine));
-
   return {
     width: GC_PLAY_WIDTH,
     visibleHeight: GC_SAFE_HEIGHT - 1,
@@ -263,7 +258,6 @@ export function deriveViewModel(sim: GameSim): BoardViewModel {
       awakingCount: sim.awaking_count,
       dyingCount: sim.dying_count,
       topEffectiveRow: grid.top_effective_row,
-      dangerFraction,
       lossCountdown: sim.creep.creep_freeze ? sim.creep.loss_alarm : null,
       lost: sim.lost,
     },

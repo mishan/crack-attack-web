@@ -258,9 +258,9 @@ A generator header that a real, non-AI tool always writes (e.g. a lockfile's own
   0.5), so the sheen flows continuously across a slab's cells instead of tiling
   per cube. Block/garbage flavor colours in `render/palette.ts` reproduce the
   reference `block_colors`/`garbage_colors` tables. A DOM `HudView` overlay shows
-  a play clock, a vertical lose bar that fills toward the safe height and tints
-  green→yellow→red, and a status line (popping count, loss countdown, game over)
-  — presentation thresholds/formatting live in the pure `view/hud.ts`. Combo
+  a play clock and a status line (popping count, loss countdown, game over),
+  laid out like the original's side column (see the HUD entry below) —
+  formatting lives in the pure `view/hud.ts`. Combo
   reward signs float up on a match: the core reports `SignEvent`s (multiplier /
   magnitude / special) on an optional `SignSink` at the exact points
   `SignManager::createSign` fires — drawing no gameplay RNG, so they stay cosmetic
@@ -580,6 +580,23 @@ A generator header that a real, non-AI tool always writes (e.g. a lockfile's own
       height; each slides sideways alone. Name tags and the demo scoreboard
       follow the framing (`BoardView.labelAnchor`, `placeLabel`). **New fixed overlays should call
       `markChrome`** so boards keep clear of them.
+- [x] **Original-style HUD landed**: the DOM HUD is laid out like the
+      reference's side column (`DrawExternalCandy.cxx`, `DrawWinRecord.cxx`).
+      In solo the lose bar moves from under the board into the HUD
+      (`render/loseBarCanvas.ts`), drawn from the reference's own computed
+      shaded-tube texture and colour sweep, ported as pure math in
+      `view/loseBarTexture.ts`; two-board screens keep one under each board.
+      Below it a decorative win-record star turns at the reference's 1° per
+      tick (it can become the match record if best-of-N lands), then score and
+      clock in the clock digits with `drawDigit`'s blue-to-white diagonal
+      shading (`BitmapLabel` `shaded`). The web-only vertical stack-height
+      meter is gone (the level lights already show stack height). Bitmap
+      labels size to the glyphs' ink (`Layout.extent`), so the clock digits'
+      centred ink no longer clips the last digit. On narrow screens (≤ 640 px)
+      the column pairs items side by side to stay short, and
+      `settleBelowChrome` (`render/chrome.ts`) drops the HUD below any chrome
+      it would sit under (the audio controls on a phone) before the boards are
+      framed.
 - [ ] Phase 6 stretch (X-mode, replays, WebRTC, binary codec if
       measurements demand it)
 

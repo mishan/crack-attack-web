@@ -130,13 +130,11 @@ describe('deriveViewModel', () => {
     for (const b of vm.blocks) expect(b.awakeProgress).toBe(1);
   });
 
-  it('surfaces HUD counters and a clamped danger fraction', () => {
+  it('surfaces HUD counters', () => {
     const sim = new GameSim(1);
     const vm = deriveViewModel(sim);
     expect(vm.hud.tick).toBe(0);
     expect(vm.hud.lost).toBe(false);
-    expect(vm.hud.dangerFraction).toBeGreaterThanOrEqual(0);
-    expect(vm.hud.dangerFraction).toBeLessThanOrEqual(1);
   });
 
   it('advances the HUD tick in lockstep with the sim clock', () => {
