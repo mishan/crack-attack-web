@@ -20,7 +20,7 @@ import type { Rgb } from './loseBar.js';
 // Displayer.h:506-525.
 export const LOSEBAR_TEX_S = 128;
 export const LOSEBAR_TEX_T = 16;
-const TEX_EFFECTIVE_S = 128 - 2;
+const TEX_EFFECTIVE_S = LOSEBAR_TEX_S - 2;
 const ANTIALIAS = 4;
 const END_RATIO = (0.5 * LOSEBAR_TEX_T) / TEX_EFFECTIVE_S;
 const LIGHT_X = -1 / Math.sqrt(3);

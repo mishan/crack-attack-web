@@ -42,6 +42,9 @@ const el = (tag: string, style: Partial<CSSStyleDeclaration>): HTMLElement => {
   return node;
 };
 
+/** Numbers each star's gradient id, so no two stars on a page share one. */
+let starCount = 0;
+
 /** Points of a five-pointed star, point up, in a unit circle. */
 function starPoints(): string {
   const pts: string[] = [];
@@ -70,7 +73,7 @@ function winRecordStar(): SVGSVGElement {
 
   // A bright core fading to the star colour, like the reference's mote texture.
   const fill = document.createElementNS(NS, 'radialGradient');
-  fill.id = 'hud-star-fill';
+  fill.id = `hud-star-fill-${++starCount}`;
   for (const [offset, color] of [
     ['0', '#f4f4ff'],
     ['0.35', '#b8b8ec'],
@@ -85,7 +88,7 @@ function winRecordStar(): SVGSVGElement {
   defs.append(fill);
   const star = document.createElementNS(NS, 'polygon');
   star.setAttribute('points', starPoints());
-  star.setAttribute('fill', 'url(#hud-star-fill)');
+  star.setAttribute('fill', `url(#${fill.id})`);
   svg.append(defs, star);
 
   const still = globalThis.matchMedia?.('(prefers-reduced-motion: reduce)').matches ?? false;

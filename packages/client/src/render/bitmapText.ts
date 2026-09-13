@@ -63,6 +63,7 @@ export class BitmapLabel {
   private readonly shaded: boolean;
   /** One glyph cell, for shading glyphs one at a time (created on first use). */
   private scratch: HTMLCanvasElement | null = null;
+  private scratchCtx: CanvasRenderingContext2D | null = null;
 
   constructor(
     private readonly font: Font,
@@ -160,23 +161,37 @@ export class BitmapLabel {
    * keep their own gradients.
    */
   private drawShaded(ctx: CanvasRenderingContext2D, g: Placement, px: number): void {
-    if (!this.atlas) return;
     const f = this.font.cell;
     const size = Math.ceil(f * px);
-    this.scratch ??= document.createElement('canvas');
-    this.scratch.width = size; // also clears it
-    this.scratch.height = size;
-    const c = this.scratch.getContext('2d');
-    if (!c) return;
-    c.imageSmoothingEnabled = false;
+    const c = this.shadeCell(size);
+    if (!c || !this.atlas || !this.scratch) return;
+    c.globalCompositeOperation = 'source-over';
+    c.clearRect(0, 0, size, size);
     c.drawImage(this.atlas, g.index * f, 0, f, f, 0, 0, size, size);
     c.globalCompositeOperation = 'source-in';
-    const shade = c.createLinearGradient(0, size, size, 0);
-    shade.addColorStop(0, 'rgb(77, 77, 255)');
-    shade.addColorStop(0.5, 'rgb(128, 128, 255)');
-    shade.addColorStop(1, 'rgb(255, 255, 255)');
-    c.fillStyle = shade;
-    c.fillRect(0, 0, size, size);
+    c.fillRect(0, 0, size, size); // fillStyle is the gradient (shadeCell)
     ctx.drawImage(this.scratch, Math.round(g.x * px), 0);
+  }
+
+  /**
+   * The scratch cell's context, sized to `size` device px with the shading
+   * gradient as its fill. Resized (and the gradient rebuilt) only when the size
+   * changes, so redrawing a label doesn't reallocate per glyph.
+   */
+  private shadeCell(size: number): CanvasRenderingContext2D | null {
+    if (this.scratch?.width === size) return this.scratchCtx;
+    this.scratch ??= document.createElement('canvas');
+    this.scratch.width = size; // resets the context state, so set it up again
+    this.scratch.height = size;
+    this.scratchCtx = this.scratch.getContext('2d');
+    if (this.scratchCtx) {
+      this.scratchCtx.imageSmoothingEnabled = false;
+      const shade = this.scratchCtx.createLinearGradient(0, size, size, 0);
+      shade.addColorStop(0, 'rgb(77, 77, 255)');
+      shade.addColorStop(0.5, 'rgb(128, 128, 255)');
+      shade.addColorStop(1, 'rgb(255, 255, 255)');
+      this.scratchCtx.fillStyle = shade;
+    }
+    return this.scratchCtx;
   }
 }
