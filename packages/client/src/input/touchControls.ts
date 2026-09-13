@@ -14,6 +14,8 @@
  * DOM stub (`touchControls.test.ts`); Pointer Events unify touch and mouse.
  */
 
+import { markChrome } from '../render/chrome.js';
+
 /** The commands a control button can hold, as `KeyboardInput` codes. */
 export interface TouchControlSink {
   press(code: string): void;
@@ -134,7 +136,8 @@ export function mountTouchControls(sink: TouchControlSink): HTMLElement | null {
   root.className = 'touch-controls';
 
   // D-pad: one button per direction (no diagonals — the swapper ignores them).
-  const dpad = document.createElement('div');
+  // The button groups (not the full-width strip) are chrome boards frame around.
+  const dpad = markChrome(document.createElement('div'));
   dpad.className = 'touch-dpad';
   const hold =
     (code: string) =>
@@ -160,7 +163,7 @@ export function mountTouchControls(sink: TouchControlSink): HTMLElement | null {
 
   // Actions: Swap (Space), Raise (hold to keep rising), and Restart (if the
   // mode has one).
-  const actions = document.createElement('div');
+  const actions = markChrome(document.createElement('div'));
   actions.className = 'touch-actions';
   const swapHold = hold('Space');
   const raiseHold = hold('KeyX');

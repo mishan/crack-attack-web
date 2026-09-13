@@ -24,6 +24,7 @@ import {
 import { KeyboardInput } from './input/keyboard.js';
 import { mountTouchControls } from './input/touchControls.js';
 import { BoardView } from './render/boardView.js';
+import { fitBoards, markChrome } from './render/chrome.js';
 import { GarbageDecalView } from './render/garbageDecalView.js';
 import { HudView } from './render/hudView.js';
 import { LevelLightsView } from './render/levelLightsView.js';
@@ -49,6 +50,7 @@ export interface AiMatchHandle {
 /** Everything one rendered board needs. */
 interface Board {
   container: HTMLDivElement;
+  tag: HTMLDivElement;
   view: BoardView;
   interp: ViewInterpolator;
   signs: SignsView;
@@ -141,9 +143,9 @@ export function bootAiMatch(
 
     const tag = document.createElement('div');
     tag.textContent = label;
-    // Below the top-right audio controls, which would otherwise cover the right tag.
+    // `top` follows the board's framing (fitToWindow).
     tag.style.cssText =
-      'position:absolute;top:52px;left:0;right:0;text-align:center;z-index:2;pointer-events:none;' +
+      'position:absolute;left:0;right:0;text-align:center;z-index:2;pointer-events:none;' +
       'font:600 14px system-ui,sans-serif;letter-spacing:1px;color:#e7ebf3;text-transform:uppercase';
     container.appendChild(tag);
 
@@ -157,6 +159,7 @@ export function bootAiMatch(
     levelLights.reset(vm.hud.topEffectiveRow);
     return {
       container,
+      tag,
       view,
       interp,
       signs: new SignsView(view.scene, halfW, halfH),
@@ -205,13 +208,11 @@ export function bootAiMatch(
     audio.fadeoutMusic(3000);
   };
 
+  // First fit runs once the touch controls are up (below), so it frames around them.
   const fitToWindow = (): void => {
-    const w = globalThis.innerWidth / 2;
-    const h = globalThis.innerHeight;
-    boards[0].view.resize(w, h);
-    boards[1].view.resize(w, h);
+    fitBoards(boards);
+    for (const b of boards) b.tag.style.top = `${b.view.labelTop()}px`;
   };
-  fitToWindow();
   globalThis.addEventListener('resize', fitToWindow);
 
   const exitBtn = document.createElement('button');
@@ -219,7 +220,7 @@ export function bootAiMatch(
   exitBtn.style.cssText =
     'position:fixed;top:12px;right:12px;z-index:7;padding:6px 12px;opacity:.85';
   exitBtn.onclick = onExit;
-  document.body.appendChild(exitBtn);
+  document.body.appendChild(markChrome(exitBtn));
 
   // Appears once the match ends: download the game as a replay JSON (your
   // inputs + the seed; the AI regenerates deterministically). Feed it to
@@ -229,7 +230,7 @@ export function bootAiMatch(
   saveBtn.style.cssText =
     'position:fixed;top:52px;right:12px;z-index:7;padding:6px 12px;opacity:.85;display:none';
   saveBtn.onclick = saveReplay;
-  document.body.appendChild(saveBtn);
+  document.body.appendChild(markChrome(saveBtn));
 
   const onKeyDown = (e: KeyboardEvent): void => {
     if (e.code === 'KeyR') {
@@ -263,6 +264,7 @@ export function bootAiMatch(
     release: (code) => input.release(code),
     restart,
   });
+  fitToWindow();
 
   let lastMs = performance.now();
   const frame = (nowMs: number): void => {

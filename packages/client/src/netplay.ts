@@ -27,6 +27,7 @@ import {
 import { KeyboardInput } from './input/keyboard.js';
 import { mountTouchControls } from './input/touchControls.js';
 import { BoardView } from './render/boardView.js';
+import { fitBoards, markChrome } from './render/chrome.js';
 import { GarbageDecalView } from './render/garbageDecalView.js';
 import { HudView } from './render/hudView.js';
 import { LevelLightsView } from './render/levelLightsView.js';
@@ -89,6 +90,7 @@ interface BoardBundle {
   sparkles: SparklesView;
   /** Player name shown above the board, in the original bitmap font. */
   nameLabel: BitmapLabel;
+  nameBar: HTMLDivElement;
 }
 
 type Phase = NetplayPhase;
@@ -184,12 +186,12 @@ export function bootNetplay(
   const rosterEl = document.createElement('div');
   rosterEl.style.cssText =
     'position:fixed;bottom:12px;right:12px;z-index:5;font-size:12px;opacity:.7;display:none';
-  document.body.appendChild(rosterEl);
+  document.body.appendChild(markChrome(rosterEl));
   const titleEl = document.createElement('div');
   titleEl.style.cssText =
     // Below the action buttons (Stop watching sits at the top of that column).
     'position:fixed;top:52px;right:12px;z-index:5;font-size:13px;opacity:.85;display:none';
-  document.body.appendChild(titleEl);
+  document.body.appendChild(markChrome(titleEl));
   const showRoster = (names: string[]): void => {
     rosterEl.textContent = names.length ? `watching: ${names.join(', ')}` : '';
     rosterEl.style.display = names.length ? 'block' : 'none';
@@ -579,8 +581,8 @@ export function bootNetplay(
       const nameLabel = new BitmapLabel(FONT0, { height: 24, color: '#e7ebf3' });
       const nameBar = document.createElement('div');
       nameBar.style.cssText =
-        // Below the top-right audio controls, which would otherwise cover the right name.
-        'position:absolute;top:52px;left:0;right:0;display:flex;justify-content:center;' +
+        // `top` follows the board's framing (fitToWindow).
+        'position:absolute;left:0;right:0;display:flex;justify-content:center;' +
         'pointer-events:none;z-index:2';
       nameBar.append(nameLabel.element);
       container.append(nameBar);
@@ -595,6 +597,7 @@ export function bootNetplay(
         spring: new Spring(),
         sparkles: new SparklesView(view.scene, halfW, halfH),
         nameLabel,
+        nameBar,
       };
     };
     // Local board left, opponent right, regardless of player index.
@@ -603,10 +606,8 @@ export function bootNetplay(
 
   function fitToWindow(): void {
     if (!boards) return;
-    const w = globalThis.innerWidth / 2;
-    const h = globalThis.innerHeight;
-    boards[0].view.resize(w, h);
-    boards[1].view.resize(w, h);
+    fitBoards(boards);
+    for (const b of boards) b.nameBar.style.top = `${b.view.labelTop()}px`;
   }
   globalThis.addEventListener('resize', fitToWindow);
 
@@ -758,7 +759,9 @@ export function bootNetplay(
     release: (code) => input.release(code),
   });
   // Hidden until syncActions sees live play, so it never flashes over the lobby.
-  if (touch) touch.style.display = 'none';
+  // Hidden with `visibility`, not `display`, so it keeps its box: the boards
+  // stay framed clear of it and don't jump when it comes and goes.
+  if (touch) touch.style.visibility = 'hidden';
 
   // The in-match actions as buttons too (Concede / Rematch / Leave / Stop
   // watching), so mouse and touch players aren't stuck without the keys.
@@ -767,7 +770,7 @@ export function bootNetplay(
   actionBar.style.cssText =
     'position:fixed;top:12px;right:12px;z-index:7;display:flex;flex-direction:column;' +
     'align-items:flex-end;gap:8px';
-  document.body.appendChild(actionBar);
+  document.body.appendChild(markChrome(actionBar));
   const actionButton = (onClick: () => void): HTMLButtonElement => {
     const btn = document.createElement('button');
     btn.type = 'button';
@@ -824,8 +827,8 @@ export function bootNetplay(
     applyButton(leaveBtn, a.leave, 'Leave');
     applyButton(stopWatchingBtn, a.stopWatching, 'Stop watching');
     if (touch) {
-      const display = a.touchPad ? '' : 'none';
-      if (touch.style.display !== display) touch.style.display = display;
+      const visibility = a.touchPad ? '' : 'hidden';
+      if (touch.style.visibility !== visibility) touch.style.visibility = visibility;
       if (!a.touchPad) input.clear(); // don't leave a held direction behind
     }
   }

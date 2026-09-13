@@ -8,6 +8,7 @@
  */
 
 import type { AudioManager } from './audioManager.js';
+import { markChrome } from '../render/chrome.js';
 
 export interface AudioControlsHandle {
   /** Refresh the button glyph after a programmatic mute toggle (e.g. the M key). */
@@ -79,7 +80,7 @@ export function mountAudioControls(audio: AudioManager): AudioControlsHandle {
 
   wrap.appendChild(panel);
   wrap.appendChild(btn);
-  document.body.appendChild(wrap);
+  document.body.appendChild(markChrome(wrap));
 
   return {
     syncMuted,

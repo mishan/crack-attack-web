@@ -21,6 +21,7 @@ import { GC_STEPS_PER_SECOND, generateSeed, type AiDifficultyLevel } from '@crac
 import type { AttractOverlay } from './render/attractOverlay.js';
 import { TITLE_FADE_TICKS, TITLE_HOLD_TICKS, TITLE_RETURN_TICKS } from './view/attract.js';
 import { BoardView } from './render/boardView.js';
+import { fitBoards, markChrome } from './render/chrome.js';
 import { GarbageDecalView } from './render/garbageDecalView.js';
 import { LevelLightsView } from './render/levelLightsView.js';
 import { LoseBarView } from './render/loseBarView.js';
@@ -41,6 +42,8 @@ const MS_PER_TICK = 1000 / GC_STEPS_PER_SECOND;
 const MAX_SIGN_DT_TICKS = 10;
 /** Playback speeds the viewer cycles through (sim ticks per wall-clock tick). */
 const SPEEDS = [1, 2, 4] as const;
+/** Scoreboard line height, px (it's always two lines: tally, then match/clock). */
+const SCOREBOARD_LINE = 18;
 /** Wall ticks from a match's end to the next kickoff: the celebration (225) plus a beat. */
 const NEXT_MATCH_DELAY_TICKS = 350;
 
@@ -51,6 +54,7 @@ export interface AiDemoHandle {
 /** Everything one rendered board needs. */
 interface Board {
   container: HTMLDivElement;
+  tag: HTMLDivElement;
   view: BoardView;
   interp: ViewInterpolator;
   signs: SignsView;
@@ -116,9 +120,9 @@ export function bootAiDemo(
 
     const tag = document.createElement('div');
     tag.textContent = label;
-    // Below the top-right audio controls, which would otherwise cover the right tag.
+    // `top` follows the board's framing (fitToWindow).
     tag.style.cssText =
-      'position:absolute;top:52px;left:0;right:0;text-align:center;z-index:2;pointer-events:none;' +
+      'position:absolute;left:0;right:0;text-align:center;z-index:2;pointer-events:none;' +
       'font:600 14px system-ui,sans-serif;letter-spacing:1px;color:#e7ebf3;text-transform:uppercase';
     container.appendChild(tag);
 
@@ -132,6 +136,7 @@ export function bootAiDemo(
     levelLights.reset(vm.hud.topEffectiveRow);
     return {
       container,
+      tag,
       view,
       interp,
       signs: new SignsView(view.scene, halfW, halfH),
@@ -187,15 +192,6 @@ export function bootAiDemo(
     else audio.resumeMusic();
   };
 
-  const fitToWindow = (): void => {
-    const w = globalThis.innerWidth / 2;
-    const h = globalThis.innerHeight;
-    boards[0].view.resize(w, h);
-    boards[1].view.resize(w, h);
-  };
-  fitToWindow();
-  globalThis.addEventListener('resize', fitToWindow);
-
   // --- controls: a right-hand button column (works on touch) + keys ---------
   const buttons: HTMLButtonElement[] = [];
   const addButton = (text: string, onClick: () => void): HTMLButtonElement => {
@@ -203,7 +199,7 @@ export function bootAiDemo(
     btn.textContent = text;
     btn.style.cssText = `position:fixed;top:${12 + 40 * buttons.length}px;right:12px;z-index:7;padding:6px 12px;opacity:.85`;
     btn.onclick = onClick;
-    document.body.appendChild(btn);
+    document.body.appendChild(markChrome(btn));
     buttons.push(btn);
     return btn;
   };
@@ -228,9 +224,21 @@ export function bootAiDemo(
   const scoreboard = document.createElement('div');
   scoreboard.style.cssText =
     'position:fixed;top:36px;left:50%;transform:translateX(-50%);z-index:6;pointer-events:none;' +
-    'text-align:center;white-space:pre;font:600 14px system-ui,sans-serif;color:#e7ebf3;' +
-    'font-variant-numeric:tabular-nums;text-shadow:0 1px 3px #000';
+    `text-align:center;white-space:pre;font:600 14px/${SCOREBOARD_LINE}px system-ui,sans-serif;` +
+    'color:#e7ebf3;font-variant-numeric:tabular-nums;text-shadow:0 1px 3px #000';
   if (!attract) document.body.appendChild(scoreboard);
+
+  // Board name tags ride just above the boards; the (two-line) scoreboard sits
+  // above them — pushed down from its usual spot when the boards are (a narrow
+  // portrait screen frames them small, mid-screen), so it clears the chrome.
+  const fitToWindow = (): void => {
+    fitBoards(boards);
+    const labelTop = boards[0].view.labelTop();
+    for (const b of boards) b.tag.style.top = `${labelTop}px`;
+    scoreboard.style.top = `${Math.max(36, labelTop - 2 * SCOREBOARD_LINE - 8)}px`;
+  };
+  fitToWindow();
+  globalThis.addEventListener('resize', fitToWindow);
   let scoreText = '';
   const renderScoreboard = (): void => {
     const secs = Math.floor(match.ticks / GC_STEPS_PER_SECOND);
