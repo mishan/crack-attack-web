@@ -6,13 +6,14 @@
 import { readFileSync } from 'node:fs';
 import { request } from 'node:http';
 import { fileURLToPath } from 'node:url';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import WebSocket from 'ws';
 import type { SoloReplay } from '@crack-attack/core';
 import { PROTOCOL_VERSION, SOLO_SUBMIT_MAX_BYTES, encodeMessage } from '@crack-attack/protocol';
 import { createScoreboardApi } from './httpApi.js';
 import { SoloScoreboard } from './scoreboard.js';
 import { MemoryScoreStore } from './scoreStore.js';
+import { SoloVerifier } from './soloVerifier.js';
 import { startRelayWsServer, type RelayWsServer } from './wsServer.js';
 
 /** A real solo game (hard AI, seed 2026): 2757 ticks, score 48, top multiplier 3. */
@@ -100,9 +101,13 @@ describe('scoreboard HTTP API', () => {
     expect(await notFound.json()).toMatchObject({ error: 'not_found' });
     expect((await fetch(`${base}/`)).status).toBe(404);
 
-    const wrongMethod = await fetch(`${base}/api/solo/ticket`);
-    expect(wrongMethod.status).toBe(405);
-    expect(wrongMethod.headers.get('allow')).toContain('POST');
+    // Each route names its own methods.
+    const getTicket = await fetch(`${base}/api/solo/ticket`);
+    expect(getTicket.status).toBe(405);
+    expect(getTicket.headers.get('allow')).toBe('POST, OPTIONS');
+    const postScores = await post('/api/solo/scores', {});
+    expect(postScores.status).toBe(405);
+    expect(postScores.headers.get('allow')).toBe('GET, HEAD, OPTIONS');
 
     const badJson = await post('/api/solo/submit', '{not json');
     expect(badJson.status).toBe(400);
@@ -135,6 +140,11 @@ describe('scoreboard HTTP API', () => {
     expect(status).toBe(413);
   });
 
+  it('refuses a ticket request with a body over 1 KiB', async () => {
+    expect((await post('/api/solo/ticket', 'x'.repeat(2048))).status).toBe(413);
+    expect((await post('/api/solo/ticket', '{}')).status).toBe(200);
+  });
+
   it('rate-limits by the address the proxy reports', async () => {
     const via = (forwardedFor: string) =>
       post('/api/solo/ticket', undefined, { 'x-forwarded-for': forwardedFor });
@@ -143,7 +153,8 @@ describe('scoreboard HTTP API', () => {
     // Only the proxy's own (last) hop counts; a client-supplied first hop doesn't.
     const limited = await via('10.0.0.9, 198.51.100.1');
     expect(limited.status).toBe(429);
-    expect(limited.headers.get('retry-after')).toBe('10');
+    // When the limiter will have room again: one ticket per 60 s here.
+    expect(limited.headers.get('retry-after')).toBe('60');
     expect((await via('198.51.100.2')).status).toBe(200);
   });
 
@@ -161,5 +172,42 @@ describe('scoreboard HTTP API', () => {
     });
     ws.close();
     expect(welcome.name).toBe('misha');
+  });
+});
+
+describe('relay shutdown', () => {
+  it('lets a submission being verified finish before it closes', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    const verifier = new SoloVerifier({ sliceTicks: 100, yieldFn: () => gate });
+    const now = { t: Date.UTC(2026, 8, 13, 12) };
+    const scoreboard = new SoloScoreboard({
+      store: new MemoryScoreStore(),
+      verifier,
+      now: () => now.t,
+      newSeed: () => FIXTURE.seed,
+    });
+    const relay = await startRelayWsServer({
+      port: 0,
+      host: '127.0.0.1',
+      http: createScoreboardApi(scoreboard),
+    });
+    const api = `http://127.0.0.1:${relay.port}/api/solo`;
+    const ticket = await fetch(`${api}/ticket`, { method: 'POST' });
+    const { runId } = (await ticket.json()) as { runId: string };
+    now.t += FIXTURE.ticks * 20;
+
+    const submitting = fetch(`${api}/submit`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ runId, name: 'misha', replay: FIXTURE }),
+    });
+    await vi.waitFor(() => expect(verifier.queued).toBe(1));
+    const closing = relay.close();
+    release();
+    const res = await submitting;
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ score: 48 });
+    await closing;
   });
 });

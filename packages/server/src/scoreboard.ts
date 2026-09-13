@@ -48,6 +48,8 @@ export class ApiError extends Error {
     readonly status: number,
     readonly code: ScoreboardErrorCode,
     message: string,
+    /** Extra response headers, e.g. `Retry-After` or `Allow`. */
+    readonly headers: Readonly<Record<string, string>> = {},
   ) {
     super(message);
     this.name = 'ApiError';
@@ -65,6 +67,8 @@ export const DEFAULT_SUBMIT_LIMIT: RateLimit = { capacity: 20, refillMs: 20_000 
 
 /** Expired tickets are swept at most this often (when the next ticket is issued). */
 const PRUNE_EVERY_MS = 10 * 60 * 1000;
+/** `Retry-After` for a full verifier queue: a replay takes well under a second. */
+const BUSY_RETRY_SECONDS = 5;
 const MS_PER_TICK = 1000 / GC_STEPS_PER_SECOND;
 
 export interface SoloScoreboardOptions {
@@ -102,7 +106,7 @@ export class SoloScoreboard {
 
   /** Issue a run ticket to `client` (a rate-limit key). */
   async issueTicket(client: string): Promise<SoloTicketResponse> {
-    if (!this.ticketLimiter.take(client)) throw rateLimited();
+    if (!this.ticketLimiter.take(client)) throw rateLimited(this.ticketLimiter, client);
     const now = this.now();
     if (now - this.lastPrune >= PRUNE_EVERY_MS) {
       this.lastPrune = now;
@@ -128,7 +132,7 @@ export class SoloScoreboard {
    * returns its current standing, so a client can safely retry.
    */
   async submit(client: string, body: unknown): Promise<SoloSubmitResponse> {
-    if (!this.submitLimiter.take(client)) throw rateLimited();
+    if (!this.submitLimiter.take(client)) throw rateLimited(this.submitLimiter, client);
     let request: SoloSubmitRequest;
     try {
       request = decodeSoloSubmitRequest(body);
@@ -155,7 +159,8 @@ export class SoloScoreboard {
       return new ApiError(status, code, message);
     };
     const now = this.now();
-    if (now - ticket.issuedAt > SOLO_TICKET_TTL_MS) {
+    // `>=`: the advertised `expiresAt` (issuedAt + TTL) is itself too late.
+    if (now - ticket.issuedAt >= SOLO_TICKET_TTL_MS) {
       throw await reject(409, 'expired_run', "this run's ticket has expired");
     }
     if (ticket.simVersion !== SIM_VERSION) {
@@ -174,7 +179,9 @@ export class SoloScoreboard {
     } catch (err) {
       // Busy leaves the ticket intact, so the client can retry.
       if (err instanceof VerifierBusyError) {
-        throw new ApiError(503, 'busy', 'the server is busy; try again shortly');
+        throw new ApiError(503, 'busy', 'the server is busy; try again shortly', {
+          'Retry-After': String(BUSY_RETRY_SECONDS),
+        });
       }
       if (err instanceof SoloReplayError) throw await reject(422, 'invalid_replay', err.message);
       throw err;
@@ -262,8 +269,12 @@ export class SoloScoreboard {
   }
 }
 
-function rateLimited(): ApiError {
-  return new ApiError(429, 'rate_limited', 'too many requests; slow down');
+/** A 429 saying when `client` may try again, from the limiter that refused it. */
+function rateLimited(limiter: RateLimiter, client: string): ApiError {
+  const seconds = Math.max(1, Math.ceil(limiter.waitMs(client) / 1000));
+  return new ApiError(429, 'rate_limited', 'too many requests; slow down', {
+    'Retry-After': String(seconds),
+  });
 }
 
 function oneOf<T extends string>(value: string, allowed: readonly T[], field: string): T {

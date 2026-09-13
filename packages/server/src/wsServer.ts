@@ -46,6 +46,9 @@ export const DEFAULT_PORT = 8080;
  */
 export const MAX_CLIENT_MESSAGE_BYTES = 16 * 1024;
 
+/** How long `close()` lets HTTP requests in flight finish before cutting them. */
+export const CLOSE_GRACE_MS = 10_000;
+
 const notFound: RequestListener = (_req, res) => {
   res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
   res.end('not found\n');
@@ -121,9 +124,16 @@ export function startRelayWsServer(options: RelayWsServerOptions = {}): Promise<
             relay.shutdown();
             for (const client of wss.clients) client.terminate();
             wss.close();
-            server.close((err) => (err ? rej(err) : res()));
-            // Idle keep-alive HTTP connections would otherwise hold close() open.
-            server.closeAllConnections();
+            // Let requests in flight (a replay being verified) finish before the
+            // caller closes the store; drop idle keep-alives, which would hold
+            // close() open, and cut any request still going after a grace period.
+            const force = setTimeout(() => server.closeAllConnections(), CLOSE_GRACE_MS);
+            server.close((err) => {
+              clearTimeout(force);
+              if (err) rej(err);
+              else res();
+            });
+            server.closeIdleConnections();
           }),
       });
     });

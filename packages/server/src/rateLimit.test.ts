@@ -26,6 +26,31 @@ describe('RateLimiter', () => {
     now = 1000;
     expect(limiter.take('a')).toBe(true);
   });
+
+  it('says how long until the next request', () => {
+    let now = 0;
+    const limiter = new RateLimiter({ capacity: 1, refillMs: 20_000 }, () => now);
+    expect(limiter.waitMs('a')).toBe(0); // never seen: may go now
+    limiter.take('a');
+    expect(limiter.waitMs('a')).toBe(20_000);
+    now += 5_000;
+    expect(limiter.waitMs('a')).toBe(15_000);
+    now += 15_000;
+    expect(limiter.waitMs('a')).toBe(0);
+  });
+
+  it('tracks a bounded number of clients, forgetting the least recently seen', () => {
+    const limiter = new RateLimiter({ capacity: 1, refillMs: 60_000 }, () => 0, 2);
+    expect(limiter.take('a')).toBe(true);
+    expect(limiter.take('b')).toBe(true);
+    expect(limiter.take('a')).toBe(false); // spent, and now the most recent
+    expect(limiter.take('c')).toBe(true); // evicts b, the least recent
+    expect(limiter.take('a')).toBe(false); // still remembered, still spent
+    expect(limiter.take('b')).toBe(true); // forgotten, so it starts afresh
+    // However many new clients arrive, it never grows past the cap.
+    for (let i = 0; i < 1000; i++) limiter.take(`2001:db8:${i}::/64`);
+    expect(limiter.size).toBe(2);
+  });
 });
 
 describe('clientKey', () => {

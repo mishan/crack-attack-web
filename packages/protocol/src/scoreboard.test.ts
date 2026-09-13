@@ -13,21 +13,24 @@ describe('normalizeScoreName', () => {
   it.each([
     ['  Misha  ', 'Misha'],
     ['a \t\n  b', 'a b'],
-    ['Mi​sha', 'Misha'], // zero-width space (format)
-    ['‮evil', 'evil'], // right-to-left override (format)
-    ['bell', 'bell'], // control
-    ['x', 'x'], // private use
-    ['é', 'é'], // composed (NFC)
-    ['x́̂̃̄', 'x́̂'], // stacked marks capped at two
+    ['Mi\u200bsha', 'Misha'], // zero-width space (format)
+    ['\u202eevil', 'evil'], // right-to-left override (format)
+    ['\u0007bell', 'bell'], // control
+    ['\ue000x', 'x'], // private use
+    ['e\u0301', 'é'], // composed (NFC)
+    ['x\u0301\u0302\u0303\u0304', 'x\u0301\u0302'], // stacked marks capped at two
     ['a'.repeat(20), 'a'.repeat(16)],
     ['\u{1f600}'.repeat(20), '\u{1f600}'.repeat(16)], // counted in code points
   ])('cleans %j to %j', (raw, name) => {
     expect(normalizeScoreName(raw)).toBe(name);
   });
 
-  it.each([[''], ['   '], ['​​'], ['a'.repeat(SCORE_NAME_MAX_INPUT + 1)]])('rejects %j', (raw) => {
-    expect(normalizeScoreName(raw)).toBeNull();
-  });
+  it.each([[''], ['   '], ['\u200b\u200b'], ['a'.repeat(SCORE_NAME_MAX_INPUT + 1)]])(
+    'rejects %j',
+    (raw) => {
+      expect(normalizeScoreName(raw)).toBeNull();
+    },
+  );
 });
 
 describe('isRunId', () => {

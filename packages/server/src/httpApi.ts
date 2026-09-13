@@ -9,6 +9,9 @@ import { SOLO_API_PREFIX, SOLO_SUBMIT_MAX_BYTES } from '@crack-attack/protocol';
 import { clientKey } from './rateLimit.js';
 import { ApiError, type SoloScoreboard } from './scoreboard.js';
 
+/** A ticket request needs no body; anything past this much is refused unread. */
+const TICKET_MAX_BODY_BYTES = 1024;
+
 export interface ScoreboardApiOptions {
   /**
    * Take the client's address from the last `X-Forwarded-For` hop — the one
@@ -57,7 +60,7 @@ async function handle(
 
     if (route === '/ticket') {
       allow(req, 'POST');
-      req.resume(); // no body expected; drain whatever came
+      await readBody(req, TICKET_MAX_BODY_BYTES); // none expected; a bounded read keeps it that way
       send(res, 200, await scoreboard.issueTicket(client));
     } else if (route === '/submit') {
       allow(req, 'POST');
@@ -73,7 +76,7 @@ async function handle(
     }
   } catch (err) {
     if (err instanceof ApiError) {
-      send(res, err.status, err.body());
+      send(res, err.status, err.body(), 'no-store', err.headers);
     } else {
       console.error('scoreboard: request failed:', err);
       send(res, 500, { error: 'internal', message: 'internal error' });
@@ -81,9 +84,12 @@ async function handle(
   }
 }
 
+/** Refuse any method but the route's own (GET routes take HEAD too), saying which are allowed. */
 function allow(req: IncomingMessage, method: 'GET' | 'POST'): void {
   if (req.method !== method && !(method === 'GET' && req.method === 'HEAD')) {
-    throw new ApiError(405, 'method_not_allowed', `use ${method}`);
+    throw new ApiError(405, 'method_not_allowed', `use ${method}`, {
+      Allow: method === 'GET' ? 'GET, HEAD, OPTIONS' : 'POST, OPTIONS',
+    });
   }
 }
 
@@ -98,11 +104,22 @@ function clientAddress(req: IncomingMessage, trustProxy: boolean): string {
 }
 
 /** Read a JSON body of at most SOLO_SUBMIT_MAX_BYTES. */
-function readJson(req: IncomingMessage): Promise<unknown> {
+async function readJson(req: IncomingMessage): Promise<unknown> {
+  const body = await readBody(req, SOLO_SUBMIT_MAX_BYTES);
+  try {
+    return JSON.parse(body.toString('utf8'));
+  } catch {
+    throw new ApiError(400, 'bad_request', 'the body is not valid JSON');
+  }
+}
+
+/** Read a body of at most `maxBytes`; a larger one is refused (413) without reading the rest. */
+function readBody(req: IncomingMessage, maxBytes: number): Promise<Buffer> {
+  // The rest is left unread, so close the connection rather than drain it.
   const tooLarge = () =>
-    new ApiError(413, 'too_large', `the body is over ${SOLO_SUBMIT_MAX_BYTES} bytes`);
+    new ApiError(413, 'too_large', `the body is over ${maxBytes} bytes`, { Connection: 'close' });
   return new Promise((resolve, reject) => {
-    if (Number(req.headers['content-length']) > SOLO_SUBMIT_MAX_BYTES) {
+    if (Number(req.headers['content-length']) > maxBytes) {
       reject(tooLarge());
       return;
     }
@@ -112,7 +129,7 @@ function readJson(req: IncomingMessage): Promise<unknown> {
     req.on('data', (chunk: Buffer) => {
       if (failed) return;
       size += chunk.length;
-      if (size > SOLO_SUBMIT_MAX_BYTES) {
+      if (size > maxBytes) {
         failed = true;
         reject(tooLarge());
         return;
@@ -120,28 +137,25 @@ function readJson(req: IncomingMessage): Promise<unknown> {
       chunks.push(chunk);
     });
     req.on('end', () => {
-      if (failed) return;
-      try {
-        resolve(JSON.parse(Buffer.concat(chunks).toString('utf8')));
-      } catch {
-        reject(new ApiError(400, 'bad_request', 'the body is not valid JSON'));
-      }
+      if (!failed) resolve(Buffer.concat(chunks));
     });
     req.on('error', reject);
   });
 }
 
-function send(res: ServerResponse, status: number, body: unknown, cache = 'no-store'): void {
+function send(
+  res: ServerResponse,
+  status: number,
+  body: unknown,
+  cache = 'no-store',
+  extra: Readonly<Record<string, string>> = {},
+): void {
   const text = JSON.stringify(body);
-  const headers: Record<string, string | number> = {
+  res.writeHead(status, {
     'Content-Type': 'application/json; charset=utf-8',
     'Content-Length': Buffer.byteLength(text),
     'Cache-Control': cache,
-  };
-  if (status === 405) headers['Allow'] = 'GET, POST, OPTIONS';
-  if (status === 429 || status === 503) headers['Retry-After'] = '10';
-  // An oversized body is left unread; close rather than drain it.
-  if (status === 413) headers['Connection'] = 'close';
-  res.writeHead(status, headers);
+    ...extra,
+  });
   res.end(text);
 }

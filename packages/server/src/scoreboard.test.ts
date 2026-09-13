@@ -97,6 +97,7 @@ describe('SoloScoreboard tickets', () => {
     await expect(board.issueTicket(CLIENT)).rejects.toMatchObject({
       status: 429,
       code: 'rate_limited',
+      headers: { 'Retry-After': '1' }, // one ticket back per second here
     });
     await board.issueTicket('198.51.100.1'); // another client is unaffected
     clock.now += 1000;
@@ -124,7 +125,7 @@ describe('SoloScoreboard submissions', () => {
   it('cleans up the name', async () => {
     const s = setup();
     const runId = await playRun(s);
-    const res = await s.board.submit(CLIENT, submission(runId, { name: '  Mi​sha  ' }));
+    const res = await s.board.submit(CLIENT, submission(runId, { name: '  Mi\u200bsha  ' }));
     expect(res.name).toBe('Misha');
   });
 
@@ -158,10 +159,11 @@ describe('SoloScoreboard submissions', () => {
     });
   });
 
-  it('rejects an expired ticket', async () => {
+  it('rejects an expired ticket, from its advertised expiry on', async () => {
     const s = setup();
-    const { runId } = await s.board.issueTicket(CLIENT);
-    s.clock.now += SOLO_TICKET_TTL_MS + 1;
+    const { runId, expiresAt } = await s.board.issueTicket(CLIENT);
+    s.clock.now = expiresAt;
+    expect(expiresAt - T0).toBe(SOLO_TICKET_TTL_MS);
     await expect(s.board.submit(CLIENT, submission(runId))).rejects.toMatchObject({
       status: 409,
       code: 'expired_run',
@@ -213,11 +215,23 @@ describe('SoloScoreboard submissions', () => {
     expect((await s.board.submit(CLIENT, submission(runId))).score).toBe(48);
   });
 
+  it('rejects a command past 32 bits, which a mask test alone would let through', async () => {
+    const s = setup();
+    const runId = await playRun(s);
+    // 2**32 + c truncates to c under bitwise operators: a valid-looking mask.
+    const [first, ...rest] = FIXTURE.inputs;
+    const replay = { ...FIXTURE, inputs: [[first![0], 2 ** 32 + first![1]], ...rest] };
+    await expect(s.board.submit(CLIENT, submission(runId, { replay }))).rejects.toMatchObject({
+      status: 422,
+      code: 'invalid_replay',
+    });
+  });
+
   it.each([
     ['a non-object', [1, 2], 'bad_request'],
     ['a missing run id', { name: 'x', replay: FIXTURE }, 'bad_request'],
     ['a malformed run id', { runId: 'nope', name: 'x', replay: FIXTURE }, 'bad_request'],
-    ['a blank name', { runId: rid(1), name: ' ​ ', replay: FIXTURE }, 'bad_name'],
+    ['a blank name', { runId: rid(1), name: ' \u200b ', replay: FIXTURE }, 'bad_name'],
   ])('rejects %s', async (_label, body, code) => {
     const s = setup();
     await expect(s.board.submit(CLIENT, body)).rejects.toMatchObject({ status: 400, code });
@@ -236,6 +250,7 @@ describe('SoloScoreboard submissions', () => {
     await expect(s.board.submit(CLIENT, submission(b.runId))).rejects.toMatchObject({
       status: 503,
       code: 'busy',
+      headers: { 'Retry-After': '5' },
     });
     release();
     await first;
@@ -250,6 +265,7 @@ describe('SoloScoreboard submissions', () => {
     await expect(s.board.submit(CLIENT, {})).rejects.toMatchObject({
       status: 429,
       code: 'rate_limited',
+      headers: { 'Retry-After': '60' }, // this limiter's refill, not a fixed guess
     });
   });
 });

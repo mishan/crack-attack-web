@@ -6,7 +6,7 @@ async function storeWithRuns(): Promise<MemoryScoreStore> {
   const store = new MemoryScoreStore();
   for (const [n, name] of [
     [1, 'misha'],
-    [2, 'bob[31m'],
+    [2, 'bob\u001b[31m'],
   ] as const) {
     const runId = String(n).padStart(32, '0');
     await store.addTicket({ runId, seed: 1, simVersion: 1, issuedAt: 0 });

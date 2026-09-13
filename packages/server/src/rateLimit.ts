@@ -9,16 +9,32 @@ export interface RateLimit {
   refillMs: number;
 }
 
-/** Past this many tracked clients, refilled buckets are dropped before adding another. */
-const SWEEP_AT = 10_000;
+/**
+ * Clients tracked at most. Past it, the least recently seen is forgotten (it
+ * starts afresh if it comes back), so memory stays bounded however many
+ * addresses (IPv6 /64s, say) a client cycles through.
+ */
+export const MAX_TRACKED_CLIENTS = 10_000;
+
+interface Bucket {
+  tokens: number;
+  at: number;
+}
 
 export class RateLimiter {
-  private readonly buckets = new Map<string, { tokens: number; at: number }>();
+  /** Least to most recently seen: every take moves its key to the end. */
+  private readonly buckets = new Map<string, Bucket>();
 
   constructor(
     private readonly limit: RateLimit,
     private readonly now: () => number,
+    private readonly maxTracked = MAX_TRACKED_CLIENTS,
   ) {}
+
+  /** Clients currently tracked. */
+  get size(): number {
+    return this.buckets.size;
+  }
 
   /** Spend one request for `key`; false if it has none left. */
   take(key: string): boolean {
@@ -27,27 +43,32 @@ export class RateLimiter {
     if (bucket) {
       bucket.tokens = this.refilled(bucket, now);
       bucket.at = now;
+      this.buckets.delete(key); // re-inserted below, as the most recent
     } else {
-      if (this.buckets.size >= SWEEP_AT) this.sweep(now);
       bucket = { tokens: this.limit.capacity, at: now };
-      this.buckets.set(key, bucket);
+      if (this.buckets.size >= this.maxTracked) {
+        const oldest = this.buckets.keys().next();
+        if (!oldest.done) this.buckets.delete(oldest.value);
+      }
     }
+    this.buckets.set(key, bucket);
     if (bucket.tokens < 1) return false;
     bucket.tokens -= 1;
     return true;
   }
 
-  private refilled(bucket: { tokens: number; at: number }, now: number): number {
+  /** Milliseconds until `key` may make another request (0 if it may now). */
+  waitMs(key: string): number {
+    const bucket = this.buckets.get(key);
+    if (!bucket) return 0;
+    const tokens = this.refilled(bucket, this.now());
+    return tokens >= 1 ? 0 : Math.ceil((1 - tokens) * this.limit.refillMs);
+  }
+
+  private refilled(bucket: Bucket, now: number): number {
     // max(0, …): a wall clock stepped backwards mustn't drain the bucket.
     const earned = Math.max(0, now - bucket.at) / this.limit.refillMs;
     return Math.min(this.limit.capacity, bucket.tokens + earned);
-  }
-
-  /** Forget clients whose buckets are full again; they'd start full anyway. */
-  private sweep(now: number): void {
-    for (const [key, bucket] of this.buckets) {
-      if (this.refilled(bucket, now) >= this.limit.capacity) this.buckets.delete(key);
-    }
   }
 }
 
