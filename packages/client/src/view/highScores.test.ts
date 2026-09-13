@@ -34,6 +34,10 @@ describe('entryCells', () => {
     expect(entryCells(entry)).toHaveLength(HIGH_SCORE_COLUMNS.length);
   });
 
+  it('isolates the name column only (right-to-left names)', () => {
+    expect(HIGH_SCORE_COLUMNS.filter((c) => c.isolate).map((c) => c.label)).toEqual(['Name']);
+  });
+
   it('shows a dash for a run without a chain', () => {
     expect(entryCells({ ...entry, topMultiplier: 0 })[3]).toBe('—');
     expect(entryCells({ ...entry, topMultiplier: 1 })[3]).toBe('—');

@@ -29,7 +29,7 @@ import {
   type AiDifficultyLevel,
   type SoloReplay,
 } from '@crack-attack/core';
-import { normalizeScoreName, type SoloTicketResponse } from '@crack-attack/protocol';
+import { normalizeScoreName } from '@crack-attack/protocol';
 import { pickAiDifficulty } from './render/aiDifficultyPicker.js';
 import { pickAiMatchup } from './render/aiMatchupPicker.js';
 import { AttractOverlay } from './render/attractOverlay.js';
@@ -65,20 +65,24 @@ import {
   loadMultRecords,
   loadPlayerName,
   loadRankedPlay,
+  loadScoreNameConfirmed,
   loadScoreRecords,
   saveMultRecords,
   savePlayerName,
   saveRankedPlay,
+  saveScoreNameConfirmed,
   saveScoreRecords,
 } from './score/scoreStore.js';
 import { createRankedServices, type RankedServices } from './score/rankedServices.js';
-import { promptScoreName } from './render/namePrompt.js';
+import type { HeldTicket } from './score/ticketPool.js';
+import { namePromptOpen, promptScoreName } from './render/namePrompt.js';
 import {
   NOT_SUBMITTED_LINE,
   RETRY_LINE,
   VERIFYING_LINE,
   rejectionLine,
   runTag,
+  scoreNameWithoutPrompt,
   standingLine,
   type RunKind,
 } from './view/ranked.js';
@@ -361,7 +365,7 @@ function bootSolo(
   // --- ranked play (docs/SCOREBOARD_PLAN.md) -------------------------------
   let rankedOn = loadRankedPlay();
   /** The current run: what kind it is, and its ticket while it's ranked. */
-  let run: { kind: RunKind; ticket: SoloTicketResponse | null } = {
+  let run: { kind: RunKind; ticket: HeldTicket | null } = {
     kind: 'practice',
     ticket: null,
   };
@@ -383,7 +387,7 @@ function bootSolo(
     }
     const got = ranked ? ranked.tickets.take() : ({ reason: 'offline' } as const);
     if ('ticket' in got) {
-      run = { kind: 'ranked', ticket: got.ticket };
+      run = { kind: 'ranked', ticket: got };
       return got.ticket.seed;
     }
     run = { kind: got.reason, ticket: null };
@@ -466,13 +470,14 @@ function bootSolo(
   });
 
   /** Queue a finished ranked run for the scoreboard, asking for a name the first time. */
-  const submitRanked = (ticket: SoloTicketResponse, replay: SoloReplay): void => {
+  const submitRanked = (held: HeldTicket, replay: SoloReplay): void => {
     if (!ranked) return;
+    const { ticket } = held;
     const game = gameNo;
     const send = (name: string): void => {
       ranked.outbox.add({
         request: { runId: ticket.runId, name, replay },
-        expiresAt: ticket.expiresAt,
+        expiresAt: held.expiresAt,
       });
       if (game === gameNo) {
         awaitingRunId = ticket.runId;
@@ -480,20 +485,24 @@ function bootSolo(
       }
       ranked.flush();
     };
-    // A saved name (maybe from the lobby, which only checks length) must
-    // survive the scoreboard's cleanup; if nothing usable is left, ask.
-    const saved = hasPlayerName() ? normalizeScoreName(loadPlayerName()) : null;
-    if (saved !== null) {
-      send(saved);
+    // Until the player has confirmed a name in the prompt (which says the
+    // boards are public, and offers "Don't submit"), ask, even if the lobby
+    // saved one: it only prefills the prompt. After that, runs go straight in.
+    const saved = hasPlayerName() ? loadPlayerName() : null;
+    const name = scoreNameWithoutPrompt(saved, loadScoreNameConfirmed());
+    if (name !== null) {
+      send(name);
       return;
     }
-    void promptScoreName().then((name) => {
-      if (name === null) {
+    const prefill = saved === null ? '' : (normalizeScoreName(saved) ?? '');
+    void promptScoreName(prefill).then((chosen) => {
+      if (chosen === null) {
         if (game === gameNo) hud?.setRunLine(NOT_SUBMITTED_LINE);
         return;
       }
-      savePlayerName(name);
-      send(name);
+      savePlayerName(chosen);
+      saveScoreNameConfirmed();
+      send(chosen);
     });
   };
 
@@ -661,9 +670,10 @@ function bootSolo(
 
   const onKeyDown = (e: KeyboardEvent): void => {
     // Keys typed into the name prompt, or pressing its buttons (Space), are
-    // the dialog's, not the game's.
+    // the dialog's, not the game's; while it's open, nothing reaches the game
+    // (not R, which would start a game under it), wherever focus has gone.
     const inDialog = e.target instanceof Element && e.target.closest('[role="dialog"]') !== null;
-    if (isTypingTarget(e.target) || inDialog) return;
+    if (isTypingTarget(e.target) || inDialog || namePromptOpen()) return;
     if (e.code === 'KeyR') {
       restart();
       return;

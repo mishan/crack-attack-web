@@ -91,13 +91,15 @@ export class AttractOverlay {
     for (const row of rows) {
       const line = document.createElement('div');
       line.style.cssText = 'display:grid;grid-template-columns:2.5em 10em 5em;gap:10px';
-      for (const [text, align] of [
-        [`${row.rank}.`, 'right'],
-        [row.name, 'left'],
-        [String(row.score), 'right'],
+      for (const [text, align, isName] of [
+        [`${row.rank}.`, 'right', false],
+        [row.name, 'left', true],
+        [String(row.score), 'right', false],
       ] as const) {
         const cell = document.createElement('span');
         cell.textContent = text;
+        // Isolate the player's name, so a right-to-left one can't reorder the row.
+        if (isName) cell.dir = 'auto';
         cell.style.cssText = `text-align:${align};overflow:hidden;text-overflow:ellipsis;white-space:nowrap`;
         line.append(cell);
       }

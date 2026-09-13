@@ -7,7 +7,7 @@
 
 import { Outbox, type StorageLike } from './outbox.js';
 import { ScoreboardClient, scoreboardUrlFor } from './scoreboardApi.js';
-import { rememberOwnRun } from './scoreStore.js';
+import { loadRankedPlay, rememberOwnRun } from './scoreStore.js';
 import { TicketPool } from './ticketPool.js';
 
 export interface RankedServices {
@@ -28,9 +28,17 @@ export function createRankedServices(relayUrl: string): RankedServices | null {
   outbox.listen((_runId, outcome) => {
     if (outcome.ok) rememberOwnRun(outcome.response.id);
   });
+  // With ranked play off, the pool's expiry timer leaves the network alone.
+  const tickets = new TicketPool(() => client.ticket(), { wanted: loadRankedPlay });
+  // A tab left in the background (or a laptop waking up) may hold a ticket
+  // that has since aged out, and its timer may have run late: top up on return.
+  // Both live as long as the page, like the pool.
+  globalThis.document?.addEventListener('visibilitychange', () => {
+    if (!document.hidden && loadRankedPlay()) tickets.refill();
+  });
   return {
     client,
-    tickets: new TicketPool(() => client.ticket()),
+    tickets,
     outbox,
     flush: () => {
       void outbox.flush((request) => client.submit(request));

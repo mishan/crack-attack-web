@@ -88,9 +88,11 @@ export function bootHighScores(
         row.title = 'your run';
       }
       entryCells(entry).forEach((text, i) => {
+        const col = HIGH_SCORE_COLUMNS[i]!;
         const cell = row.insertCell();
         cell.textContent = text;
-        cell.style.cssText = `text-align:${HIGH_SCORE_COLUMNS[i]!.align};padding:5px 8px;border-bottom:1px solid #1a1f29;white-space:nowrap`;
+        if (col.isolate) cell.dir = 'auto';
+        cell.style.cssText = `text-align:${col.align};padding:5px 8px;border-bottom:1px solid #1a1f29;white-space:nowrap`;
       });
     }
   };

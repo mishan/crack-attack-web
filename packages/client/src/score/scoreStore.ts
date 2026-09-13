@@ -21,6 +21,7 @@ const SCORES_KEY = 'crack-attack.scores';
 const MULTS_KEY = 'crack-attack.mults';
 /** Shared with netplay's identity (netplay.ts STORAGE_NAME). */
 const NAME_KEY = 'crack-attack.name';
+const SCORE_NAME_CONFIRMED_KEY = 'crack-attack.scoreNameConfirmed';
 const RANKED_KEY = 'crack-attack.ranked';
 const OWN_RUNS_KEY = 'crack-attack.myRuns';
 /** Own run ids remembered at most; past it, the oldest are forgotten. */
@@ -103,6 +104,27 @@ export function savePlayerName(name: string): void {
     localStorage.setItem(NAME_KEY, name);
   } catch {
     /* storage unavailable — the name is asked for again next time */
+  }
+}
+
+/**
+ * Whether the player has confirmed their name for the public boards (in the
+ * name prompt). A name saved in the lobby alone doesn't count: the first
+ * ranked run still asks, prefilled with it.
+ */
+export function loadScoreNameConfirmed(): boolean {
+  try {
+    return localStorage.getItem(SCORE_NAME_CONFIRMED_KEY) === '1';
+  } catch {
+    return false;
+  }
+}
+
+export function saveScoreNameConfirmed(): void {
+  try {
+    localStorage.setItem(SCORE_NAME_CONFIRMED_KEY, '1');
+  } catch {
+    /* storage unavailable — the prompt shows again next time */
   }
 }
 

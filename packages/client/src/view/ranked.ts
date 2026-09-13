@@ -4,7 +4,7 @@
  * has been submitted.
  */
 
-import type { SoloSubmitResponse } from '@crack-attack/protocol';
+import { normalizeScoreName, type SoloSubmitResponse } from '@crack-attack/protocol';
 import type { ScoreboardFailure } from '../score/scoreboardApi.js';
 
 /**
@@ -31,6 +31,17 @@ export function runTag(kind: RunKind): string {
 export const VERIFYING_LINE = 'Verifying…';
 export const RETRY_LINE = 'Saved — will submit when the scoreboard is back';
 export const NOT_SUBMITTED_LINE = 'Not submitted';
+
+/**
+ * The name a finished ranked run is submitted under without asking, or null
+ * to show the name prompt first. That's only once the player has confirmed a
+ * name in the prompt (which says the boards are public): a name saved in the
+ * lobby alone just prefills it. A saved name that doesn't survive the
+ * scoreboard's cleanup (the lobby only checks its length) asks again too.
+ */
+export function scoreNameWithoutPrompt(saved: string | null, confirmed: boolean): string | null {
+  return confirmed && saved !== null ? normalizeScoreName(saved) : null;
+}
 
 /** A verified run's places, one per line: "#12 of 340 this month", "#85 of 2000 all time". */
 export function standingLine(res: SoloSubmitResponse): string {

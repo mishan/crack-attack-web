@@ -1,13 +1,34 @@
 /**
  * namePrompt.ts — asks for a name the first time a ranked run is submitted
- * (the boards are public). Resolves to the cleaned-up name, or null if the
- * player chose not to submit the run. There's no dismiss-by-Escape or backdrop
- * click: dropping a finished run takes the explicit "Don't submit".
+ * (the boards are public), prefilled with any name saved in the lobby.
+ * Resolves to the cleaned-up name, or null if the player chose not to submit
+ * the run. There's no dismiss-by-Escape or backdrop click: dropping a finished
+ * run takes the explicit "Don't submit". Only one prompt is ever open: asking
+ * again while it is gets the same answer.
  */
 
-import { SCORE_NAME_MAX_LENGTH, normalizeScoreName } from '@crack-attack/protocol';
+import {
+  SCORE_NAME_MAX_INPUT,
+  SCORE_NAME_MAX_LENGTH,
+  normalizeScoreName,
+} from '@crack-attack/protocol';
 
-export function promptScoreName(): Promise<string | null> {
+/** The open prompt's answer, while one is open. */
+let open: Promise<string | null> | null = null;
+
+/** Whether the prompt is open (the game should leave keys alone). */
+export function namePromptOpen(): boolean {
+  return open !== null;
+}
+
+export function promptScoreName(prefill = ''): Promise<string | null> {
+  open ??= showPrompt(prefill).finally(() => {
+    open = null;
+  });
+  return open;
+}
+
+function showPrompt(prefill: string): Promise<string | null> {
   return new Promise((resolve) => {
     const overlay = document.createElement('div');
     overlay.style.cssText =
@@ -29,10 +50,14 @@ export function promptScoreName(): Promise<string | null> {
 
     const input = document.createElement('input');
     input.type = 'text';
+    input.value = prefill;
+    // A right-to-left name reads (and edits) in its own direction.
+    input.dir = 'auto';
     input.setAttribute('autocomplete', 'nickname');
     input.placeholder = 'name';
-    // Emoji take two UTF-16 units; the cleanup trims to SCORE_NAME_MAX_LENGTH characters.
-    input.maxLength = SCORE_NAME_MAX_LENGTH * 2;
+    // An emoji or flag takes several UTF-16 units: allow what the server reads,
+    // and let the cleanup trim to SCORE_NAME_MAX_LENGTH characters.
+    input.maxLength = SCORE_NAME_MAX_INPUT;
     input.setAttribute('aria-labelledby', 'score-name-title');
     input.setAttribute('aria-describedby', 'score-name-hint');
     input.style.cssText = 'padding:8px 10px;font-size:15px';
@@ -57,9 +82,9 @@ export function promptScoreName(): Promise<string | null> {
     // Focus management, as the other modals: remember the opener, keep Tab
     // inside the dialog, and give focus back on close.
     const opener = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const focusable = [input, skip, submit];
     const onKeyDown = (e: KeyboardEvent): void => {
       if (e.key !== 'Tab') return;
-      const focusable = [input, skip, submit];
       const i = focusable.indexOf(document.activeElement as HTMLInputElement | HTMLButtonElement);
       if (e.shiftKey && i === 0) {
         e.preventDefault();
@@ -70,6 +95,11 @@ export function promptScoreName(): Promise<string | null> {
       }
     };
     document.addEventListener('keydown', onKeyDown);
+    // A click on the backdrop or the panel's text would otherwise move focus
+    // out to the page, where keys would reach the game again.
+    overlay.addEventListener('mousedown', (e) => {
+      if (!focusable.some((el) => el.contains(e.target as Node))) e.preventDefault();
+    });
 
     const finish = (name: string | null): void => {
       document.removeEventListener('keydown', onKeyDown);
@@ -93,5 +123,6 @@ export function promptScoreName(): Promise<string | null> {
     overlay.append(panel);
     document.body.appendChild(overlay);
     input.focus();
+    input.select();
   });
 }

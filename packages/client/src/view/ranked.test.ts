@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { SoloSubmitResponse } from '@crack-attack/protocol';
-import { rejectionLine, runTag, standingLine } from './ranked.js';
+import { rejectionLine, runTag, scoreNameWithoutPrompt, standingLine } from './ranked.js';
 
 const submitted = (standing: SoloSubmitResponse['standing']): SoloSubmitResponse => ({
   id: 1,
@@ -41,5 +41,21 @@ describe('rejectionLine', () => {
     expect(rejectionLine('too_fast')).toBe('Not ranked: submitted too soon');
     expect(rejectionLine('stale_version')).toBe('Not ranked: the game was updated — reload');
     expect(rejectionLine('bad_request')).toBe('Not ranked: the scoreboard refused it');
+  });
+});
+
+describe('scoreNameWithoutPrompt', () => {
+  it('asks until a name has been confirmed, even with a lobby name saved', () => {
+    expect(scoreNameWithoutPrompt(null, false)).toBeNull();
+    expect(scoreNameWithoutPrompt('misha', false)).toBeNull();
+  });
+
+  it('submits under the confirmed name, cleaned up', () => {
+    expect(scoreNameWithoutPrompt('  misha   n ', true)).toBe('misha n');
+  });
+
+  it('asks again if the saved name is gone or unusable', () => {
+    expect(scoreNameWithoutPrompt(null, true)).toBeNull();
+    expect(scoreNameWithoutPrompt('x'.repeat(100), true)).toBeNull();
   });
 });

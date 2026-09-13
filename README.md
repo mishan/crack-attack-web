@@ -79,6 +79,8 @@ Solo runs can also compete on the online high-score boards the relay hosts
 - With **Ranked: on** (the default), each game starts from a server-issued
   seed. At game over the run is submitted, then verified and ranked by the
   server.
+- The first ranked game over asks for the name shown on the boards
+  (prefilled with your lobby name), or lets you skip submitting that run.
 - The HUD shows `RANKED`, `PRACTICE`, or why a run is unranked, then the run's
   monthly and all-time place.
 - Pausing a ranked run hides the board.

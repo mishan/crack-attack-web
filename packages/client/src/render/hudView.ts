@@ -158,7 +158,14 @@ export class HudView {
       whiteSpace: 'nowrap',
     });
     // Solo's ranked-run line: RANKED / PRACTICE while playing, the result after.
-    this.run = el('div', { fontSize: '12px', minHeight: '14px', whiteSpace: 'pre-line' });
+    // Hidden until setRunLine is first called, so other modes' HUDs (and the
+    // board framing around them) don't gain an empty row.
+    this.run = el('div', {
+      display: 'none',
+      fontSize: '12px',
+      minHeight: '14px',
+      whiteSpace: 'pre-line',
+    });
     root.append(starPair, clockPair, this.status, this.run);
     container.append(root);
   }
@@ -194,6 +201,8 @@ export class HudView {
 
   /** Show the ranked-run line (see `view/ranked.ts`); `tone` colours it. */
   setRunLine(text: string, tone: 'normal' | 'good' | 'bad' = 'normal'): void {
+    // Shown from now on, even blank, so its row doesn't come and go.
+    this.run.style.display = 'block';
     this.run.textContent = text;
     this.run.style.color = tone === 'good' ? '#8fe39a' : tone === 'bad' ? '#ff8f8f' : '#d7dce5';
   }

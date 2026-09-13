@@ -25,13 +25,17 @@ export function periodQuery(
   };
 }
 
+/**
+ * The board's columns. `isolate` marks player-supplied text, which is shown
+ * with `dir="auto"` so a right-to-left name can't reorder the rest of the row.
+ */
 export const HIGH_SCORE_COLUMNS = [
-  { label: '#', align: 'right' },
-  { label: 'Name', align: 'left' },
-  { label: 'Score', align: 'right' },
-  { label: 'Chain', align: 'right' },
-  { label: 'Time', align: 'right' },
-  { label: 'Date', align: 'right' },
+  { label: '#', align: 'right', isolate: false },
+  { label: 'Name', align: 'left', isolate: true },
+  { label: 'Score', align: 'right', isolate: false },
+  { label: 'Chain', align: 'right', isolate: false },
+  { label: 'Time', align: 'right', isolate: false },
+  { label: 'Date', align: 'right', isolate: false },
 ] as const;
 
 /** A board row's cells, in {@link HIGH_SCORE_COLUMNS} order. */
