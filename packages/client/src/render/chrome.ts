@@ -9,7 +9,7 @@
  * overlays (the audio controls, say, outlive every screen).
  */
 
-import type { Rect } from '../view/cameraFit.js';
+import { type Rect, frameBoards } from '../view/cameraFit.js';
 import type { BoardView } from './boardView.js';
 
 /** Flag `el` as chrome that boards should avoid. Returns `el` for chaining. */
@@ -20,16 +20,27 @@ export function markChrome<T extends HTMLElement>(el: T): T {
 
 /**
  * Size each board's view to its container, framed clear of all visible chrome.
- * Boards shown together share one framing (chrome over either one moves both),
- * so side-by-side boards always match.
+ * Boards shown together share a size and height (chrome over either one moves
+ * both), so side-by-side boards always match; each may slide sideways alone.
  */
 export function fitBoards(
   boards: ReadonlyArray<{ container: HTMLElement; view: BoardView }>,
 ): void {
-  const chrome = boards.flatMap((b) => chromeRects(b.container));
-  for (const b of boards) {
-    b.view.resize(b.container.clientWidth, b.container.clientHeight, chrome);
-  }
+  if (boards.length === 0) return;
+  const viewports = boards.map((b) => ({
+    width: b.container.clientWidth,
+    height: b.container.clientHeight,
+    chrome: chromeRects(b.container),
+  }));
+  const frames = frameBoards(boards[0]!.view.fit, viewports);
+  boards.forEach((b, i) => b.view.resize(viewports[i]!.width, viewports[i]!.height, frames[i]));
+}
+
+/** Pin a label's top-centre to its board's label anchor ({@link BoardView.labelAnchor}). */
+export function placeLabel(label: HTMLElement, view: BoardView): void {
+  const { x, y } = view.labelAnchor();
+  label.style.left = `${x}px`;
+  label.style.top = `${y}px`;
 }
 
 /**

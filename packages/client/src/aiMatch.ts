@@ -24,7 +24,7 @@ import {
 import { KeyboardInput } from './input/keyboard.js';
 import { mountTouchControls } from './input/touchControls.js';
 import { BoardView } from './render/boardView.js';
-import { fitBoards, markChrome } from './render/chrome.js';
+import { fitBoards, markChrome, placeLabel } from './render/chrome.js';
 import { GarbageDecalView } from './render/garbageDecalView.js';
 import { HudView } from './render/hudView.js';
 import { LevelLightsView } from './render/levelLightsView.js';
@@ -143,9 +143,9 @@ export function bootAiMatch(
 
     const tag = document.createElement('div');
     tag.textContent = label;
-    // `top` follows the board's framing (fitToWindow).
+    // Pinned over the board by fitToWindow, so it follows the board's framing.
     tag.style.cssText =
-      'position:absolute;left:0;right:0;text-align:center;z-index:2;pointer-events:none;' +
+      'position:absolute;transform:translateX(-50%);white-space:nowrap;z-index:2;pointer-events:none;' +
       'font:600 14px system-ui,sans-serif;letter-spacing:1px;color:#e7ebf3;text-transform:uppercase';
     container.appendChild(tag);
 
@@ -211,7 +211,7 @@ export function bootAiMatch(
   // First fit runs once the touch controls are up (below), so it frames around them.
   const fitToWindow = (): void => {
     fitBoards(boards);
-    for (const b of boards) b.tag.style.top = `${b.view.labelTop()}px`;
+    for (const b of boards) placeLabel(b.tag, b.view);
   };
   globalThis.addEventListener('resize', fitToWindow);
 

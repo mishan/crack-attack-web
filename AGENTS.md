@@ -573,11 +573,12 @@ A generator header that a real, non-AI tool always writes (e.g. a lockfile's own
       pad's button groups) are marked with `markChrome` (`render/chrome.ts`);
       each screen's resize handler hands their measured rects to the board
       views via `fitBoards`, and the pure, unit-tested `view/cameraFit.ts`
-      `frameBoard` slides/shrinks the board out from under any that would
-      cover it (side-by-side boards share one framing). A piece of chrome is
-      left overlapping only if avoiding it would leave under half the height
-      (landscape phones' touch pad). Name tags and the demo scoreboard follow
-      the framing (`BoardView.labelTop`). **New fixed overlays should call
+      `frameBoards` finds the largest board, nearest its centred spot, that
+      no chrome covers — sliding sideways where there's room (a landscape
+      phone's corner touch pad), else shrinking and sliding vertically (a
+      portrait phone's HUD and pad). Side-by-side boards share a size and
+      height; each slides sideways alone. Name tags and the demo scoreboard
+      follow the framing (`BoardView.labelAnchor`, `placeLabel`). **New fixed overlays should call
       `markChrome`** so boards keep clear of them.
 - [ ] Phase 6 stretch (X-mode, replays, WebRTC, binary codec if
       measurements demand it)

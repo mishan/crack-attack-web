@@ -21,7 +21,7 @@ import { GC_STEPS_PER_SECOND, generateSeed, type AiDifficultyLevel } from '@crac
 import type { AttractOverlay } from './render/attractOverlay.js';
 import { TITLE_FADE_TICKS, TITLE_HOLD_TICKS, TITLE_RETURN_TICKS } from './view/attract.js';
 import { BoardView } from './render/boardView.js';
-import { fitBoards, markChrome } from './render/chrome.js';
+import { fitBoards, markChrome, placeLabel } from './render/chrome.js';
 import { GarbageDecalView } from './render/garbageDecalView.js';
 import { LevelLightsView } from './render/levelLightsView.js';
 import { LoseBarView } from './render/loseBarView.js';
@@ -120,9 +120,9 @@ export function bootAiDemo(
 
     const tag = document.createElement('div');
     tag.textContent = label;
-    // `top` follows the board's framing (fitToWindow).
+    // Pinned over the board by fitToWindow, so it follows the board's framing.
     tag.style.cssText =
-      'position:absolute;left:0;right:0;text-align:center;z-index:2;pointer-events:none;' +
+      'position:absolute;transform:translateX(-50%);white-space:nowrap;z-index:2;pointer-events:none;' +
       'font:600 14px system-ui,sans-serif;letter-spacing:1px;color:#e7ebf3;text-transform:uppercase';
     container.appendChild(tag);
 
@@ -233,8 +233,8 @@ export function bootAiDemo(
   // portrait screen frames them small, mid-screen), so it clears the chrome.
   const fitToWindow = (): void => {
     fitBoards(boards);
-    const labelTop = boards[0].view.labelTop();
-    for (const b of boards) b.tag.style.top = `${labelTop}px`;
+    for (const b of boards) placeLabel(b.tag, b.view);
+    const labelTop = boards[0].view.labelAnchor().y;
     scoreboard.style.top = `${Math.max(36, labelTop - 2 * SCOREBOARD_LINE - 8)}px`;
   };
   fitToWindow();

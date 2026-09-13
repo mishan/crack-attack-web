@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import { type BoardFit, type Rect, fitCameraDistance, frameBoard } from './cameraFit.js';
+import {
+  type BoardFit,
+  type Rect,
+  fitCameraDistance,
+  frameBoard,
+  frameBoards,
+} from './cameraFit.js';
 
 /** Half-width of the frame at the board plane for a camera `d` away. */
 function halfWidthAt(d: number, fovDeg: number, aspect: number): number {
@@ -10,6 +16,11 @@ const FIT: BoardFit = { baseDistance: 18, fovDeg: 48, halfExtentX: 4, halfExtent
 
 function overlaps(a: Rect, b: Rect): boolean {
   return a.left < b.right && b.left < a.right && a.top < b.bottom && b.top < a.bottom;
+}
+
+function within(r: Rect, width: number, height: number): boolean {
+  const e = 1e-9;
+  return r.left >= -e && r.top >= -e && r.right <= width + e && r.bottom <= height + e;
 }
 
 describe('fitCameraDistance', () => {
@@ -41,7 +52,6 @@ describe('frameBoard', () => {
   it('with no chrome, is the plain width fit, centred', () => {
     const f = frameBoard(FIT, 427, 952);
     expect(f.distance).toBe(fitCameraDistance(18, 48, 427 / 952, 4));
-    expect(f.shiftPx).toBe(0);
     expect((f.rect.top + f.rect.bottom) / 2).toBeCloseTo(476, 6);
     expect(f.rect.right - f.rect.left).toBeCloseTo(427, 6); // width-limited: fills it
   });
@@ -52,44 +62,67 @@ describe('frameBoard', () => {
     expect(frameBoard(FIT, 1280, 800, [hud])).toEqual(plain);
   });
 
-  it('slides the board up and out from under bottom touch controls', () => {
+  it('moves the board up and out from under bottom touch controls', () => {
     const pad = { left: 18, top: 740, right: 210, bottom: 928 };
     const f = frameBoard(FIT, 427, 952, [pad]);
-    expect(f.shiftPx).toBeGreaterThan(0);
     expect(overlaps(f.rect, pad)).toBe(false);
-    expect(f.rect.top).toBeGreaterThanOrEqual(-1e-9);
+    expect(within(f.rect, 427, 952)).toBe(true);
   });
 
-  it('fits between top and bottom chrome', () => {
+  it('shrinks to fit between top and bottom chrome', () => {
     const hud = { left: 12, top: 12, right: 150, bottom: 144 };
     const pad = { left: 18, top: 740, right: 210, bottom: 928 };
     const f = frameBoard(FIT, 427, 952, [hud, pad]);
-    expect(f.rect.top).toBeGreaterThanOrEqual(144 - 1e-9);
-    expect(f.rect.bottom).toBeLessThanOrEqual(740 + 1e-9);
+    expect(overlaps(f.rect, hud)).toBe(false);
+    expect(overlaps(f.rect, pad)).toBe(false);
+    expect(within(f.rect, 427, 952)).toBe(true);
     expect(f.distance).toBeGreaterThan(frameBoard(FIT, 427, 952).distance);
   });
 
-  it('re-checks after sliding, so it does not slide into other chrome', () => {
-    const plain = frameBoard(FIT, 427, 952).rect;
-    // Clear of the plain framing, but in the way once the pad pushes it up.
-    const hud = { left: 0, top: 0, right: 427, bottom: plain.top - 1 };
-    const pad = { left: 0, top: plain.bottom - 60, right: 427, bottom: 952 };
-    const f = frameBoard(FIT, 427, 952, [hud, pad]);
-    expect(overlaps(f.rect, hud)).toBe(false);
-    expect(overlaps(f.rect, pad)).toBe(false);
+  it('slides sideways at full size where there is room (landscape corner pad)', () => {
+    const plain = frameBoard(FIT, 952, 427);
+    // A corner pad over the plain board's lower-left.
+    const pad = { left: 18, top: 200, right: plain.rect.left + 60, bottom: 410 };
+    const f = frameBoard(FIT, 952, 427, [pad]);
+    expect(f.distance).toBe(plain.distance);
+    expect(f.rect.top).toBe(plain.rect.top);
+    expect(f.rect.left).toBeCloseTo(pad.right, 6);
   });
 
-  it('leaves chrome overlapping when avoiding it would leave too little room', () => {
-    // A landscape phone: a tall pad over most of the height.
-    const pad = { left: 0, top: 150, right: 952, bottom: 427 };
-    expect(frameBoard(FIT, 952, 427, [pad])).toEqual(frameBoard(FIT, 952, 427));
+  it('keeps the plain framing when no big-enough board fits clear', () => {
+    const wall = { left: 0, top: 0, right: 952, bottom: 427 };
+    expect(frameBoard(FIT, 952, 427, [wall])).toEqual(frameBoard(FIT, 952, 427));
+  });
+});
+
+describe('frameBoards', () => {
+  it('gives side-by-side boards one size and height, sliding each sideways', () => {
+    // Landscape phone halves: a d-pad at the left board's lower-left, action
+    // buttons at the right board's lower-right.
+    const plain = frameBoard(FIT, 476, 427);
+    const pad = { left: 18, top: 220, right: plain.rect.left + 40, bottom: 410 };
+    const actions = { left: plain.rect.right - 40, top: 220, right: 460, bottom: 410 };
+    const [l, r] = frameBoards(FIT, [
+      { width: 476, height: 427, chrome: [pad] },
+      { width: 476, height: 427, chrome: [actions] },
+    ]);
+    expect(l!.distance).toBe(r!.distance);
+    expect(l!.rect.top).toBe(r!.rect.top);
+    expect(overlaps(l!.rect, pad)).toBe(false);
+    expect(overlaps(r!.rect, actions)).toBe(false);
+    expect(l!.rect.left).toBeGreaterThan(plain.rect.left); // slid right
+    expect(r!.rect.left).toBeLessThan(plain.rect.left); // slid left
   });
 
-  it('still avoids small chrome when a big piece has to be left overlapping', () => {
-    const audio = { left: 0, top: 12, right: 952, bottom: 44 };
-    const pad = { left: 0, top: 150, right: 952, bottom: 427 };
-    const f = frameBoard(FIT, 952, 427, [pad, audio]);
-    expect(f.rect.top).toBeGreaterThanOrEqual(44 - 1e-9);
-    expect(overlaps(f.rect, pad)).toBe(true);
+  it('moves both boards down together for chrome over just one', () => {
+    const plain = frameBoard(FIT, 640, 800);
+    const audio = { left: 275, top: 12, right: 470, bottom: plain.rect.top + 2 };
+    const [l, r] = frameBoards(FIT, [
+      { width: 640, height: 800, chrome: [] },
+      { width: 640, height: 800, chrome: [audio] },
+    ]);
+    expect(overlaps(r!.rect, audio)).toBe(false);
+    expect(l!.rect.top).toBe(r!.rect.top);
+    expect(l!.rect.top).toBeGreaterThan(plain.rect.top);
   });
 });

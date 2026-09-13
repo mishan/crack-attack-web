@@ -9,9 +9,10 @@
  * base framing, so wide (desktop) viewports frame exactly as before.
  *
  * Screen chrome (HUD, buttons, on-screen touch controls) can also cover the
- * board. {@link frameBoard} takes the chrome's rectangles and, only when one
- * actually overlaps the framed board, shrinks and slides the board into the
- * band of the viewport the chrome leaves free.
+ * board. {@link frameBoards} takes the chrome's rectangles and finds the largest
+ * board, nearest its centred spot, that none of them covers: it slides sideways
+ * where there's room (a landscape phone's corner touch pad), else shrinks and
+ * slides vertically (a portrait phone's HUD above and pad below).
  */
 
 /** A screen-space rectangle, in CSS px relative to the board's viewport. */
@@ -33,25 +34,27 @@ export interface BoardFit {
   halfExtentY: number;
 }
 
+/** One board's viewport and the chrome over it, in its own CSS px. */
+export interface BoardViewport {
+  width: number;
+  height: number;
+  chrome: readonly Rect[];
+}
+
 export interface BoardFrame {
   /** Camera distance from the board. */
   distance: number;
   /**
-   * How far up the board is slid, in px, to centre it in the free band (for
-   * `PerspectiveCamera.setViewOffset`; the viewing angle is unchanged).
+   * Where the board's extents land in its viewport. The camera slides the image
+   * (not itself) to put them there, so the viewing angle never changes.
    */
-  shiftPx: number;
-  /** Where the board's extents land on screen. */
   rect: Rect;
 }
 
-/**
- * Chrome that would leave less than this share of the viewport's height free
- * would shrink the board too far to play, so it's left overlapping instead.
- */
-const MIN_FREE_BAND = 0.5;
-/** Re-checks after sliding the board, in case it slid into other chrome. */
-const MAX_PASSES = 4;
+/** The smallest board, relative to its plain framing, worth shrinking to avoid chrome. */
+const MIN_SCALE = 0.5;
+/** Board sizes tried between the plain framing and MIN_SCALE, largest first. */
+const SCALE_STEPS = 25;
 
 /**
  * The camera distance that keeps `halfExtentX` world units either side of the
@@ -73,60 +76,84 @@ function overlaps(a: Rect, b: Rect): boolean {
 }
 
 /**
- * Frame a board in a `width` × `height` viewport, clear of any `obstacles` that
- * would otherwise cover it. Obstacles in the top half push the board down; those
- * in the bottom half push it up.
+ * Where a span of `size` may start within `[0, limit]`: centred, or flush
+ * against one of `edges` — nearest the centre first.
  */
+function candidates(size: number, limit: number, edges: readonly number[]): number[] {
+  const centre = (limit - size) / 2;
+  if (size >= limit) return [centre];
+  const clamped = [centre, ...edges].map((p) => Math.min(Math.max(p, 0), limit - size));
+  return [...new Set(clamped)].sort((a, b) => Math.abs(a - centre) - Math.abs(b - centre));
+}
+
+/**
+ * Frame boards shown together, each clear of the chrome over its viewport.
+ * They share one size and vertical position, so side-by-side boards always
+ * match; each slides sideways on its own. When no board of at least MIN_SCALE
+ * fits clear of the chrome, the boards keep their plain, centred framing.
+ */
+export function frameBoards(fit: BoardFit, viewports: readonly BoardViewport[]): BoardFrame[] {
+  const tanHalfFov = Math.tan((fit.fovDeg * Math.PI) / 360);
+  const heightOf = (v: BoardViewport): number => Math.max(1, v.height);
+  const plain = Math.max(
+    ...viewports.map((v) =>
+      fitCameraDistance(fit.baseDistance, fit.fovDeg, v.width / heightOf(v), fit.halfExtentX),
+    ),
+  );
+  const sizeAt = (v: BoardViewport, distance: number): [number, number] => {
+    const pxPerUnit = heightOf(v) / (2 * distance * tanHalfFov);
+    return [2 * fit.halfExtentX * pxPerUnit, 2 * fit.halfExtentY * pxPerUnit];
+  };
+  const rectAt = (x: number, y: number, w: number, h: number): Rect => ({
+    left: x,
+    top: y,
+    right: x + w,
+    bottom: y + h,
+  });
+
+  const placeAll = (distance: number): BoardFrame[] | null => {
+    const [, h] = sizeAt(viewports[0]!, distance);
+    const allChrome = viewports.flatMap((v) => v.chrome);
+    const ys = candidates(
+      h,
+      heightOf(viewports[0]!),
+      allChrome.flatMap((o) => [o.bottom, o.top - h]),
+    );
+    for (const y of ys) {
+      const frames: BoardFrame[] = [];
+      for (const v of viewports) {
+        const [w, bh] = sizeAt(v, distance);
+        const xs = candidates(
+          w,
+          v.width,
+          v.chrome.flatMap((o) => [o.right, o.left - w]),
+        );
+        const x = xs.find((cx) => !v.chrome.some((o) => overlaps(o, rectAt(cx, y, w, bh))));
+        if (x === undefined) break;
+        frames.push({ distance, rect: rectAt(x, y, w, bh) });
+      }
+      if (frames.length === viewports.length) return frames;
+    }
+    return null;
+  };
+
+  for (let i = 0; i <= SCALE_STEPS; i++) {
+    const scale = 1 - ((1 - MIN_SCALE) * i) / SCALE_STEPS;
+    const frames = placeAll(plain / scale);
+    if (frames) return frames;
+  }
+  return viewports.map((v) => {
+    const [w, h] = sizeAt(v, plain);
+    return { distance: plain, rect: rectAt((v.width - w) / 2, (heightOf(v) - h) / 2, w, h) };
+  });
+}
+
+/** {@link frameBoards} for a board shown on its own. */
 export function frameBoard(
   fit: BoardFit,
   width: number,
   height: number,
-  obstacles: readonly Rect[] = [],
+  chrome: readonly Rect[] = [],
 ): BoardFrame {
-  const h = Math.max(1, height);
-  const tanHalfFov = Math.tan((fit.fovDeg * Math.PI) / 360);
-  const place = (distance: number, shiftPx: number): BoardFrame => {
-    const pxPerUnit = h / (2 * distance * tanHalfFov);
-    const cx = width / 2;
-    const cy = h / 2 - shiftPx;
-    const rect = {
-      left: cx - fit.halfExtentX * pxPerUnit,
-      right: cx + fit.halfExtentX * pxPerUnit,
-      top: cy - fit.halfExtentY * pxPerUnit,
-      bottom: cy + fit.halfExtentY * pxPerUnit,
-    };
-    return { distance, shiftPx, rect };
-  };
-
-  const plain = place(
-    fitCameraDistance(fit.baseDistance, fit.fovDeg, width / h, fit.halfExtentX),
-    0,
-  );
-  let frame = plain;
-  let topInset = 0;
-  let bottomInset = 0;
-  const ignored = new Set<Rect>();
-  const intrusion = (o: Rect): number => (o.top + o.bottom < h ? o.bottom : h - o.top);
-  for (let pass = 0; pass < MAX_PASSES; pass++) {
-    const hits = obstacles.filter((o) => !ignored.has(o) && overlaps(o, frame.rect));
-    if (hits.length === 0) break;
-    // Least intrusive first, so small chrome is still avoided when a big piece
-    // (landscape touch controls) has to be left overlapping.
-    hits.sort((a, b) => intrusion(a) - intrusion(b));
-    for (const o of hits) {
-      const fromTop = o.top + o.bottom < h;
-      const nextTop = fromTop ? Math.max(topInset, o.bottom) : topInset;
-      const nextBottom = fromTop ? bottomInset : Math.max(bottomInset, h - o.top);
-      if (h - nextTop - nextBottom < h * MIN_FREE_BAND) {
-        ignored.add(o);
-      } else {
-        topInset = nextTop;
-        bottomInset = nextBottom;
-      }
-    }
-    const free = h - topInset - bottomInset;
-    const heightFit = (fit.halfExtentY * h) / (free * tanHalfFov);
-    frame = place(Math.max(plain.distance, heightFit), (bottomInset - topInset) / 2);
-  }
-  return frame;
+  return frameBoards(fit, [{ width, height, chrome }])[0]!;
 }

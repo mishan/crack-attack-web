@@ -49,7 +49,7 @@ import type { BoardViewModel } from '../view/boardViewModel.js';
 import { dyingPose } from '../view/dyingAnim.js';
 import { blockColor, garbageColor } from './palette.js';
 import { swapperCursorGeometry } from './cursorGeometry.js';
-import { type BoardFit, frameBoard, type Rect } from '../view/cameraFit.js';
+import { type BoardFit, type BoardFrame, frameBoard } from '../view/cameraFit.js';
 
 const CELL = 1;
 const BLOCK_SIZE = 0.92;
@@ -125,10 +125,11 @@ export class BoardView {
   private readonly halfH: number;
   private readonly fog: Fog;
   /** The board's extents + base camera framing, for fitting it to a viewport. */
-  private readonly fit: BoardFit;
+  readonly fit: BoardFit;
   /** The camera's offset at the base framing; a narrower viewport scales it back. */
   private readonly cameraOffset = new Vector3();
   private readonly labelPoint = new Vector3();
+  private viewWidth = 1;
   private viewHeight = 1;
   /**
    * The play-floor clip plane. Faithful to the original's
@@ -540,11 +541,11 @@ export class BoardView {
    * Match the renderer + camera to a new viewport size. A viewport too narrow
    * for the board (a portrait phone) dollies the camera back so the whole board
    * still fits; fog and the far plane move with it so the framing looks the same.
-   * `chrome` (see `chrome.ts`) is overlay rectangles, relative to the canvas,
-   * that the board is slid/shrunk out from under when they'd cover it.
+   * `frame` places the board clear of on-screen chrome (see `fitBoards` in
+   * `chrome.ts`); by default it's centred.
    */
-  resize(width: number, height: number, chrome: readonly Rect[] = []): void {
-    const frame = frameBoard(this.fit, width, height, chrome);
+  resize(width: number, height: number, frame?: BoardFrame): void {
+    frame ??= frameBoard(this.fit, width, height);
     const base = this.fit.baseDistance;
     const extra = frame.distance - base;
     this.camera.position.copy(this.cameraOffset).multiplyScalar(frame.distance / base);
@@ -554,24 +555,32 @@ export class BoardView {
     this.fog.near = FOG_NEAR + extra;
     this.fog.far = FOG_FAR + extra;
     this.camera.aspect = width / Math.max(1, height);
-    // Slide the image, not the camera, so the viewing angle stays the same.
-    if (frame.shiftPx !== 0) {
-      this.camera.setViewOffset(width, height, 0, frame.shiftPx, width, height);
+    // Slide the image, not the camera, so the viewing angle stays the same: the
+    // board centre (the origin, at the image centre) moves to the frame's.
+    const offX = width / 2 - (frame.rect.left + frame.rect.right) / 2;
+    const offY = height / 2 - (frame.rect.top + frame.rect.bottom) / 2;
+    if (offX !== 0 || offY !== 0) {
+      this.camera.setViewOffset(width, height, offX, offY, width, height);
     } else {
       this.camera.clearViewOffset();
     }
     this.camera.updateProjectionMatrix();
     this.renderer.setSize(width, height);
+    this.viewWidth = width;
     this.viewHeight = height;
   }
 
   /**
-   * Where a name label over this board goes: CSS px from the canvas top, just
-   * above the top level light. Follows the board's framing (call after resize).
+   * Where a name label over this board goes: its top-centre, in CSS px from the
+   * canvas's top-left, just above the top level light. Follows the board's
+   * framing (call after resize).
    */
-  labelTop(): number {
+  labelAnchor(): { x: number; y: number } {
     this.labelPoint.set(0, this.halfH + LABEL_ABOVE, 0).project(this.camera);
-    return ((1 - this.labelPoint.y) / 2) * this.viewHeight;
+    return {
+      x: ((1 + this.labelPoint.x) / 2) * this.viewWidth,
+      y: ((1 - this.labelPoint.y) / 2) * this.viewHeight,
+    };
   }
 
   /**

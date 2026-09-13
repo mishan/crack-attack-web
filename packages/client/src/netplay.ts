@@ -27,7 +27,7 @@ import {
 import { KeyboardInput } from './input/keyboard.js';
 import { mountTouchControls } from './input/touchControls.js';
 import { BoardView } from './render/boardView.js';
-import { fitBoards, markChrome } from './render/chrome.js';
+import { fitBoards, markChrome, placeLabel } from './render/chrome.js';
 import { GarbageDecalView } from './render/garbageDecalView.js';
 import { HudView } from './render/hudView.js';
 import { LevelLightsView } from './render/levelLightsView.js';
@@ -581,8 +581,8 @@ export function bootNetplay(
       const nameLabel = new BitmapLabel(FONT0, { height: 24, color: '#e7ebf3' });
       const nameBar = document.createElement('div');
       nameBar.style.cssText =
-        // `top` follows the board's framing (fitToWindow).
-        'position:absolute;left:0;right:0;display:flex;justify-content:center;' +
+        // Pinned over the board by fitToWindow, so it follows the board's framing.
+        'position:absolute;transform:translateX(-50%);display:flex;' +
         'pointer-events:none;z-index:2';
       nameBar.append(nameLabel.element);
       container.append(nameBar);
@@ -607,7 +607,7 @@ export function bootNetplay(
   function fitToWindow(): void {
     if (!boards) return;
     fitBoards(boards);
-    for (const b of boards) b.nameBar.style.top = `${b.view.labelTop()}px`;
+    for (const b of boards) placeLabel(b.nameBar, b.view);
   }
   globalThis.addEventListener('resize', fitToWindow);
 
