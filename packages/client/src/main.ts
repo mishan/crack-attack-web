@@ -29,7 +29,7 @@ import {
   type AiDifficultyLevel,
   type SoloReplay,
 } from '@crack-attack/core';
-import type { SoloTicketResponse } from '@crack-attack/protocol';
+import { normalizeScoreName, type SoloTicketResponse } from '@crack-attack/protocol';
 import { pickAiDifficulty } from './render/aiDifficultyPicker.js';
 import { pickAiMatchup } from './render/aiMatchupPicker.js';
 import { AttractOverlay } from './render/attractOverlay.js';
@@ -153,10 +153,11 @@ function boot(): void {
 
   // Ranked solo play: the scoreboard lives on the relay's host. Fetch the first
   // run ticket now, so it's in hand by the time a game starts, and send any
-  // run left waiting from an earlier visit.
+  // run left waiting from an earlier visit. With ranked play off, nothing
+  // touches the network; waiting runs keep until it's turned back on.
   const ranked = createRankedServices(relayUrl);
-  if (ranked) {
-    if (loadRankedPlay()) ranked.tickets.refill();
+  if (ranked && loadRankedPlay()) {
+    ranked.tickets.refill();
     ranked.flush();
   }
 
@@ -268,11 +269,14 @@ function boot(): void {
       attract.dispose();
     };
     current = { dispose: teardown }; // until the demo lands
-    // The title card doubles as the high-score table: this month's best runs.
-    void ranked?.client.scores({ period: 'month', limit: 5 }).then(
-      (res) => attract.setHighScores('THIS MONTH', res.entries),
-      () => undefined, // unreachable: just the logo
-    );
+    // The title card doubles as the high-score table: this month's best runs
+    // (not with ranked play off, which keeps the game off the network).
+    if (loadRankedPlay()) {
+      void ranked?.client.scores({ period: 'month', limit: 5 }).then(
+        (res) => attract.setHighScores('THIS MONTH', res.entries),
+        () => undefined, // unreachable: just the logo
+      );
+    }
     const { left, right } = demoMatchup;
     bootLazy(loadAiDemo, (m) => {
       const demo = m.bootAiDemo(app, hudEl, left, right, audio, toSolo, attract);
@@ -476,8 +480,11 @@ function bootSolo(
       }
       ranked.flush();
     };
-    if (hasPlayerName()) {
-      send(loadPlayerName());
+    // A saved name (maybe from the lobby, which only checks length) must
+    // survive the scoreboard's cleanup; if nothing usable is left, ask.
+    const saved = hasPlayerName() ? normalizeScoreName(loadPlayerName()) : null;
+    if (saved !== null) {
+      send(saved);
       return;
     }
     void promptScoreName().then((name) => {
@@ -583,6 +590,7 @@ function bootSolo(
     showRankedBtn();
     if (rankedOn) {
       ranked?.tickets.refill();
+      ranked?.flush(); // runs held while ranked play was off
     } else if (run.kind === 'ranked' && !sim.lost) {
       run = { kind: 'practice', ticket: null };
       showRunTag();
@@ -613,6 +621,9 @@ function bootSolo(
 
   // --- input ---------------------------------------------------------------
   const restart = (): void => {
+    // A restart (R, or the touch button) during the first game's ticket hold
+    // ends the hold; otherwise the loop would restart again once it lapsed.
+    waitUntil = null;
     seed = nextSeed(); // a restart abandons a ranked run: its ticket is dropped
     sim = new GameSim(seed); // fresh game on a new board
     recorder = new SoloRecorder(seed);
@@ -645,11 +656,14 @@ function bootSolo(
     hud?.updateScore(score.formatted());
     showBest();
     showRunTag();
-    ranked?.flush(); // retry any run still waiting on the scoreboard
+    if (rankedOn) ranked?.flush(); // retry any run still waiting on the scoreboard
   };
 
   const onKeyDown = (e: KeyboardEvent): void => {
-    if (isTypingTarget(e.target)) return; // e.g. the name prompt
+    // Keys typed into the name prompt, or pressing its buttons (Space), are
+    // the dialog's, not the game's.
+    const inDialog = e.target instanceof Element && e.target.closest('[role="dialog"]') !== null;
+    if (isTypingTarget(e.target) || inDialog) return;
     if (e.code === 'KeyR') {
       restart();
       return;

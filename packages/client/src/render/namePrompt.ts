@@ -33,6 +33,7 @@ export function promptScoreName(): Promise<string | null> {
     input.placeholder = 'name';
     // Emoji take two UTF-16 units; the cleanup trims to SCORE_NAME_MAX_LENGTH characters.
     input.maxLength = SCORE_NAME_MAX_LENGTH * 2;
+    input.setAttribute('aria-labelledby', 'score-name-title');
     input.setAttribute('aria-describedby', 'score-name-hint');
     input.style.cssText = 'padding:8px 10px;font-size:15px';
 
@@ -53,7 +54,9 @@ export function promptScoreName(): Promise<string | null> {
     submit.style.cssText = 'font-weight:700;cursor:pointer';
     buttons.append(skip, submit);
 
-    // Keep Tab inside the dialog.
+    // Focus management, as the other modals: remember the opener, keep Tab
+    // inside the dialog, and give focus back on close.
+    const opener = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     const onKeyDown = (e: KeyboardEvent): void => {
       if (e.key !== 'Tab') return;
       const focusable = [input, skip, submit];
@@ -71,6 +74,7 @@ export function promptScoreName(): Promise<string | null> {
     const finish = (name: string | null): void => {
       document.removeEventListener('keydown', onKeyDown);
       overlay.remove();
+      if (opener?.isConnected) opener.focus();
       resolve(name);
     };
     panel.onsubmit = (e) => {

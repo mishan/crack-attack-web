@@ -105,4 +105,19 @@ describe('ScoreboardClient', () => {
     expect(err.code).toBe(code);
     expect(err.retryable).toBe(true);
   });
+
+  const board = { board: 'score', period: 'all', month: null, total: 0, entries: [] };
+  const entry = { rank: 1, id: 1, name: 'x', score: 1, topMultiplier: 0, ticks: 1, createdAt: 0 };
+  it.each([
+    ['an unknown board', { ...board, board: 'best' }],
+    ['an unknown period', { ...board, period: 'week' }],
+    ['a monthly board without its month', { ...board, period: 'month' }],
+    ['an all-time board with a month', { ...board, month: '2026-09' }],
+    // Past what a Date can hold, formatting the row would throw.
+    ['a date out of range', { ...board, total: 1, entries: [{ ...entry, createdAt: 9e15 }] }],
+  ])('rejects a board with %s', async (_label, body) => {
+    const fn = (): Promise<Response> => Promise.resolve(json(body));
+    const err = await failure(new ScoreboardClient(BASE, fn).scores());
+    expect(err.code).toBe('bad_response');
+  });
 });

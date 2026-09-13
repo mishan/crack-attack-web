@@ -7,6 +7,8 @@
 
 import {
   SCOREBOARD_ERROR_CODES,
+  SCORE_BOARDS,
+  SCORE_PERIODS,
   SOLO_API_PREFIX,
   isRunId,
   type ScoreBoard,
@@ -157,6 +159,12 @@ function errorMessage(body: unknown): string | null {
   return isObject(body) && typeof body['message'] === 'string' ? body['message'] : null;
 }
 
+/** The largest epoch-ms time a `Date` can hold; beyond it, formatting throws. */
+const MAX_DATE_MS = 8.64e15;
+const isTime = (v: unknown): v is number => isInt(v) && Math.abs(v) <= MAX_DATE_MS;
+const isOneOf = (v: unknown, allowed: readonly string[]): boolean =>
+  typeof v === 'string' && allowed.includes(v);
+
 function isTicket(v: unknown): v is SoloTicketResponse {
   return (
     isObject(v) &&
@@ -164,7 +172,7 @@ function isTicket(v: unknown): v is SoloTicketResponse {
     isRunId(v['runId']) &&
     isInt(v['seed']) &&
     isInt(v['simVersion']) &&
-    isInt(v['expiresAt'])
+    isTime(v['expiresAt'])
   );
 }
 
@@ -195,16 +203,17 @@ function isEntry(v: unknown): boolean {
     isInt(v['score']) &&
     isInt(v['topMultiplier']) &&
     isInt(v['ticks']) &&
-    isInt(v['createdAt'])
+    isTime(v['createdAt'])
   );
 }
 
 function isScoresResponse(v: unknown): v is SoloScoresResponse {
   return (
     isObject(v) &&
-    typeof v['board'] === 'string' &&
-    typeof v['period'] === 'string' &&
-    (v['month'] === null || typeof v['month'] === 'string') &&
+    isOneOf(v['board'], SCORE_BOARDS) &&
+    isOneOf(v['period'], SCORE_PERIODS) &&
+    // A monthly board names its month; an all-time one has none.
+    (v['period'] === 'month' ? typeof v['month'] === 'string' : v['month'] === null) &&
     isInt(v['total']) &&
     Array.isArray(v['entries']) &&
     v['entries'].every(isEntry)
