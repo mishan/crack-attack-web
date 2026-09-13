@@ -21,6 +21,7 @@ const BLINK_MS = 1600;
 
 export class AttractOverlay {
   private readonly title: HTMLDivElement;
+  private readonly scores: HTMLDivElement;
   private readonly banner: HTMLDivElement;
   private readonly blinks: Animation[] = [];
 
@@ -37,7 +38,12 @@ export class AttractOverlay {
     logo.alt = 'Crack Attack!';
     logo.draggable = false;
     logo.style.cssText = 'width:min(70vmin,320px);height:auto;user-select:none';
-    this.title.append(logo, this.makePrompt(prompt, 28));
+    // The high-score table, like an arcade cabinet's (empty until setHighScores).
+    this.scores = document.createElement('div');
+    this.scores.style.cssText =
+      'display:none;flex-direction:column;align-items:center;gap:2px;color:#e7ebf3;' +
+      'font:600 16px system-ui,sans-serif;font-variant-numeric:tabular-nums';
+    this.title.append(logo, this.scores, this.makePrompt(prompt, 28));
     document.body.appendChild(this.title);
 
     this.banner = document.createElement('div');
@@ -68,6 +74,35 @@ export class AttractOverlay {
     this.title.style.pointerEvents = shown ? 'auto' : 'none';
     this.title.setAttribute('aria-hidden', String(!shown));
     this.banner.setAttribute('aria-hidden', String(shown));
+  }
+
+  /** List a few top runs on the title card, under `heading`; none hides the list. */
+  setHighScores(
+    heading: string,
+    rows: readonly { rank: number; name: string; score: number }[],
+  ): void {
+    this.scores.replaceChildren();
+    this.scores.style.display = rows.length > 0 ? 'flex' : 'none';
+    if (rows.length === 0) return;
+    const head = document.createElement('div');
+    head.textContent = heading;
+    head.style.cssText = 'font-size:13px;letter-spacing:2px;opacity:.7;margin-bottom:4px';
+    this.scores.append(head);
+    for (const row of rows) {
+      const line = document.createElement('div');
+      line.style.cssText = 'display:grid;grid-template-columns:2.5em 10em 5em;gap:10px';
+      for (const [text, align] of [
+        [`${row.rank}.`, 'right'],
+        [row.name, 'left'],
+        [String(row.score), 'right'],
+      ] as const) {
+        const cell = document.createElement('span');
+        cell.textContent = text;
+        cell.style.cssText = `text-align:${align};overflow:hidden;text-overflow:ellipsis;white-space:nowrap`;
+        line.append(cell);
+      }
+      this.scores.append(line);
+    }
   }
 
   /** Whether `node` is part of the overlay (a click on it starts play). */

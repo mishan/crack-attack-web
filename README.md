@@ -73,6 +73,19 @@ in the browser with no server. From the solo screen you can also start a **Play
 vs AI** match or switch to **Play online** (netplay — needs the relay, see
 below).
 
+Solo runs can also compete on the online high-score boards the relay hosts
+(see [Solo scoreboard](#solo-scoreboard)):
+
+- With **Ranked: on** (the default), each game starts from a server-issued
+  seed. At game over the run is submitted, then verified and ranked by the
+  server.
+- The HUD shows `RANKED`, `PRACTICE`, or why a run is unranked, then the run's
+  monthly and all-time place.
+- Pausing a ranked run hides the board.
+- **High scores** opens the boards.
+- If the relay can't be reached, solo still plays, just unranked. A finished
+  run waits and is sent later.
+
 Controls:
 
 - **← → ↑ ↓** move the cursor · **Z** / **Space** swap · **X** raise the stack
@@ -136,6 +149,7 @@ Append these to the client URL (e.g. `http://localhost:5173/?net`):
 
 - `?solo` — skip attract mode and boot straight into solo play.
 - `?net` — boot straight into netplay instead.
+- `?scores` — open the online high-score boards.
 - `?demo` — boot straight into the AI-vs-AI demo with its viewer controls
   (hard vs hard); `?demo=easy,hard` picks the left and right bots. Handy as a
   showcase link.
@@ -228,6 +242,15 @@ DB=/var/lib/crack-attack/lobby.db node relay.mjs admin unhide 1234
 `admin` refuses a `DB` path with no database there (a typo), rather than create
 an empty one. In development, run `node packages/server/dist/main.js admin …`
 instead.
+
+The client finds the API on the relay's host: `wss://example.com/ws` →
+`https://example.com/api/solo`. In development the client (port 5173) and the
+relay (port 8080) are different origins, so start the relay with `CORS_ORIGIN`
+to play ranked runs locally:
+
+```sh
+CORS_ORIGIN=http://localhost:5173 pnpm --filter @crack-attack/server start
+```
 
 ### Standalone build (for deploying)
 
