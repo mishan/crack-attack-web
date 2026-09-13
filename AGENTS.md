@@ -624,10 +624,13 @@ A generator header that a real, non-AI tool always writes (e.g. a lockfile's own
   idempotent; failures use up the ticket, "busy" doesn't. Storage is a
   separate `ScoreStore` interface (`scoreStore.ts`, memory + SQLite);
   `SqliteStore` gained a `PRAGMA user_version` migration list (v1 =
-  `solo_tickets`, `solo_scores`). All-time and monthly (UTC) boards by score
-  or multiplier, every run its own row; per-client token buckets (IPv6 per
-  /64, `TRUST_PROXY` for `X-Forwarded-For`), `CORS_ORIGIN`, name cleanup,
-  and `relay.mjs admin recent|hide|unhide` moderation. Next: phase 3, the
+  `solo_tickets`, `solo_scores`, with covering board indexes so boards,
+  counts and standings stay index-only). All-time and monthly (UTC) boards by
+  score or multiplier, every run its own row, responses cached 5 s;
+  per-client token buckets (IPv6 per /64; tickets also per /48 and
+  globally), `TRUST_PROXY=<proxies>` for `X-Forwarded-For`, `CORS_ORIGIN`,
+  name cleanup (grapheme-counted), and `relay.mjs admin recent|hide|unhide`
+  moderation. Next: phase 3, the
   client (ranked toggle, tickets, submission outbox, scoreboard screen).
 - [ ] Phase 6 stretch (X-mode, replays, WebRTC, binary codec if
       measurements demand it)

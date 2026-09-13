@@ -25,7 +25,7 @@ export const SOLO_API_PREFIX = '/api/solo';
 /** Run ids: lowercase hex, fixed length (128 bits). */
 export const RUN_ID_LENGTH = 32;
 
-/** Longest name shown on the boards, in characters (code points). */
+/** Longest name shown on the boards, in characters (grapheme clusters: an emoji, a flag, a letter and its accents). */
 export const SCORE_NAME_MAX_LENGTH = 16;
 
 /** Longest name a submission may carry before cleanup, in UTF-16 units. */
@@ -149,22 +149,73 @@ export function isRunId(id: string): boolean {
 }
 
 /**
+ * Stripped outright: control characters other than whitespace, format
+ * characters other than the zero-width joiner and non-joiner, private-use,
+ * unassigned and lone-surrogate code points, and marks that only ever render
+ * invisibly (the combining grapheme joiner, the Khmer inherent vowels).
+ */
+const STRIPPED = /(?!\s)\p{Cc}|(?!\u200C|\u200D)\p{Cf}|[\p{Co}\p{Cn}\p{Cs}\u034F\u17B4\u17B5]/gu;
+/**
+ * A run of whitespace, or of characters that render blank without being
+ * whitespace to Unicode: the Hangul fillers, the Mongolian vowel separator and
+ * the braille blank.
+ */
+const BLANK_RUN = /[\s\u115F\u1160\u180E\u2800\u3164\uFFA0]+/gu;
+/** A run of zero-width joiners and non-joiners. */
+const JOINER_RUN = /(?:\u200C|\u200D)+/gu;
+
+/**
  * Clean up a display name for the public boards, or null if nothing usable is
- * left (or it was absurdly long to begin with). Collapses whitespace; strips
- * control, format (zero-width, bidi overrides), private-use, unassigned and
- * lone-surrogate characters; caps stacked combining marks at two; trims; and
- * truncates to {@link SCORE_NAME_MAX_LENGTH} code points.
+ * left (or it was absurdly long to begin with). Strips control, format
+ * (zero-width, bidi overrides), private-use, unassigned and lone-surrogate
+ * characters and invisible marks, but keeps a zero-width joiner or non-joiner
+ * standing alone between two visible characters (emoji sequences, Persian and
+ * Indic text). Then turns whitespace and blank-looking characters (Hangul
+ * fillers, the braille blank) into single spaces, composes (NFC), caps
+ * stacked combining marks at two, trims, and truncates to
+ * {@link SCORE_NAME_MAX_LENGTH} characters (grapheme clusters).
  */
 export function normalizeScoreName(raw: string): string | null {
   if (raw.length > SCORE_NAME_MAX_INPUT) return null;
   const cleaned = raw
+    .replace(STRIPPED, '')
+    .replace(BLANK_RUN, ' ')
+    .replace(JOINER_RUN, keepJoiner)
+    .replace(/ {2,}/g, ' ')
     .normalize('NFC')
-    .replace(/\s+/gu, ' ')
-    .replace(/[\p{Cc}\p{Cf}\p{Co}\p{Cn}\p{Cs}]/gu, '')
     .replace(/(\p{M}{2})\p{M}+/gu, '$1')
     .trim();
-  const name = Array.from(cleaned).slice(0, SCORE_NAME_MAX_LENGTH).join('').trim();
+  const name = truncateCharacters(cleaned, SCORE_NAME_MAX_LENGTH).trim();
   return name === '' ? null : name;
+}
+
+/** A joiner run stays only if it's a single joiner between two non-space characters. */
+function keepJoiner(run: string, at: number, text: string): string {
+  const before = text[at - 1];
+  const after = text[at + run.length];
+  const joins = run.length === 1 && before !== undefined && after !== undefined;
+  return joins && before !== ' ' && after !== ' ' ? run : '';
+}
+
+/** Grapheme segmentation, made on first use; null where the platform lacks it. */
+let graphemes: Intl.Segmenter | null | undefined;
+
+/**
+ * The first `max` characters of `text`: grapheme clusters (an emoji, a flag,
+ * a letter and its accents), or code points where `Intl.Segmenter` is
+ * missing (Firefox before 125).
+ */
+function truncateCharacters(text: string, max: number): string {
+  if (graphemes === undefined) {
+    graphemes =
+      typeof Intl.Segmenter === 'function'
+        ? new Intl.Segmenter(undefined, { granularity: 'grapheme' })
+        : null;
+  }
+  const chars = graphemes
+    ? Array.from(graphemes.segment(text), (s) => s.segment)
+    : Array.from(text);
+  return chars.length > max ? chars.slice(0, max).join('') : text;
 }
 
 /** Validate a submission's envelope; throws {@link ProtocolError}. */

@@ -206,8 +206,15 @@ export class SoloReplayRunner {
     return this.tick >= this.replay.ticks;
   }
 
-  /** Play up to `budget` more ticks; returns {@link done}. */
+  /**
+   * Play up to `budget` more ticks; returns {@link done}. `budget` must be a
+   * positive integer: anything else would make no progress, and a
+   * `while (!runner.advance(n))` loop would spin forever.
+   */
   advance(budget: number): boolean {
+    if (!Number.isInteger(budget) || budget <= 0) {
+      throw new RangeError(`budget must be a positive integer, not ${budget}`);
+    }
     const { sim, replay } = this;
     const { inputs } = replay;
     const end = Math.min(replay.ticks, this.tick + budget);

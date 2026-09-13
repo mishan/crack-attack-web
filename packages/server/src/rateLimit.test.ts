@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { RateLimiter, clientKey } from './rateLimit.js';
+import { RateLimiter, UNKNOWN_CLIENT, clientKey, siteKey } from './rateLimit.js';
 
 describe('RateLimiter', () => {
   it('allows a burst, then one request per refill period', () => {
@@ -70,5 +70,31 @@ describe('clientKey', () => {
   it('gives every address in a /64 the same key', () => {
     expect(clientKey('2001:db8:1:2::9')).toBe(clientKey('2001:db8:1:2:ffff:ffff:ffff:1'));
     expect(clientKey('2001:db8:1:2::9')).not.toBe(clientKey('2001:db8:1:3::9'));
+  });
+
+  it.each([
+    [''],
+    ['unknown'],
+    ['1.2.3.4:5678'],
+    ['[2001:db8::1]:443'],
+    ['999.1.1.1'],
+    ['2001:db8::g'],
+    ['1:2:3:4:5:6:7:8:9'],
+  ])('keys the non-address %j as unknown, one shared bucket', (address) => {
+    expect(clientKey(address)).toBe(UNKNOWN_CLIENT);
+  });
+});
+
+describe('siteKey', () => {
+  it('names the /48 an IPv6 client is in', () => {
+    expect(siteKey(clientKey('2001:db8:1:2::9'))).toBe('2001:db8:1::/48');
+    expect(siteKey(clientKey('2001:db8:1:ffff::9'))).toBe('2001:db8:1::/48');
+    expect(siteKey(clientKey('2001:db8:2::9'))).toBe('2001:db8:2::/48');
+  });
+
+  it('has none for IPv4 or unknown clients', () => {
+    expect(siteKey(clientKey('203.0.113.7'))).toBeNull();
+    expect(siteKey(clientKey('::ffff:203.0.113.7'))).toBeNull();
+    expect(siteKey(UNKNOWN_CLIENT)).toBeNull();
   });
 });

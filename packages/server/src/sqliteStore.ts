@@ -53,7 +53,7 @@ interface ScoreRow {
  * them), so a database from before migrations existed upgrades like a new one.
  * Append only — never edit an entry that has shipped.
  */
-const MIGRATIONS: readonly string[] = [
+export const MIGRATIONS: readonly string[] = [
   // 1: the solo scoreboard.
   `
   CREATE TABLE solo_tickets (
@@ -75,9 +75,12 @@ const MIGRATIONS: readonly string[] = [
     replay         TEXT NOT NULL,
     hidden         INTEGER NOT NULL DEFAULT 0
   ) STRICT;
-  CREATE INDEX solo_scores_by_score ON solo_scores (score DESC, id);
-  CREATE INDEX solo_scores_by_mult ON solo_scores (top_multiplier DESC, score DESC, id);
-  CREATE INDEX solo_scores_by_time ON solo_scores (created_at);
+  -- Covering indexes, so the boards, counts and standings read only the
+  -- index, never the table rows (where hidden sits behind the big replay).
+  CREATE INDEX solo_scores_board_score ON solo_scores (hidden, score DESC, id, created_at);
+  CREATE INDEX solo_scores_board_mult
+    ON solo_scores (hidden, top_multiplier DESC, score DESC, id, created_at);
+  CREATE INDEX solo_scores_visible_time ON solo_scores (hidden, created_at);
   `,
 ];
 
@@ -86,9 +89,40 @@ export const SCHEMA_VERSION = MIGRATIONS.length;
 
 const SCORE_COLUMNS =
   'id, run_id, name, score, top_multiplier, ticks, sim_version, created_at, hidden';
+/** A board lists visible runs only, so `hidden` needn't be read from the row. */
+const BOARD_COLUMNS = 'id, run_id, name, score, top_multiplier, ticks, sim_version, created_at';
 /** SQL condition: the run in table `t` is visible and created in `[:from, :to)`. */
 const inRange = (t: string): string =>
   `${t}.hidden = 0 AND ${t}.created_at >= :from AND ${t}.created_at < :to`;
+/**
+ * {@link inRange} for a query that walks a board index: `+created_at` still
+ * filters on the index's own column, but keeps the planner from picking the
+ * time index for the range and then sorting every run in it.
+ */
+const inRangeOnBoard = (t: string): string =>
+  `${t}.hidden = 0 AND +${t}.created_at >= :from AND +${t}.created_at < :to`;
+
+/**
+ * The board, count and standing queries. Exported so a test can check they
+ * stay index-only (EXPLAIN QUERY PLAN).
+ */
+export const SCORE_QUERIES = {
+  count: `SELECT COUNT(*) AS n FROM solo_scores s WHERE ${inRange('s')}`,
+  topByScore: `SELECT ${BOARD_COLUMNS}, 0 AS hidden FROM solo_scores s
+    WHERE ${inRangeOnBoard('s')} ORDER BY score DESC, id LIMIT :limit`,
+  topByMult: `SELECT ${BOARD_COLUMNS}, 0 AS hidden FROM solo_scores s
+    WHERE ${inRangeOnBoard('s')} ORDER BY top_multiplier DESC, score DESC, id LIMIT :limit`,
+  // Rank as two index range counts (higher score; same score, earlier run):
+  // an OR of the two would defeat the index seek.
+  standing: `SELECT
+      (SELECT COUNT(*) FROM solo_scores s WHERE ${inRangeOnBoard('s')} AND s.score > t.score)
+      + (SELECT COUNT(*) FROM solo_scores s
+           WHERE ${inRangeOnBoard('s')} AND s.score = t.score AND s.id < t.id)
+      + 1 AS rank,
+      (SELECT COUNT(*) FROM solo_scores s WHERE ${inRange('s')}) AS total
+    FROM solo_scores t
+    WHERE t.id = :id AND ${inRange('t')}`,
+} as const;
 
 export class SqliteStore implements LobbyStore, ScoreStore {
   private readonly db: DatabaseSync;
@@ -117,7 +151,8 @@ export class SqliteStore implements LobbyStore, ScoreStore {
     this.db = new DatabaseSync(path);
     // WAL lets readers (a backup, say) run alongside the relay's writes; on a
     // lock, wait briefly instead of failing straight away with SQLITE_BUSY.
-    this.db.exec('PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 5000;');
+    // (The timeout first, so switching to WAL waits out a lock too.)
+    this.db.exec('PRAGMA busy_timeout = 5000; PRAGMA journal_mode = WAL;');
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS players (
         token  TEXT PRIMARY KEY,
@@ -152,25 +187,10 @@ export class SqliteStore implements LobbyStore, ScoreStore {
     this.selectScoreByRun = this.db.prepare(
       `SELECT ${SCORE_COLUMNS} FROM solo_scores WHERE run_id = ?`,
     );
-    this.selectStanding = this.db.prepare(
-      `SELECT
-         (SELECT COUNT(*) FROM solo_scores s WHERE ${inRange('s')}
-            AND (s.score > t.score OR (s.score = t.score AND s.id < t.id))) + 1 AS rank,
-         (SELECT COUNT(*) FROM solo_scores s WHERE ${inRange('s')}) AS total
-       FROM solo_scores t
-       WHERE t.id = :id AND ${inRange('t')}`,
-    );
-    this.countInRange = this.db.prepare(
-      `SELECT COUNT(*) AS n FROM solo_scores s WHERE ${inRange('s')}`,
-    );
-    this.topByScore = this.db.prepare(
-      `SELECT ${SCORE_COLUMNS} FROM solo_scores s WHERE ${inRange('s')}
-       ORDER BY score DESC, id LIMIT :limit`,
-    );
-    this.topByMult = this.db.prepare(
-      `SELECT ${SCORE_COLUMNS} FROM solo_scores s WHERE ${inRange('s')}
-       ORDER BY top_multiplier DESC, score DESC, id LIMIT :limit`,
-    );
+    this.selectStanding = this.db.prepare(SCORE_QUERIES.standing);
+    this.countInRange = this.db.prepare(SCORE_QUERIES.count);
+    this.topByScore = this.db.prepare(SCORE_QUERIES.topByScore);
+    this.topByMult = this.db.prepare(SCORE_QUERIES.topByMult);
     this.selectReplay = this.db.prepare(
       `SELECT ${SCORE_COLUMNS}, replay FROM solo_scores WHERE id = ? AND hidden = 0`,
     );
@@ -180,22 +200,34 @@ export class SqliteStore implements LobbyStore, ScoreStore {
     );
   }
 
-  /** Bring an older database up to {@link SCHEMA_VERSION}, one step per transaction. */
+  /**
+   * Bring an older database up to {@link SCHEMA_VERSION}, one step per
+   * transaction. Another process (the admin CLI beside the relay, say) may be
+   * migrating the same file at once, so each step re-reads the version under
+   * the write lock and skips a step the other already made.
+   */
   private migrate(): void {
-    const { user_version: version } = this.db.prepare('PRAGMA user_version').get() as {
-      user_version: number;
-    };
-    for (let v = version; v < MIGRATIONS.length; v++) {
+    while (this.userVersion() < MIGRATIONS.length) {
       this.transaction(() => {
+        const v = this.userVersion();
+        if (v >= MIGRATIONS.length) return;
         this.db.exec(MIGRATIONS[v]!);
         this.db.exec(`PRAGMA user_version = ${v + 1}`);
       });
     }
   }
 
-  /** Run `body` in a transaction, rolling back if it throws. */
+  private userVersion(): number {
+    return (this.db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version;
+  }
+
+  /**
+   * Run `body` in a transaction, rolling back if it throws. IMMEDIATE takes
+   * the write lock up front (every transaction here writes), so reads inside
+   * it are current and a competing writer waits out the busy timeout.
+   */
   private transaction<T>(body: () => T): T {
-    this.db.exec('BEGIN');
+    this.db.exec('BEGIN IMMEDIATE');
     try {
       const result = body();
       this.db.exec('COMMIT');

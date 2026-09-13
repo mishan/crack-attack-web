@@ -100,6 +100,10 @@ export class MemoryScoreStore implements ScoreStore {
   private readonly rows: Row[] = [];
 
   addTicket(ticket: SoloTicket): Promise<void> {
+    // As a primary key would: a run id is never issued twice.
+    if (this.tickets.has(ticket.runId)) {
+      return Promise.reject(new Error(`ticket ${ticket.runId} already exists`));
+    }
     this.tickets.set(ticket.runId, { ...ticket });
     return Promise.resolve();
   }
@@ -126,7 +130,12 @@ export class MemoryScoreStore implements ScoreStore {
   }
 
   recordRun(run: NewSoloScore): Promise<number | null> {
-    if (!this.tickets.delete(run.runId)) return Promise.resolve(null);
+    if (!this.tickets.has(run.runId)) return Promise.resolve(null);
+    // As a unique column would; the ticket stays, as the transaction rolls back.
+    if (this.rows.some((r) => r.runId === run.runId)) {
+      return Promise.reject(new Error(`run ${run.runId} is already recorded`));
+    }
+    this.tickets.delete(run.runId);
     const id = this.rows.length + 1;
     this.rows.push({ ...run, id, hidden: false });
     return Promise.resolve(id);
@@ -167,7 +176,9 @@ export class MemoryScoreStore implements ScoreStore {
   }
 
   recentScores(limit: number): Promise<StoredSoloScore[]> {
-    return Promise.resolve(this.rows.slice(-limit).reverse().map(publicCopy));
+    // As SQL's LIMIT: 0 means none, a negative limit means no limit.
+    const newest = this.rows.slice().reverse();
+    return Promise.resolve((limit < 0 ? newest : newest.slice(0, limit)).map(publicCopy));
   }
 
   close(): Promise<void> {

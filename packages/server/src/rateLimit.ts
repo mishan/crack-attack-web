@@ -3,6 +3,8 @@
  * a client is limited by.
  */
 
+import { isIP } from 'node:net';
+
 /** A token bucket: a burst of `capacity` requests, earning one back every `refillMs`. */
 export interface RateLimit {
   capacity: number;
@@ -72,17 +74,23 @@ export class RateLimiter {
   }
 }
 
+/** The key of every client whose address isn't a valid IP: they share one bucket. */
+export const UNKNOWN_CLIENT = 'unknown';
+
 /**
  * The rate-limit key for a client address. IPv4 (including IPv4-mapped IPv6)
  * is limited per address. IPv6 is limited per /64, since a single host
  * usually holds a whole /64 and can hop between its addresses at will.
+ * Anything that isn't an IP address keys as {@link UNKNOWN_CLIENT}.
  */
 export function clientKey(address: string): string {
   let a = address.trim().toLowerCase();
   const zone = a.indexOf('%');
   if (zone >= 0) a = a.slice(0, zone);
+  const version = isIP(a);
+  if (version === 4) return a;
+  if (version !== 6) return UNKNOWN_CLIENT;
   if (a.startsWith('::ffff:') && a.includes('.')) return a.slice('::ffff:'.length);
-  if (!a.includes(':')) return a;
 
   // An embedded IPv4 tail stands for two groups; it's past the /64 anyway.
   const groups = (part: string): string[] =>
@@ -103,4 +111,13 @@ export function clientKey(address: string): string {
   const prefix = all.slice(0, 4).map((g) => (parseInt(g, 16) || 0).toString(16));
   while (prefix.length < 4) prefix.push('0');
   return `${prefix.join(':')}::/64`;
+}
+
+/**
+ * The /48 an IPv6 {@link clientKey} belongs to, as a key of its own (a site
+ * usually holds a whole /48); null for an IPv4 or unknown client.
+ */
+export function siteKey(client: string): string | null {
+  if (!client.endsWith('::/64')) return null;
+  return `${client.split(':').slice(0, 3).join(':')}::/48`;
 }

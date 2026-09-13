@@ -7,9 +7,10 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
+import { Worker } from 'node:worker_threads';
 import { describe, expect, it } from 'vitest';
 import { ALL_TIME, MemoryScoreStore, type NewSoloScore, type ScoreStore } from './scoreStore.js';
-import { SCHEMA_VERSION, SqliteStore } from './sqliteStore.js';
+import { MIGRATIONS, SCHEMA_VERSION, SCORE_QUERIES, SqliteStore } from './sqliteStore.js';
 
 const T0 = Date.UTC(2026, 8, 13);
 const rid = (n: number): string => n.toString(16).padStart(32, '0');
@@ -49,6 +50,35 @@ function conformance(name: string, make: () => ScoreStore): void {
       expect(await store.pruneTickets(T0 + 5)).toBe(1);
       expect(await store.getTicket(rid(1))).toBeNull();
       expect(await store.getTicket(rid(2))).not.toBeNull();
+      await store.close();
+    });
+
+    it('refuses to issue a run id twice', async () => {
+      const store = make();
+      const ticket = { runId: rid(1), seed: 7, simVersion: 1, issuedAt: T0 };
+      await store.addTicket(ticket);
+      // Async wrapper: a backend may throw rather than reject.
+      await expect((async () => store.addTicket({ ...ticket, seed: 8 }))()).rejects.toThrow();
+      expect(await store.getTicket(rid(1))).toEqual(ticket);
+      await store.close();
+    });
+
+    it('never records a run id twice, even on a re-added ticket', async () => {
+      const store = make();
+      await add(store, run(1));
+      await store.addTicket({ runId: rid(1), seed: 7, simVersion: 1, issuedAt: T0 });
+      await expect((async () => store.recordRun(run(1)))()).rejects.toThrow();
+      expect(await store.getTicket(rid(1))).not.toBeNull(); // rolled back
+      expect(await store.countScores(ALL_TIME)).toBe(1);
+      await store.close();
+    });
+
+    it('lists no recent runs for a limit of 0', async () => {
+      const store = make();
+      await add(store, run(1));
+      await add(store, run(2));
+      expect(await store.recentScores(0)).toEqual([]);
+      expect((await store.recentScores(1)).map((r) => r.runId)).toEqual([rid(2)]);
       await store.close();
     });
 
@@ -178,5 +208,103 @@ describe('SqliteStore migrations', () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+
+  it('waits out another process migrating the same file, then carries on from there', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'crack-attack-migrate-'));
+    const path = join(dir, 'race.db');
+    try {
+      // "Another process" (a thread with its own connection): it takes the
+      // write lock, makes step 1, and holds the lock a moment before committing.
+      const holding = new Int32Array(new SharedArrayBuffer(4));
+      const other = new Worker(
+        `
+        const { workerData: { path, holding, step1 } } = require('node:worker_threads');
+        const { DatabaseSync } = require('node:sqlite');
+        const db = new DatabaseSync(path);
+        db.exec('PRAGMA journal_mode = WAL');
+        db.exec('CREATE TABLE players (token TEXT PRIMARY KEY, name TEXT NOT NULL, wins INTEGER NOT NULL DEFAULT 0, losses INTEGER NOT NULL DEFAULT 0) STRICT');
+        db.exec('BEGIN IMMEDIATE');
+        db.exec(step1);
+        db.exec('PRAGMA user_version = 1');
+        Atomics.store(holding, 0, 1);
+        Atomics.notify(holding, 0);
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 300);
+        db.exec('COMMIT');
+        db.close();
+        `,
+        { eval: true, workerData: { path, holding, step1: MIGRATIONS[0] } },
+      );
+      const exited = new Promise((resolve, reject) => {
+        other.on('exit', resolve);
+        other.on('error', reject);
+      });
+      Atomics.wait(holding, 0, 0, 10_000);
+      expect(Atomics.load(holding, 0)).toBe(1);
+
+      // Reads version 0 (step 1 isn't committed yet), waits for the lock, then
+      // must see version 1 and not make step 1 again ("table already exists").
+      const store = new SqliteStore(path);
+      await add(store, run(1));
+      await store.close();
+      expect(await exited).toBe(0);
+
+      const check = new DatabaseSync(path);
+      expect({ ...check.prepare('PRAGMA user_version').get() }).toEqual({
+        user_version: SCHEMA_VERSION,
+      });
+      check.close();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('SqliteStore query plans', () => {
+  /** EXPLAIN QUERY PLAN lines for each board query, on a freshly migrated database. */
+  function plans(): Record<keyof typeof SCORE_QUERIES, string[]> {
+    const dir = mkdtempSync(join(tmpdir(), 'crack-attack-plan-'));
+    const path = join(dir, 'plan.db');
+    try {
+      new SqliteStore(path).close();
+      const db = new DatabaseSync(path);
+      const range = { from: 0, to: 1 };
+      const explain = (sql: string, params: Record<string, number>) =>
+        db
+          .prepare(`EXPLAIN QUERY PLAN ${sql}`)
+          .all(params)
+          .map((row) => String(row['detail']));
+      const result = {
+        count: explain(SCORE_QUERIES.count, range),
+        topByScore: explain(SCORE_QUERIES.topByScore, { ...range, limit: 10 }),
+        topByMult: explain(SCORE_QUERIES.topByMult, { ...range, limit: 10 }),
+        standing: explain(SCORE_QUERIES.standing, { ...range, id: 1 }),
+      };
+      db.close();
+      return result;
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  it('answers counts and standings from covering indexes alone', () => {
+    const { count, standing } = plans();
+    expect(count).toEqual([
+      'SEARCH s USING COVERING INDEX solo_scores_visible_time (hidden=? AND created_at>? AND created_at<?)',
+    ]);
+    // The run itself by primary key; every count over the other runs index-only.
+    expect(standing).toContain('SEARCH t USING INTEGER PRIMARY KEY (rowid=?)');
+    const scans = standing.filter((line) => /^(SEARCH|SCAN) s /.test(line));
+    expect(scans).toEqual([
+      'SEARCH s USING COVERING INDEX solo_scores_board_score (hidden=? AND score>?)',
+      'SEARCH s USING COVERING INDEX solo_scores_board_score (hidden=? AND score=? AND id<?)',
+      'SEARCH s USING COVERING INDEX solo_scores_visible_time (hidden=? AND created_at>? AND created_at<?)',
+    ]);
+  });
+
+  it('walks each board in its index order, with no sort', () => {
+    const { topByScore, topByMult } = plans();
+    expect(topByScore).toEqual(['SEARCH s USING INDEX solo_scores_board_score (hidden=?)']);
+    expect(topByMult).toEqual(['SEARCH s USING INDEX solo_scores_board_mult (hidden=?)']);
   });
 });

@@ -28,6 +28,8 @@ import {
   monthKey,
   monthRange,
   normalizeScoreName,
+  type ScoreBoard,
+  type ScorePeriod,
   type ScoreboardErrorBody,
   type ScoreboardErrorCode,
   type SoloReplayResponse,
@@ -38,7 +40,7 @@ import {
   type SoloTicketResponse,
 } from '@crack-attack/protocol';
 import { randomBytes } from 'node:crypto';
-import { RateLimiter, type RateLimit } from './rateLimit.js';
+import { RateLimiter, siteKey, type RateLimit } from './rateLimit.js';
 import { ALL_TIME, type ScoreStore, type StoredSoloScore, type TimeRange } from './scoreStore.js';
 import { SoloVerifier, VerifierBusyError } from './soloVerifier.js';
 
@@ -62,9 +64,32 @@ export class ApiError extends Error {
 
 /** Tickets per client: a burst of 30 (quick restarts), then one per 10 s. */
 export const DEFAULT_TICKET_LIMIT: RateLimit = { capacity: 30, refillMs: 10_000 };
+/**
+ * Tickets per IPv6 /48, on top of the per-/64 limit: a site usually holds a
+ * whole /48 (65,536 /64s), so a client could otherwise rotate through fresh
+ * buckets. Room for a few busy players, then one every 2.5 s.
+ */
+export const DEFAULT_TICKET_SITE_LIMIT: RateLimit = { capacity: 120, refillMs: 2_500 };
+/**
+ * Tickets across all clients: the backstop against address rotation, since
+ * every ticket is a row kept for a day. A burst of 600, then five a second.
+ */
+export const DEFAULT_TICKET_GLOBAL_LIMIT: RateLimit = { capacity: 600, refillMs: 200 };
 /** Submissions per client: a burst of 20, then one per 20 s. */
 export const DEFAULT_SUBMIT_LIMIT: RateLimit = { capacity: 20, refillMs: 20_000 };
+/** Board requests per client: a burst of 60 (flipping through tabs), then one a second. */
+export const DEFAULT_SCORES_LIMIT: RateLimit = { capacity: 60, refillMs: 1_000 };
+/**
+ * How long a board response is reused. Recording a run here clears the cache;
+ * the admin CLI hides runs from another process, so this bounds how long a
+ * hidden run lingers.
+ */
+export const DEFAULT_SCORES_CACHE_MS = 5_000;
 
+/** Board responses cached at most (each board, period, month and limit is one). */
+const SCORES_CACHE_MAX_ENTRIES = 256;
+/** The global ticket bucket's key. */
+const EVERYONE = '*';
 /** Expired tickets are swept at most this often (when the next ticket is issued). */
 const PRUNE_EVERY_MS = 10 * 60 * 1000;
 /** `Retry-After` for a full verifier queue: a replay takes well under a second. */
@@ -80,8 +105,22 @@ export interface SoloScoreboardOptions {
   newSeed?: (() => number) | undefined;
   /** Run-id source; defaults to a CSPRNG. Inject for tests. */
   newRunId?: (() => string) | undefined;
+  /** Tickets per client (an IPv4 address or IPv6 /64). */
   ticketLimit?: RateLimit | undefined;
+  /** Tickets per IPv6 /48. */
+  ticketSiteLimit?: RateLimit | undefined;
+  /** Tickets across all clients. */
+  ticketGlobalLimit?: RateLimit | undefined;
   submitLimit?: RateLimit | undefined;
+  /** Board requests per client. */
+  scoresLimit?: RateLimit | undefined;
+  /** How long a board response is reused, in ms; 0 turns the cache off. */
+  scoresCacheMs?: number | undefined;
+}
+
+interface CachedScores {
+  at: number;
+  response: Promise<SoloScoresResponse>;
 }
 
 export class SoloScoreboard {
@@ -91,7 +130,15 @@ export class SoloScoreboard {
   private readonly newSeed: () => number;
   private readonly newRunId: () => string;
   private readonly ticketLimiter: RateLimiter;
+  private readonly ticketSiteLimiter: RateLimiter;
+  private readonly ticketGlobalLimiter: RateLimiter;
   private readonly submitLimiter: RateLimiter;
+  private readonly scoresLimiter: RateLimiter;
+  private readonly scoresCacheMs: number;
+  /** Board responses by their normalized query, oldest first. */
+  private readonly scoresCache = new Map<string, CachedScores>();
+  /** Submissions being checked, by run id. */
+  private readonly inFlight = new Map<string, Promise<SoloSubmitResponse>>();
   private lastPrune = -Infinity;
 
   constructor(options: SoloScoreboardOptions) {
@@ -100,13 +147,24 @@ export class SoloScoreboard {
     this.now = options.now ?? Date.now;
     this.newSeed = options.newSeed ?? (() => randomBytes(4).readUInt32BE(0));
     this.newRunId = options.newRunId ?? (() => randomBytes(16).toString('hex'));
-    this.ticketLimiter = new RateLimiter(options.ticketLimit ?? DEFAULT_TICKET_LIMIT, this.now);
-    this.submitLimiter = new RateLimiter(options.submitLimit ?? DEFAULT_SUBMIT_LIMIT, this.now);
+    const limiter = (limit: RateLimit, maxTracked?: number) =>
+      new RateLimiter(limit, this.now, maxTracked);
+    this.ticketLimiter = limiter(options.ticketLimit ?? DEFAULT_TICKET_LIMIT);
+    this.ticketSiteLimiter = limiter(options.ticketSiteLimit ?? DEFAULT_TICKET_SITE_LIMIT);
+    this.ticketGlobalLimiter = limiter(options.ticketGlobalLimit ?? DEFAULT_TICKET_GLOBAL_LIMIT, 1);
+    this.submitLimiter = limiter(options.submitLimit ?? DEFAULT_SUBMIT_LIMIT);
+    this.scoresLimiter = limiter(options.scoresLimit ?? DEFAULT_SCORES_LIMIT);
+    this.scoresCacheMs = options.scoresCacheMs ?? DEFAULT_SCORES_CACHE_MS;
   }
 
-  /** Issue a run ticket to `client` (a rate-limit key). */
+  /** Issue a run ticket to `client` (a rate-limit key, see `clientKey`). */
   async issueTicket(client: string): Promise<SoloTicketResponse> {
-    if (!this.ticketLimiter.take(client)) throw rateLimited(this.ticketLimiter, client);
+    // Narrowest first, so a client already over its own limit spends nothing
+    // from the shared buckets.
+    take(this.ticketLimiter, client);
+    const site = siteKey(client);
+    if (site !== null) take(this.ticketSiteLimiter, site);
+    take(this.ticketGlobalLimiter, EVERYONE);
     const now = this.now();
     if (now - this.lastPrune >= PRUNE_EVERY_MS) {
       this.lastPrune = now;
@@ -132,7 +190,7 @@ export class SoloScoreboard {
    * returns its current standing, so a client can safely retry.
    */
   async submit(client: string, body: unknown): Promise<SoloSubmitResponse> {
-    if (!this.submitLimiter.take(client)) throw rateLimited(this.submitLimiter, client);
+    take(this.submitLimiter, client);
     let request: SoloSubmitRequest;
     try {
       request = decodeSoloSubmitRequest(body);
@@ -151,6 +209,74 @@ export class SoloScoreboard {
       throw err;
     }
 
+    // One check per run at a time. A copy arriving while the first is being
+    // checked (a client retry, or a racing duplicate) shares its outcome:
+    // it neither queues a second verification nor drops the ticket under it.
+    const pending = this.inFlight.get(runId);
+    if (pending) return pending;
+    const attempt = this.check(runId, name, replay);
+    this.inFlight.set(runId, attempt);
+    try {
+      return await attempt;
+    } finally {
+      this.inFlight.delete(runId);
+    }
+  }
+
+  /** A board: `board`, `period`, `month` and `limit` query parameters. */
+  async scores(client: string, params: URLSearchParams): Promise<SoloScoresResponse> {
+    take(this.scoresLimiter, client);
+    const board = oneOf(params.get('board') ?? 'score', SCORE_BOARDS, 'board');
+    const monthParam = params.get('month');
+    const period = oneOf(
+      params.get('period') ?? (monthParam ? 'month' : 'all'),
+      SCORE_PERIODS,
+      'period',
+    );
+    let month: string | null = null;
+    let range: TimeRange = ALL_TIME;
+    if (period === 'month') {
+      month = monthParam ?? monthKey(this.now());
+      const r = monthRange(month);
+      if (!r) throw new ApiError(400, 'bad_request', 'month must be YYYY-MM');
+      range = r;
+    } else if (monthParam !== null) {
+      throw new ApiError(400, 'bad_request', 'month needs period=month');
+    }
+    const limitParam = params.get('limit');
+    const limit = limitParam === null ? SCORE_LIST_DEFAULT_LIMIT[board] : Number(limitParam);
+    if (
+      limitParam !== null &&
+      (!/^\d+$/.test(limitParam) || limit < 1 || limit > SCORE_LIST_MAX_LIMIT)
+    ) {
+      throw new ApiError(400, 'bad_request', `limit must be 1..${SCORE_LIST_MAX_LIMIT}`);
+    }
+
+    // Keyed by the normalized query: `?period=month` and `?month=<this month>` share an entry.
+    const key = `${board} ${period} ${month ?? '-'} ${limit}`;
+    const now = this.now();
+    const cached = this.scoresCache.get(key);
+    // (A clock stepped backwards expires an entry too.)
+    if (cached && now >= cached.at && now - cached.at < this.scoresCacheMs) return cached.response;
+    const response = this.loadScores(board, period, month, range, limit);
+    if (this.scoresCacheMs > 0) this.cacheScores(key, { at: now, response });
+    return response;
+  }
+
+  /** A visible run's replay, by id (the path segment, unparsed). */
+  async replay(idText: string): Promise<SoloReplayResponse> {
+    const id = /^[1-9]\d{0,14}$/.test(idText) ? Number(idText) : null;
+    const found = id === null ? null : await this.store.getReplay(id);
+    if (!found) throw new ApiError(404, 'not_found', 'no such run');
+    return { entry: entryOf(found.score), replay: JSON.parse(found.replay) as unknown };
+  }
+
+  /** Check a submission against its ticket, verify it, and record it. */
+  private async check(
+    runId: string,
+    name: string,
+    replay: SoloReplay,
+  ): Promise<SoloSubmitResponse> {
     const ticket = await this.store.getTicket(runId);
     if (!ticket) return this.resubmission(runId);
     // A ticket that fails a check is used up: an honest client never sends one.
@@ -198,37 +324,17 @@ export class SoloScoreboard {
     };
     const id = await this.store.recordRun({ ...run, replay: JSON.stringify(replay) });
     if (id === null) return this.resubmission(runId);
+    this.scoresCache.clear(); // every board may have changed
     return this.submitted({ ...run, id, hidden: false });
   }
 
-  /** A board: `board`, `period`, `month` and `limit` query parameters. */
-  async scores(params: URLSearchParams): Promise<SoloScoresResponse> {
-    const board = oneOf(params.get('board') ?? 'score', SCORE_BOARDS, 'board');
-    const monthParam = params.get('month');
-    const period = oneOf(
-      params.get('period') ?? (monthParam ? 'month' : 'all'),
-      SCORE_PERIODS,
-      'period',
-    );
-    let month: string | null = null;
-    let range: TimeRange = ALL_TIME;
-    if (period === 'month') {
-      month = monthParam ?? monthKey(this.now());
-      const r = monthRange(month);
-      if (!r) throw new ApiError(400, 'bad_request', 'month must be YYYY-MM');
-      range = r;
-    } else if (monthParam !== null) {
-      throw new ApiError(400, 'bad_request', 'month needs period=month');
-    }
-    const limitParam = params.get('limit');
-    const limit = limitParam === null ? SCORE_LIST_DEFAULT_LIMIT[board] : Number(limitParam);
-    if (
-      limitParam !== null &&
-      (!/^\d+$/.test(limitParam) || limit < 1 || limit > SCORE_LIST_MAX_LIMIT)
-    ) {
-      throw new ApiError(400, 'bad_request', `limit must be 1..${SCORE_LIST_MAX_LIMIT}`);
-    }
-
+  private async loadScores(
+    board: ScoreBoard,
+    period: ScorePeriod,
+    month: string | null,
+    range: TimeRange,
+    limit: number,
+  ): Promise<SoloScoresResponse> {
     const rows = await this.store.topScores(board, range, limit);
     const total = await this.store.countScores(range);
     return {
@@ -240,12 +346,22 @@ export class SoloScoreboard {
     };
   }
 
-  /** A visible run's replay, by id (the path segment, unparsed). */
-  async replay(idText: string): Promise<SoloReplayResponse> {
-    const id = /^[1-9]\d{0,14}$/.test(idText) ? Number(idText) : null;
-    const found = id === null ? null : await this.store.getReplay(id);
-    if (!found) throw new ApiError(404, 'not_found', 'no such run');
-    return { entry: entryOf(found.score), replay: JSON.parse(found.replay) as unknown };
+  private cacheScores(key: string, entry: CachedScores): void {
+    this.scoresCache.delete(key); // re-inserted as the newest
+    if (this.scoresCache.size >= SCORES_CACHE_MAX_ENTRIES) {
+      for (const [k, e] of this.scoresCache) {
+        if (entry.at - e.at >= this.scoresCacheMs) this.scoresCache.delete(k);
+      }
+      const oldest = this.scoresCache.keys().next();
+      if (this.scoresCache.size >= SCORES_CACHE_MAX_ENTRIES && !oldest.done) {
+        this.scoresCache.delete(oldest.value);
+      }
+    }
+    this.scoresCache.set(key, entry);
+    // A failed lookup isn't worth keeping.
+    entry.response.catch(() => {
+      if (this.scoresCache.get(key) === entry) this.scoresCache.delete(key);
+    });
   }
 
   /** A run id with no ticket: already recorded (a retry), or never issued. */
@@ -269,10 +385,11 @@ export class SoloScoreboard {
   }
 }
 
-/** A 429 saying when `client` may try again, from the limiter that refused it. */
-function rateLimited(limiter: RateLimiter, client: string): ApiError {
-  const seconds = Math.max(1, Math.ceil(limiter.waitMs(client) / 1000));
-  return new ApiError(429, 'rate_limited', 'too many requests; slow down', {
+/** Spend a request from `key`'s bucket, or refuse with a 429 saying when to try again. */
+function take(limiter: RateLimiter, key: string): void {
+  if (limiter.take(key)) return;
+  const seconds = Math.max(1, Math.ceil(limiter.waitMs(key) / 1000));
+  throw new ApiError(429, 'rate_limited', 'too many requests; slow down', {
     'Retry-After': String(seconds),
   });
 }

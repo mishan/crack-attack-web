@@ -203,7 +203,8 @@ Each phase is one PR.
   - `solo_tickets(run_id PK, seed, sim_version, issued_at)`: outstanding
     tickets only. Using one deletes it, and expired ones are swept.
   - `solo_scores(id PK, run_id UNIQUE, name, score, top_multiplier, ticks, sim_version, created_at, replay TEXT, hidden)`,
-    indexed for both boards and by time.
+    with covering indexes for both boards and by time, so boards, counts and
+    standings never read the table rows.
 
   A separate `ScoreStore` interface (`scoreStore.ts`) sits beside
   `LobbyStore`; `SqliteStore` implements both on one file. `recordRun` uses
@@ -224,13 +225,25 @@ Each phase is one PR.
   - a one-hour tick cap
   - a 256 KiB body cap
   - per-client token buckets (IPv6 per /64): tickets burst 30, then 1 per
-    10 s; submissions burst 20, then 1 per 20 s
-  - `TRUST_PROXY=1` reads the last `X-Forwarded-For` hop
+    10 s; submissions burst 20, then 1 per 20 s; board requests burst 60,
+    then 1 per s
+  - tickets also per IPv6 /48 (burst 120, then 1 per 2.5 s) and across all
+    clients (burst 600, then 5 per s), so rotating addresses doesn't help
+  - `TRUST_PROXY=<n>` takes the client from `X-Forwarded-For`, _n_ entries
+    from the right (1 behind nginx, 2 behind a CDN and nginx), ports
+    stripped; an entry that isn't an IP falls back to the socket address
   - `CORS_ORIGIN` for a client on another origin
-- **Names:** NFC; whitespace collapsed; control, format (zero-width, bidi),
-  private-use and unassigned characters stripped; stacked combining marks
-  capped at two; 16 code points; `bad_name` if nothing is left.
+- **Caching:** a board response is reused for 5 s (cleared when this relay
+  records a run), and replays are served with `max-age=60`, so a hidden run
+  soon drops out of caches.
+- **Names:** control, format (zero-width, bidi), private-use and unassigned
+  characters stripped, except a lone zero-width (non-)joiner between two
+  visible characters (emoji sequences, Persian and Indic text); whitespace
+  and blank-looking characters (Hangul fillers, the braille blank) collapsed
+  to one space; NFC; stacked combining marks capped at two; 16 grapheme
+  clusters; `bad_name` if nothing is left.
 - **Moderation:** `node relay.mjs admin recent [n] | hide <id> | unhide <id>`.
+  It refuses a `DB` path with no database there rather than create one.
 
 ### Phase 3 — client: ranked runs, submitting and the scoreboard screen
 

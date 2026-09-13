@@ -8,7 +8,7 @@
  * `bundle` script.
  */
 
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { copyFileSync, existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -103,8 +103,26 @@ const exitCode = await new Promise((resolve) => {
 });
 if (exitCode !== 0) finish(false, `relay exited with code ${exitCode} on SIGTERM`);
 if (!existsSync(join(dir, 'lobby.db'))) finish(false, 'no database file was written');
+
+// 5. The admin CLI works on that database, and refuses a path with none there
+//    rather than creating an empty one.
+const admin = (db) =>
+  spawnSync(process.execPath, ['relay.mjs', 'admin', 'recent'], {
+    cwd: dir,
+    env: { PATH: process.env.PATH ?? '', DB: db },
+    encoding: 'utf8',
+  });
+const recent = admin('lobby.db');
+if (recent.status !== 0 || !recent.stdout.includes('no runs yet')) {
+  finish(false, `admin recent exited ${recent.status}: ${recent.stdout}${recent.stderr}`);
+}
+const missing = admin('typo.db');
+if (missing.status === 0 || !missing.stderr.includes('no database at')) {
+  finish(false, `admin on a missing database exited ${missing.status}: ${missing.stderr}`);
+}
+if (existsSync(join(dir, 'typo.db'))) finish(false, 'admin created a database at a mistyped path');
 finish(
   true,
   `port ${port}, welcomed "${welcome.name}", ticket ${ticket.runId.slice(0, 8)}…, ` +
-    'clean shutdown, database written',
+    'clean shutdown, database written, admin CLI ok',
 );

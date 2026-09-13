@@ -94,6 +94,16 @@ describe('runSoloReplay', () => {
     expect(runner.result()).toEqual(runSoloReplay(replay));
   });
 
+  it.each([[0], [-5], [NaN], [1.5], [Infinity]])(
+    'refuses a slice budget of %s, which would never finish',
+    (budget) => {
+      const { replay } = playAiGame(12345, 1500);
+      const runner = new SoloReplayRunner(replay);
+      expect(() => runner.advance(budget)).toThrow(RangeError);
+      expect(runner.advance(replay.ticks)).toBe(true); // nothing was played
+    },
+  );
+
   // If a rules change breaks this, update the expected values and bump
   // SIM_VERSION: runs recorded under the old rules no longer replay the same.
   it('matches the golden fixture', () => {

@@ -10,7 +10,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import WebSocket from 'ws';
 import type { SoloReplay } from '@crack-attack/core';
 import { PROTOCOL_VERSION, SOLO_SUBMIT_MAX_BYTES, encodeMessage } from '@crack-attack/protocol';
-import { createScoreboardApi } from './httpApi.js';
+import { createScoreboardApi, forwardedAddress, parseAddress } from './httpApi.js';
 import { SoloScoreboard } from './scoreboard.js';
 import { MemoryScoreStore } from './scoreStore.js';
 import { SoloVerifier } from './soloVerifier.js';
@@ -84,6 +84,8 @@ describe('scoreboard HTTP API', () => {
 
     const replayRes = await fetch(`${base}/api/solo/replay/1`);
     expect(replayRes.status).toBe(200);
+    // Short, so a run a moderator hides soon drops out of caches.
+    expect(replayRes.headers.get('cache-control')).toBe('public, max-age=60');
     expect(((await replayRes.json()) as { replay: unknown }).replay).toEqual(FIXTURE);
   });
 
@@ -156,6 +158,136 @@ describe('scoreboard HTTP API', () => {
     // When the limiter will have room again: one ticket per 60 s here.
     expect(limited.headers.get('retry-after')).toBe('60');
     expect((await via('198.51.100.2')).status).toBe(200);
+  });
+
+  it('strips ports from forwarded addresses, and falls back to the socket for garbage', async () => {
+    const via = (forwardedFor: string) =>
+      post('/api/solo/ticket', undefined, { 'x-forwarded-for': forwardedFor });
+    // One client behind a proxy that writes ports, not three.
+    expect((await via('198.51.100.1:5000')).status).toBe(200);
+    expect((await via('198.51.100.1:5001')).status).toBe(200);
+    expect((await via('198.51.100.1:5002')).status).toBe(429);
+    // Not an address: keyed by the socket (127.0.0.1 here), not a fresh bucket each.
+    expect((await via('nonsense')).status).toBe(200);
+    expect((await via('more-nonsense')).status).toBe(200);
+    expect((await via('still-nonsense')).status).toBe(429);
+  });
+
+  it('picks the client out of X-Forwarded-For behind two proxies', async () => {
+    const scoreboard = new SoloScoreboard({
+      store: new MemoryScoreStore(),
+      ticketLimit: { capacity: 1, refillMs: 60_000 },
+    });
+    const relay = await startRelayWsServer({
+      port: 0,
+      host: '127.0.0.1',
+      http: createScoreboardApi(scoreboard, { trustProxy: 2 }),
+    });
+    const via = async (forwardedFor: string) =>
+      (
+        await fetch(`http://127.0.0.1:${relay.port}/api/solo/ticket`, {
+          method: 'POST',
+          headers: { 'x-forwarded-for': forwardedFor },
+        })
+      ).status;
+    try {
+      // The CDN adds the client, then nginx adds the CDN edge: the client is second from the right.
+      expect(await via('198.51.100.7:5000, 10.0.0.1')).toBe(200);
+      // The same client via another edge, with a spoofed first entry: the same bucket.
+      expect(await via('203.0.113.99, 198.51.100.7, 10.0.0.2')).toBe(429);
+      expect(await via('[2001:db8::1]:443, 10.0.0.1')).toBe(200);
+      expect(await via('[2001:db8::2]:443, 10.0.0.1')).toBe(429); // the same /64
+    } finally {
+      await relay.close();
+    }
+  });
+
+  it('answers a malformed request URL with a 400, without logging it', async () => {
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    try {
+      const status = await new Promise<number>((resolve, reject) => {
+        // fetch would normalize the path; `//` is not a valid URL path here.
+        const req = request({ host: '127.0.0.1', port: server.port, path: '//' }, (res) => {
+          res.resume();
+          resolve(res.statusCode ?? 0);
+        });
+        req.on('error', reject);
+        req.end();
+      });
+      expect(status).toBe(400);
+      expect(errors).not.toHaveBeenCalled();
+    } finally {
+      errors.mockRestore();
+    }
+  });
+
+  it('drops an upload the client abandons, without logging it', async () => {
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    let arrived!: () => void;
+    let gone!: () => void;
+    const requestArrived = new Promise<void>((resolve) => (arrived = resolve));
+    const requestGone = new Promise<void>((resolve) => (gone = resolve));
+    const api = createScoreboardApi(new SoloScoreboard({ store: new MemoryScoreStore() }));
+    const relay = await startRelayWsServer({
+      port: 0,
+      host: '127.0.0.1',
+      http: (req, res) => {
+        req.on('close', gone);
+        api(req, res);
+        arrived();
+      },
+    });
+    try {
+      const req = request({
+        host: '127.0.0.1',
+        port: relay.port,
+        method: 'POST',
+        path: '/api/solo/submit',
+        headers: { 'content-type': 'application/json', 'content-length': '1000' },
+      });
+      req.on('error', () => undefined); // hanging up is the point
+      req.write('{"runId":');
+      await requestArrived;
+      req.destroy();
+      await requestGone;
+      await new Promise((resolve) => setTimeout(resolve, 20)); // let the handler settle
+      expect(errors).not.toHaveBeenCalled();
+    } finally {
+      errors.mockRestore();
+      await relay.close();
+    }
+  });
+
+  describe('forwarded addresses', () => {
+    it.each([
+      ['198.51.100.7', '198.51.100.7'],
+      [' 198.51.100.7 ', '198.51.100.7'],
+      ['198.51.100.7:5678', '198.51.100.7'],
+      ['2001:db8::1', '2001:db8::1'],
+      ['[2001:db8::1]', '2001:db8::1'],
+      ['[2001:db8::1]:443', '2001:db8::1'],
+      ['::ffff:198.51.100.7', '::ffff:198.51.100.7'],
+      ['unknown', null],
+      ['_hidden', null],
+      ['', null],
+      ['198.51.100.7:', null],
+      ['[198.51.100.7', null],
+      ['2001:db8::1:443x', null],
+    ])('reads %j as %j', (entry, address) => {
+      expect(parseAddress(entry)).toBe(address);
+    });
+
+    it('counts trusted proxies from the right', () => {
+      const header = '203.0.113.1, 198.51.100.7, 10.0.0.1';
+      expect(forwardedAddress(header, 1)).toBe('10.0.0.1');
+      expect(forwardedAddress(header, 2)).toBe('198.51.100.7');
+      expect(forwardedAddress(header, 3)).toBe('203.0.113.1');
+      expect(forwardedAddress(header, 5)).toBe('203.0.113.1'); // a shorter chain: its first entry
+      expect(forwardedAddress(['203.0.113.1', '198.51.100.7, 10.0.0.1'], 2)).toBe('198.51.100.7');
+      expect(forwardedAddress(header, 0)).toBeNull();
+      expect(forwardedAddress(undefined, 1)).toBeNull();
+      expect(forwardedAddress('203.0.113.1, garbage', 1)).toBeNull();
+    });
   });
 
   it('still serves the relay WebSocket on the same port', async () => {
