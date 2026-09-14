@@ -6,7 +6,8 @@
  * (default ./crack-attack.db; set DB=:memory: for an ephemeral server).
  * TRUST_PROXY=<n> reads client addresses from X-Forwarded-For, behind n
  * proxies (1 = nginx alone; true = 1); CORS_ORIGIN lets a client on another
- * origin call the scoreboard API.
+ * origin call the scoreboard API. STATS=1 writes a `stats {json}` line to
+ * stderr every 10 s: event-loop delay, traffic, rooms (see stats.ts).
  * `admin …` runs a scoreboard moderation command instead (see admin.ts).
  */
 
@@ -15,6 +16,7 @@ import { ADMIN_USAGE, runAdmin } from './admin.js';
 import { createScoreboardApi } from './httpApi.js';
 import { SoloScoreboard } from './scoreboard.js';
 import { SqliteStore } from './sqliteStore.js';
+import { startStatsProbe } from './stats.js';
 import { DEFAULT_PORT, startRelayWsServer } from './wsServer.js';
 
 /**
@@ -81,6 +83,18 @@ const server = await startRelayWsServer({
   http: createScoreboardApi(scoreboard, { trustProxy, corsOrigin }),
 });
 console.log(`crack-attack relay listening on :${server.port} (db: ${dbPath})`);
+const statsInterval = /^\d+$/.test(process.env['STATS_INTERVAL_MS'] ?? '')
+  ? Number(process.env['STATS_INTERVAL_MS'])
+  : undefined;
+const statsProbe =
+  process.env['STATS'] === '1'
+    ? startStatsProbe({
+        server,
+        scoreboard,
+        dbPath: dbPath === ':memory:' ? undefined : dbPath,
+        ...(statsInterval !== undefined ? { intervalMs: statsInterval } : {}),
+      })
+    : null;
 
 // Last-resort handlers, installed once listening (startup failures still exit
 // as before). A stray rejection is a background store write that failed —
@@ -96,6 +110,7 @@ process.on('uncaughtException', (err) => {
 
 for (const signal of ['SIGINT', 'SIGTERM'] as const) {
   process.on(signal, () => {
+    statsProbe?.stop();
     server
       .close()
       .then(() => store.close())

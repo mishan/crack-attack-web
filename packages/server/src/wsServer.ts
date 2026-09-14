@@ -24,11 +24,37 @@ export interface RelayWsServerOptions extends RelayServerOptions {
   http?: RequestListener | undefined;
 }
 
+/** Socket traffic since the server started, and backpressure now (read by the STATS probe). */
+export interface RelayTraffic {
+  messagesIn: number;
+  /** Bytes of the messages received. */
+  bytesIn: number;
+  messagesOut: number;
+  /**
+   * Summed string length of the messages sent: their bytes, since the relay's
+   * JSON is ASCII, apart from player names outside ASCII (an undercount).
+   */
+  bytesOut: number;
+  /** Open WebSocket connections. */
+  sockets: number;
+  /** Bytes sent but not yet handed to the network (ws `bufferedAmount`): the largest socket's. */
+  bufferedMax: number;
+  /** The same, summed over every socket. */
+  bufferedTotal: number;
+}
+
 export interface RelayWsServer {
   /** The bound port (useful when 0 was requested). */
   readonly port: number;
   readonly relay: RelayServer;
+  traffic(): RelayTraffic;
   close(): Promise<void>;
+}
+
+/** Byte length of a ws message, in whichever form ws delivered it. */
+function rawLength(data: Buffer | ArrayBuffer | Buffer[]): number {
+  if (Array.isArray(data)) return data.reduce((n, b) => n + b.length, 0);
+  return data instanceof ArrayBuffer ? data.byteLength : data.length;
 }
 
 /** Default port, matching the original (CO_DEFAULT_PORT, Communicator.h:35). */
@@ -66,11 +92,16 @@ export function startRelayWsServer(options: RelayWsServerOptions = {}): Promise<
   });
   const server = createServer(options.http ?? notFound);
   const wss = new WebSocketServer({ server, maxPayload: MAX_CLIENT_MESSAGE_BYTES });
+  const counts = { messagesIn: 0, bytesIn: 0, messagesOut: 0, bytesOut: 0 };
 
   wss.on('connection', (ws: WebSocket) => {
     const conn: ClientConnection = {
       send: (text) => {
-        if (ws.readyState === ws.OPEN) ws.send(text);
+        if (ws.readyState === ws.OPEN) {
+          ws.send(text);
+          counts.messagesOut++;
+          counts.bytesOut += text.length;
+        }
       },
       close: () => ws.close(),
     };
@@ -78,6 +109,8 @@ export function startRelayWsServer(options: RelayWsServerOptions = {}): Promise<
     // Chain async handling so a connection's messages process in order.
     let pipeline = Promise.resolve();
     ws.on('message', (data, isBinary) => {
+      counts.messagesIn++;
+      counts.bytesIn += rawLength(data);
       // The protocol is text-only JSON; drop binary frames outright rather
       // than mis-decoding them.
       if (isBinary) return;
@@ -119,6 +152,15 @@ export function startRelayWsServer(options: RelayWsServerOptions = {}): Promise<
       resolve({
         port,
         relay,
+        traffic: () => {
+          let bufferedMax = 0;
+          let bufferedTotal = 0;
+          for (const client of wss.clients) {
+            bufferedMax = Math.max(bufferedMax, client.bufferedAmount);
+            bufferedTotal += client.bufferedAmount;
+          }
+          return { ...counts, sockets: wss.clients.size, bufferedMax, bufferedTotal };
+        },
         close: () =>
           new Promise<void>((res, rej) => {
             relay.shutdown();

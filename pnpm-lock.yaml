@@ -89,6 +89,31 @@ importers:
         specifier: workspace:*
         version: link:../../packages/core
 
+  tools/load-test:
+    dependencies:
+      '@crack-attack/client':
+        specifier: workspace:*
+        version: link:../../packages/client
+      '@crack-attack/core':
+        specifier: workspace:*
+        version: link:../../packages/core
+      '@crack-attack/protocol':
+        specifier: workspace:*
+        version: link:../../packages/protocol
+      '@crack-attack/server':
+        specifier: workspace:*
+        version: link:../../packages/server
+      ws:
+        specifier: ^8.21.0
+        version: 8.21.0
+    devDependencies:
+      '@types/node':
+        specifier: ^22.10.2
+        version: 22.20.0
+      '@types/ws':
+        specifier: ^8.18.1
+        version: 8.18.1
+
   tools/obj2gltf: {}
 
   tools/replay-analyze:

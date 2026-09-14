@@ -124,6 +124,21 @@ export function maxReplayInputs(ticks: number): number {
   return Math.floor(ticks / 3) + 100;
 }
 
+/** {@link SoloScoreboard.stats}. */
+export interface ScoreboardStats {
+  /** Replays queued or being verified. */
+  verifierQueued: number;
+  /** Distinct runs being checked (retries of one run share a check). */
+  submissionsInFlight: number;
+  /** Board responses cached. */
+  scoresCached: number;
+  /** Clients each per-client rate limiter is tracking. */
+  ticketClients: number;
+  submitClients: number;
+  scoresClients: number;
+  replayClients: number;
+}
+
 /** Board responses cached at most (each board, period and month is one). */
 const SCORES_CACHE_MAX_ENTRIES = 256;
 /** The key of a bucket shared by all clients. */
@@ -207,6 +222,11 @@ class TieredLimit {
     }
   }
 
+  /** Clients tracked by the per-client bucket. */
+  get clients(): number {
+    return this.own.size;
+  }
+
   private buckets(client: string): [RateLimiter, string][] {
     const site = siteKey(client);
     return [
@@ -273,6 +293,19 @@ export class SoloScoreboard {
     this.scoresLimiter = new RateLimiter(options.scoresLimit ?? DEFAULT_SCORES_LIMIT, this.now);
     this.replayLimiter = new RateLimiter(options.replayLimit ?? DEFAULT_REPLAY_LIMIT, this.now);
     this.scoresCacheMs = options.scoresCacheMs ?? DEFAULT_SCORES_CACHE_MS;
+  }
+
+  /** Queue, cache and limiter sizes, for the relay's STATS probe. */
+  stats(): ScoreboardStats {
+    return {
+      verifierQueued: this.verifier.queued,
+      submissionsInFlight: this.inFlight.size,
+      scoresCached: this.scoresCache.size,
+      ticketClients: this.ticketLimit.clients,
+      submitClients: this.submitLimit.clients,
+      scoresClients: this.scoresLimiter.size,
+      replayClients: this.replayLimiter.size,
+    };
   }
 
   /** Issue a run ticket to `client` (a rate-limit key, see `clientKey`). */

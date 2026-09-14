@@ -177,6 +177,23 @@ export interface RelayServerOptions {
   now?: (() => number) | undefined;
 }
 
+/** Point-in-time counts for the relay's STATS probe (`stats.ts`). */
+export interface RelayStats {
+  /** Open connections, helloed or not. */
+  connections: number;
+  /** Helloed connections. */
+  sessions: number;
+  rooms: number;
+  /** Rooms with a match in progress. */
+  playing: number;
+  /** Spectators across all rooms. */
+  spectators: number;
+  /** Seats dropped mid-match, their reconnect grace running. */
+  dropped: number;
+  /** Longest input ledger of any seat, in frames. */
+  maxLedger: number;
+}
+
 export class RelayServer {
   private readonly rooms = new Map<string, Room>();
   private readonly sessions = new Map<ClientConnection, Session | null>();
@@ -199,6 +216,29 @@ export class RelayServer {
   /** Number of open rooms (inspection/test helper). */
   get roomCount(): number {
     return this.rooms.size;
+  }
+
+  /** Session and room counts. Walks every room, so call it now and then, not per message. */
+  stats(): RelayStats {
+    let sessions = 0;
+    for (const session of this.sessions.values()) if (session) sessions++;
+    let playing = 0;
+    let spectators = 0;
+    let maxLedger = 0;
+    for (const room of this.rooms.values()) {
+      if (room.state === 'playing') playing++;
+      spectators += room.spectators.length;
+      for (const seat of room.seats) maxLedger = Math.max(maxLedger, seat.frames.length);
+    }
+    return {
+      connections: this.sessions.size,
+      sessions,
+      rooms: this.rooms.size,
+      playing,
+      spectators,
+      dropped: this.dropped.size,
+      maxLedger,
+    };
   }
 
   /** Cancel outstanding timers (transport shutdown). */

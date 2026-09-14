@@ -16,4 +16,5 @@ export * from './soloVerifier.js';
 export * from './scoreboard.js';
 export * from './httpApi.js';
 export * from './admin.js';
+export * from './stats.js';
 export * from './wsServer.js';
