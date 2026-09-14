@@ -19,7 +19,7 @@ The project is a pnpm monorepo:
 | `packages/core`     | Deterministic simulation — zero deps, runs in the browser and Node. |
 | `packages/protocol` | Wire message types + codec shared by client and server.             |
 | `packages/client`   | Three.js renderer, input, HUD, audio (a Vite app).                  |
-| `packages/server`   | Lobby + lockstep relay (Node, `ws`, SQLite).                        |
+| `packages/server`   | Lobby + lockstep relay + solo scoreboard (Node, `ws`, SQLite).      |
 | `tools/`            | Dev tooling: `ai-arena`, `replay-check`, `obj2gltf`.                |
 
 ## Requirements
@@ -111,8 +111,9 @@ any static file server.
 
 The build is plain static files — upload the contents of `dist/web` to any web
 server, at the domain root or a subdirectory (asset paths are relative). Nothing
-runs server-side; only online play needs the separate relay (set
-`VITE_RELAY_URL` at build time, see below).
+runs server-side; only online play and ranked solo runs need the separate relay
+(set `VITE_RELAY_URL` at build time, see below). Without the relay, solo still
+plays, unranked.
 
 For a fast first load, configure the server to:
 
@@ -159,9 +160,9 @@ Append these to the client URL (e.g. `http://localhost:5173/?net`):
   `?relay=ws://localhost:8080` or `?relay=wss://example.com/ws`.
 - `?tune` — open the lighting/material render tuner (dev aid).
 
-## Run the relay server (for multiplayer)
+## Run the relay server (for multiplayer and the scoreboard)
 
-Netplay and spectating go through the relay. In development, build it once,
+Netplay, spectating and ranked solo runs go through the relay. In development, build it once,
 then start it from the repo (to deploy it, see [Standalone build](#standalone-build-for-deploying)):
 
 ```sh
@@ -348,8 +349,11 @@ Notes:
 - Let's Encrypt (e.g. `certbot --nginx -d example.com`) is the easy way to get
   and renew the certificate.
 - The relay can also live on its own host or subdomain (e.g.
-  `wss://relay.example.com/`); point `VITE_RELAY_URL` at it. Serving both from
-  one site keeps it to a single certificate.
+  `wss://relay.example.com/`); point `VITE_RELAY_URL` at it. The client then
+  calls the scoreboard at `https://relay.example.com/api/solo`, another
+  origin, so proxy `/api/` there too and start the relay with
+  `CORS_ORIGIN=https://example.com` (the client's origin). Serving both from
+  one site keeps it to a single certificate and needs no CORS.
 - Behind the proxy, every connection reaches the relay from nginx's address.
   With `TRUST_PROXY=1` the scoreboard reads each client's address from the last
   `X-Forwarded-For` hop, the one nginx adds; the WebSocket side doesn't use
@@ -381,6 +385,96 @@ Notes:
   [Install]
   WantedBy=multi-user.target
   ```
+
+### Deploying the scoreboard
+
+The scoreboard ships inside the relay, so a running deployment gets it by
+upgrading the relay and the client. The steps below assume the setup above:
+nginx in front, the relay as `crack-attack.service`, the database at
+`/var/lib/crack-attack/lobby.db`.
+
+1. **Build the relay and client from one commit.** A ranked run's ticket
+   carries the relay's rules version (core's `SIM_VERSION`). A client built
+   under other rules plays unranked (`UNRANKED — reload`) until it's reloaded,
+   so whenever either changes, deploy both.
+
+   ```sh
+   pnpm install --frozen-lockfile
+   pnpm --filter @crack-attack/server bundle
+   node packages/server/scripts/smoke-bundle.mjs
+   VITE_RELAY_URL=wss://example.com/ws pnpm --filter @crack-attack/client build
+   ```
+
+   The smoke test runs the bundle alone in an empty directory. It checks a
+   WebSocket handshake, a ticket and the empty board, a clean stop, and the
+   admin CLI.
+
+2. **Back up the database.** The new relay's first start adds the
+   scoreboard's tables in place. Older relays can still use the upgraded
+   file, but keep a copy. The relay runs SQLite in WAL mode, so use `sqlite3`
+   while it's running rather than `cp`:
+
+   ```sh
+   sqlite3 /var/lib/crack-attack/lobby.db ".backup /var/lib/crack-attack/lobby.db.bak"
+   ```
+
+   A clean stop folds the WAL back into the file, so after
+   `systemctl stop crack-attack` a plain `cp` works too.
+
+3. **Add the `/api/` location to nginx**, beside `/ws` (see the config
+   [above](#production-tls-termination-with-nginx-recommended)), then run
+   `nginx -t && systemctl reload nginx`. Doing this first is harmless: the old
+   client never calls it.
+
+4. **Set `TRUST_PROXY=1`** in the unit's `Environment=` line (the example unit
+   has it), then run `systemctl daemon-reload`. Behind nginx every request
+   comes from `127.0.0.1`. Without this setting, all players share one
+   client's rate limits, so after a burst of 30 tickets everyone plays
+   unranked.
+
+5. **Swap the relay and restart it.** Rooms live in memory, so a restart ends
+   any netplay match in progress. Pick a quiet moment.
+
+   ```sh
+   sudo install -m 644 packages/server/dist/relay.mjs /opt/crack-attack/relay.mjs
+   sudo systemctl restart crack-attack
+   journalctl -u crack-attack -n 20   # "crack-attack relay listening on :8080 (db: …)"
+   ```
+
+6. **Check the API through nginx:**
+
+   ```sh
+   curl -si -X POST https://example.com/api/solo/ticket   # 200 and {"runId":…,"seed":…}
+   curl -s 'https://example.com/api/solo/scores?limit=5'  # "total":0 on a new board
+   ```
+
+   An nginx 404 page means the `/api/` location is missing. A 426 means the
+   old relay is still running: it answers every plain HTTP request that way.
+   The test ticket just expires unused.
+
+7. **Upload the client** (see [Deploying the client](#deploying-the-client)).
+   Play a ranked game to the end: the HUD should show `RANKED`, then the run's
+   places, and `admin recent` should list it.
+
+Running it:
+
+- Run the admin CLI as the service's user, so any file SQLite creates beside
+  the database belongs to the relay:
+
+  ```sh
+  sudo -u crack-attack env DB=/var/lib/crack-attack/lobby.db node /opt/crack-attack/relay.mjs admin recent 50
+  ```
+
+- Watch the log for lines starting `scoreboard:`. They report a limit shared
+  by all clients turning requests away (when it's the ticket limit, every
+  player is playing unranked) or a failed replay sweep.
+- Each run adds a row. Its replay, a few KB, is kept for a week, then only if
+  the run is on a top-100 board. The database keeps growing with the number of
+  runs, so include it in regular backups (the `sqlite3 .backup` command above).
+- To roll back, put the old `relay.mjs` and client back and restart. The old
+  relay runs on the upgraded database and ignores the scoreboard's tables. An
+  old relay with the new client works too, but every run is unranked
+  (`UNRANKED — offline`).
 
 ## Wiring the client to the relay
 

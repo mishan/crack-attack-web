@@ -312,9 +312,14 @@ Play a stored solo replay through the solo view stack, with the demo mode's
 speed and pause controls. This is the practical defence against bots, because
 anyone can watch the top runs.
 
-### Phase 5 — docs and deploy
+### Phase 5 — docs and deploy — DONE, except the smoke submit
 
-- README: the new env vars (`TRUST_PROXY`, and `CORS_ORIGIN` if the API is on
-  another host), an nginx `location /api/` block, and moderation.
-- Extend `smoke-bundle.mjs` to request a ticket, submit, and read the scores.
-- Add an AGENTS.md port-status entry.
+- README: the new env vars (`TRUST_PROXY`, and `CORS_ORIGIN` when the relay
+  is on its own host), an nginx `location /api/` block, moderation, and
+  "Deploying the scoreboard", a rollout checklist for a running deployment
+  (build both from one commit, back up the database, nginx, `TRUST_PROXY`,
+  swap and restart, check the API, then the client; rollback).
+- `smoke-bundle.mjs` requests a ticket, reads the empty board, and runs the
+  admin CLI. Still to do: submit a run. The pacing floor means a real run
+  can't be submitted sooner than it takes to play.
+- AGENTS.md port-status entry.

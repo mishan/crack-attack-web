@@ -656,8 +656,10 @@ A generator header that a real, non-AI tool always writes (e.g. a lockfile's own
   scores** / `?scores` opens `highScores.ts` (lazy; Score/Chain × this
   month/last month/all time, own runs highlighted); the attract title card
   lists this month's top five. Player names render with `dir="auto"`, so a
-  right-to-left name can't reorder its row. Next: phase 4, a replay viewer
-  for stored runs.
+  right-to-left name can't reorder its row. **Phase 5 (docs) landed**: the
+  README's "Deploying the scoreboard" rollout checklist, plus CORS for a
+  relay on its own host. The smoke test doesn't submit a run yet. Next:
+  phase 4, a replay viewer for stored runs.
 - [ ] Phase 6 stretch (X-mode, replays, WebRTC, binary codec if
       measurements demand it)
 
