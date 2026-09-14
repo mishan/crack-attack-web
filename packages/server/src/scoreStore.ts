@@ -106,7 +106,10 @@ type Row = StoredSoloScore & { replay: string | null; replaySettled: boolean };
 const publicCopy = ({ replay: _replay, replaySettled: _settled, ...score }: Row): StoredSoloScore =>
   score;
 
-/** In-memory score store: tests and zero-persistence deployments. */
+/**
+ * In-memory score store, for tests: most queries scan every row. The relay
+ * runs on `SqliteStore` (`DB=:memory:` included).
+ */
 export class MemoryScoreStore implements ScoreStore {
   private readonly tickets = new Map<string, SoloTicket>();
   private readonly rows: Row[] = [];
@@ -191,10 +194,12 @@ export class MemoryScoreStore implements ScoreStore {
   }
 
   settleReplays(keep: readonly number[], drop: readonly number[]): Promise<void> {
+    const kept = new Set(keep);
+    const drops = new Set(drop);
     for (const row of this.rows) {
       if (row.hidden) continue;
-      const dropped = drop.includes(row.id);
-      if (!dropped && !keep.includes(row.id)) continue;
+      const dropped = drops.has(row.id);
+      if (!dropped && !kept.has(row.id)) continue;
       row.replaySettled = true;
       if (dropped) row.replay = null;
     }
