@@ -1,10 +1,11 @@
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it, vi } from 'vitest';
-import { SIM_VERSION, type SoloReplay } from '@crack-attack/core';
-import { SOLO_TICKET_TTL_MS } from '@crack-attack/protocol';
+import { CC_LEFT, CC_RIGHT, SIM_VERSION, type SoloReplay } from '@crack-attack/core';
+import { SOLO_TICKET_TTL_MS, type SoloReplayResponse } from '@crack-attack/protocol';
 import { clientKey } from './rateLimit.js';
 import {
+  DEFAULT_REPLAY_GRACE_MS,
   DEFAULT_SCORES_CACHE_MS,
   SoloScoreboard,
   type SoloScoreboardOptions,
@@ -36,6 +37,7 @@ function setup(options: Omit<SoloScoreboardOptions, 'store'> = {}) {
     now: () => clock.now,
     newSeed: () => FIXTURE.seed,
     newRunId: () => rid(++runs),
+    log: () => undefined,
     ...options,
   });
   return { store, board, clock };
@@ -144,6 +146,26 @@ describe('SoloScoreboard tickets', () => {
       await expect(board.issueTicket(CLIENT)).rejects.toMatchObject({ code: 'rate_limited' });
     }
     await board.issueTicket('198.51.100.1'); // the global bucket still has room
+  });
+
+  it('logs the shared ticket limit turning clients away, at most every 10 minutes', async () => {
+    const lines: string[] = [];
+    const { board, clock } = setup({
+      ticketGlobalLimit: { capacity: 1, refillMs: 3_600_000 },
+      log: (line) => lines.push(line),
+    });
+    await board.issueTicket('198.51.100.1');
+    for (let n = 2; n <= 4; n++) {
+      await expect(board.issueTicket(`198.51.100.${n}`)).rejects.toMatchObject({
+        code: 'rate_limited',
+      });
+    }
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toMatch(/ticket limit shared by all clients refused 1 request /);
+    clock.now += 10 * 60_000;
+    await expect(board.issueTicket('198.51.100.5')).rejects.toMatchObject({ code: 'rate_limited' });
+    expect(lines).toHaveLength(2);
+    expect(lines[1]).toMatch(/refused 3 requests/);
   });
 });
 
@@ -346,6 +368,54 @@ describe('SoloScoreboard submissions', () => {
       headers: { 'Retry-After': '60' }, // this limiter's refill, not a fixed guess
     });
   });
+
+  it('also limits submissions per IPv6 /48 and across all clients', async () => {
+    const lines: string[] = [];
+    const s = setup({
+      submitSiteLimit: { capacity: 2, refillMs: 60_000 },
+      submitGlobalLimit: { capacity: 3, refillMs: 60_000 },
+      log: (line) => lines.push(line),
+    });
+    const in48 = (n: number) => clientKey(`2001:db8:1:${n.toString(16)}::1`);
+    for (let n = 0; n < 2; n++) {
+      await expect(s.board.submit(in48(n), {})).rejects.toMatchObject({ code: 'bad_request' });
+    }
+    await expect(s.board.submit(in48(9), {})).rejects.toMatchObject({ status: 429 });
+    // The site's refusal spent nothing shared: one submission left for everyone.
+    await expect(s.board.submit(CLIENT, {})).rejects.toMatchObject({ code: 'bad_request' });
+    await expect(s.board.submit('198.51.100.1', {})).rejects.toMatchObject({ status: 429 });
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toMatch(/submission limit shared by all clients/);
+  });
+
+  it('checks the submission limits without spending them', async () => {
+    const s = setup({ submitLimit: { capacity: 1, refillMs: 60_000 } });
+    s.board.checkSubmitLimit(CLIENT);
+    s.board.checkSubmitLimit(CLIENT);
+    await expect(s.board.submit(CLIENT, {})).rejects.toMatchObject({ code: 'bad_request' });
+    let refusal: unknown;
+    try {
+      s.board.checkSubmitLimit(CLIENT);
+    } catch (err) {
+      refusal = err;
+    }
+    expect(refusal).toMatchObject({ status: 429, headers: { 'Retry-After': '60' } });
+  });
+
+  it('refuses a replay padded with more input than anyone can press, keeping the ticket', async () => {
+    const s = setup();
+    const runId = await playRun(s);
+    // A cursor wiggle: a change every tick, moving nothing anywhere.
+    const inputs = Array.from({ length: FIXTURE.ticks - 1 }, (_, i) => [
+      1,
+      i % 2 === 0 ? CC_LEFT : CC_RIGHT,
+    ]);
+    const replay = { ...FIXTURE, inputs };
+    const res = s.board.submit(CLIENT, submission(runId, { replay }));
+    await expect(res).rejects.toMatchObject({ status: 422, code: 'invalid_replay' });
+    await expect(res).rejects.toThrow(/faster than anyone/);
+    expect((await s.board.submit(CLIENT, submission(runId))).score).toBe(48);
+  });
 });
 
 describe('SoloScoreboard boards', () => {
@@ -434,8 +504,9 @@ describe('SoloScoreboard boards', () => {
     const topScores = vi.spyOn(s.store, 'topScores');
     const runId = await playRun(s);
     const first = await s.board.scores(CLIENT, query({ period: 'month' }));
-    // The same query normalized: this month, named.
-    expect(await s.board.scores(CLIENT, query({ month: '2026-09' }))).toBe(first);
+    // The same query normalized (this month, named), and at any limit: one load.
+    expect(await s.board.scores(CLIENT, query({ month: '2026-09' }))).toEqual(first);
+    await s.board.scores(CLIENT, query({ period: 'month', limit: '3' }));
     expect(topScores).toHaveBeenCalledTimes(1);
     await s.board.scores(CLIENT, query({ board: 'mult' })); // another board: its own entry
     expect(topScores).toHaveBeenCalledTimes(2);
@@ -482,7 +553,7 @@ describe('SoloScoreboard boards', () => {
     const s = setup();
     const runId = await playRun(s);
     const { id } = await s.board.submit(CLIENT, submission(runId));
-    const res = await s.board.replay(String(id));
+    const res = JSON.parse(await s.board.replay(CLIENT, String(id))) as SoloReplayResponse;
     expect(res.entry).toEqual({
       id,
       name: 'misha',
@@ -495,10 +566,46 @@ describe('SoloScoreboard boards', () => {
 
     await s.store.setHidden(id, true);
     for (const idText of [String(id), '999', '0', 'abc', '1e3']) {
-      await expect(s.board.replay(idText)).rejects.toMatchObject({
+      await expect(s.board.replay(CLIENT, idText)).rejects.toMatchObject({
         status: 404,
         code: 'not_found',
       });
+    }
+  });
+
+  it('rate-limits replay requests per client', async () => {
+    const { board } = setup({ replayLimit: { capacity: 1, refillMs: 2_000 } });
+    await expect(board.replay(CLIENT, '1')).rejects.toMatchObject({ code: 'not_found' });
+    await expect(board.replay(CLIENT, '1')).rejects.toMatchObject({
+      status: 429,
+      code: 'rate_limited',
+      headers: { 'Retry-After': '2' },
+    });
+    await expect(board.replay('198.51.100.1', '1')).rejects.toMatchObject({ code: 'not_found' });
+  });
+
+  it("keeps a run's replay a week, then only if a board shows it", async () => {
+    const s = setup();
+    // The top 100 of all time and of September, on both boards.
+    const listed: number[] = [];
+    for (let n = 1; n <= 100; n++) {
+      listed.push((await addRun(s.store, 1000 + n, { score: 100 + n, topMultiplier: 5 }))!);
+    }
+    // Off every board: 101st on the score boards, 102nd on the chain boards.
+    const low = (await addRun(s.store, 1101, { score: 1, topMultiplier: 1 }))!;
+    // Off the all-time boards, but the best of its month.
+    const august = (await addRun(s.store, 1102, { score: 1, createdAt: Date.UTC(2026, 7, 20) }))!;
+    // A low score, but the best chain of all time.
+    const chain = (await addRun(s.store, 1103, { score: 0, topMultiplier: 9 }))!;
+
+    s.clock.now += DEFAULT_REPLAY_GRACE_MS;
+    // Recording a run sets off the sweep; the new run is well inside its week.
+    const { id: fresh } = await s.board.submit(CLIENT, submission(await playRun(s)));
+    expect(await s.store.getReplay(low)).toBeNull();
+    await expect(s.board.replay(CLIENT, String(low))).rejects.toMatchObject({ status: 404 });
+    expect(await s.store.scoreByRun(rid(1101))).toMatchObject({ id: low, hidden: false });
+    for (const id of [...listed, august, chain, fresh]) {
+      expect(await s.store.getReplay(id)).not.toBeNull();
     }
   });
 });

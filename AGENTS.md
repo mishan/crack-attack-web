@@ -626,9 +626,13 @@ A generator header that a real, non-AI tool always writes (e.g. a lockfile's own
   `SqliteStore` gained a `PRAGMA user_version` migration list (v1 =
   `solo_tickets`, `solo_scores`, with covering board indexes so boards,
   counts and standings stay index-only). All-time and monthly (UTC) boards by
-  score or multiplier, every run its own row, responses cached 5 s;
-  per-client token buckets (IPv6 per /64; tickets also per /48 and
-  globally), `TRUST_PROXY=<proxies>` for `X-Forwarded-For`, `CORS_ORIGIN`,
+  score or multiplier, every run its own row, each board's top 100 cached
+  5 s and sliced per request; per-client token buckets (IPv6 per /64;
+  tickets and submissions also per /48 and globally, a full global bucket
+  logged; submissions refused before the body is read), at most one input
+  change per 3 ticks, replays kept a week and then only for runs in a
+  board's top 100 (an hourly sweep), `TRUST_PROXY=<proxies>` for
+  `X-Forwarded-For`, `CORS_ORIGIN`,
   name cleanup (grapheme-counted), and `relay.mjs admin recent|hide|unhide`
   moderation. **Phase 3 landed**
   (the client): `score/scoreboardApi.ts` (API URL derived from the relay

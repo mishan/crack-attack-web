@@ -191,7 +191,8 @@ Each phase is one PR.
 - **Service.** `scoreboard.ts` (`SoloScoreboard`) is transport-free, like
   `RelayServer`. A submission is checked in this order:
   1. the envelope and name
-  2. the replay's shape
+  2. the replay's shape, and its input rate (at most one change per 3 ticks
+     on average, plus 100)
   3. the ticket: unknown, expired, older rules, wrong seed, or submitted too
      soon
   4. re-simulation
@@ -206,7 +207,11 @@ Each phase is one PR.
     tickets only. Using one deletes it, and expired ones are swept.
   - `solo_scores(id PK, run_id UNIQUE, name, score, top_multiplier, ticks, sim_version, created_at, replay TEXT, hidden)`,
     with covering indexes for both boards and by time, so boards, counts and
-    standings never read the table rows.
+    standings never read the table rows. `replay` is NULL once dropped: a
+    run keeps it for a week, then only if it's in the top 100 of its month
+    or of all time on either board. An hourly sweep (after a run is
+    recorded) judges each run once as it comes of age, through a partial
+    index of runs still holding a replay.
 
   A separate `ScoreStore` interface (`scoreStore.ts`) sits beside
   `LobbyStore`; `SqliteStore` implements both on one file. `recordRun` uses
@@ -228,16 +233,22 @@ Each phase is one PR.
   - a 256 KiB body cap
   - per-client token buckets (IPv6 per /64): tickets burst 30, then 1 per
     10 s; submissions burst 20, then 1 per 20 s; board requests burst 60,
-    then 1 per s
-  - tickets also per IPv6 /48 (burst 120, then 1 per 2.5 s) and across all
-    clients (burst 600, then 5 per s), so rotating addresses doesn't help
+    then 1 per s; replays burst 30, then 1 per 2 s
+  - tickets and submissions also per IPv6 /48 (tickets burst 120, then 1 per
+    2.5 s; submissions 80, then 1 per 5 s) and across all clients (tickets
+    burst 600, then 5 per s; submissions 300, then 1 per s), so rotating
+    addresses doesn't help; a full global bucket is logged, at most every
+    10 min
+  - a submission over its limits is refused before its body is read, and
+    the connection closed
   - `TRUST_PROXY=<n>` takes the client from `X-Forwarded-For`, _n_ entries
     from the right (1 behind nginx, 2 behind a CDN and nginx), ports
     stripped; an entry that isn't an IP falls back to the socket address
   - `CORS_ORIGIN` for a client on another origin
-- **Caching:** a board response is reused for 5 s (cleared when this relay
-  records a run), and replays are served with `max-age=60`, so a hidden run
-  soon drops out of caches.
+- **Caching:** a board's top 100 and its count are reused for 5 s (cleared
+  when this relay records a run), each request sliced to its `limit`, and
+  replays are served, as stored, with `max-age=60`, so a hidden run soon
+  drops out of caches.
 - **Names:** control, format (zero-width, bidi), private-use and unassigned
   characters stripped, except a lone zero-width (non-)joiner between two
   visible characters (emoji sequences, Persian and Indic text); whitespace

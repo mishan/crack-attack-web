@@ -72,7 +72,8 @@ export const MIGRATIONS: readonly string[] = [
     ticks          INTEGER NOT NULL,
     sim_version    INTEGER NOT NULL,
     created_at     INTEGER NOT NULL,
-    replay         TEXT NOT NULL,
+    -- NULL once dropped: kept only for runs on a board (see SoloScoreboard).
+    replay         TEXT,
     hidden         INTEGER NOT NULL DEFAULT 0
   ) STRICT;
   -- Covering indexes, so the boards, counts and standings read only the
@@ -81,6 +82,10 @@ export const MIGRATIONS: readonly string[] = [
   CREATE INDEX solo_scores_board_mult
     ON solo_scores (hidden, top_multiplier DESC, score DESC, id, created_at);
   CREATE INDEX solo_scores_visible_time ON solo_scores (hidden, created_at);
+  -- Runs that may yet lose their replay. Partial, so a dropped replay leaves
+  -- it and each sweep reads only runs it hasn't settled.
+  CREATE INDEX solo_scores_replay_kept ON solo_scores (created_at)
+    WHERE replay IS NOT NULL AND hidden = 0;
   `,
 ];
 
@@ -122,6 +127,11 @@ export const SCORE_QUERIES = {
       (SELECT COUNT(*) FROM solo_scores s WHERE ${inRange('s')}) AS total
     FROM solo_scores t
     WHERE t.id = :id AND ${inRange('t')}`,
+  // Pinned: a planner without statistics picks the time index, which also
+  // walks every run whose replay is already settled.
+  replayCandidates: `SELECT ${SCORE_COLUMNS} FROM solo_scores s INDEXED BY solo_scores_replay_kept
+    WHERE s.replay IS NOT NULL AND s.hidden = 0 AND s.created_at < :before
+    ORDER BY s.created_at LIMIT :limit`,
 } as const;
 
 export class SqliteStore implements LobbyStore, ScoreStore {
@@ -143,6 +153,8 @@ export class SqliteStore implements LobbyStore, ScoreStore {
   private readonly topByScore: StatementSync;
   private readonly topByMult: StatementSync;
   private readonly selectReplay: StatementSync;
+  private readonly selectReplayCandidates: StatementSync;
+  private readonly clearReplay: StatementSync;
   private readonly updateHidden: StatementSync;
   private readonly selectRecent: StatementSync;
 
@@ -192,8 +204,11 @@ export class SqliteStore implements LobbyStore, ScoreStore {
     this.topByScore = this.db.prepare(SCORE_QUERIES.topByScore);
     this.topByMult = this.db.prepare(SCORE_QUERIES.topByMult);
     this.selectReplay = this.db.prepare(
-      `SELECT ${SCORE_COLUMNS}, replay FROM solo_scores WHERE id = ? AND hidden = 0`,
+      `SELECT ${SCORE_COLUMNS}, replay FROM solo_scores
+       WHERE id = ? AND hidden = 0 AND replay IS NOT NULL`,
     );
+    this.selectReplayCandidates = this.db.prepare(SCORE_QUERIES.replayCandidates);
+    this.clearReplay = this.db.prepare('UPDATE solo_scores SET replay = NULL WHERE id = ?');
     this.updateHidden = this.db.prepare('UPDATE solo_scores SET hidden = ? WHERE id = ?');
     this.selectRecent = this.db.prepare(
       `SELECT ${SCORE_COLUMNS} FROM solo_scores ORDER BY id DESC LIMIT ?`,
@@ -334,6 +349,18 @@ export class SqliteStore implements LobbyStore, ScoreStore {
   getReplay(id: number): Promise<{ score: StoredSoloScore; replay: string } | null> {
     const row = this.selectReplay.get(id) as (ScoreRow & { replay: string }) | undefined;
     return Promise.resolve(row ? { score: scoreOf(row), replay: row.replay } : null);
+  }
+
+  replayCandidates(before: number, limit: number): Promise<StoredSoloScore[]> {
+    const rows = this.selectReplayCandidates.all({ before, limit }) as unknown as ScoreRow[];
+    return Promise.resolve(rows.map(scoreOf));
+  }
+
+  dropReplays(ids: readonly number[]): Promise<void> {
+    this.transaction(() => {
+      for (const id of ids) this.clearReplay.run(id);
+    });
+    return Promise.resolve();
   }
 
   setHidden(id: number, hidden: boolean): Promise<boolean> {

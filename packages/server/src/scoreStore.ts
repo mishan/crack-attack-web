@@ -72,8 +72,15 @@ export interface ScoreStore {
   countScores(range: TimeRange): Promise<number>;
   /** The best `limit` visible runs created in `range`, in board order. */
   topScores(board: ScoreBoard, range: TimeRange, limit: number): Promise<StoredSoloScore[]>;
-  /** A visible run and its replay JSON; null if unknown or hidden. */
+  /** A visible run and its replay JSON; null if unknown, hidden, or its replay was dropped. */
   getReplay(id: number): Promise<{ score: StoredSoloScore; replay: string } | null>;
+  /**
+   * Visible runs created before `before` that still keep their replay, oldest
+   * first, at most `limit`: the candidates for {@link dropReplays}.
+   */
+  replayCandidates(before: number, limit: number): Promise<StoredSoloScore[]>;
+  /** Drop these runs' replays, keeping the runs themselves on the boards. */
+  dropReplays(ids: readonly number[]): Promise<void>;
   /** Hide a run from the boards (or restore it); false if the id is unknown. */
   setHidden(id: number, hidden: boolean): Promise<boolean>;
   /** The newest `limit` runs, hidden ones included, newest first. */
@@ -90,7 +97,7 @@ export function compareScores(
     : (a, b) => b.topMultiplier - a.topMultiplier || b.score - a.score || a.id - b.id;
 }
 
-type Row = StoredSoloScore & { replay: string };
+type Row = StoredSoloScore & { replay: string | null };
 
 const publicCopy = ({ replay: _replay, ...score }: Row): StoredSoloScore => score;
 
@@ -166,7 +173,21 @@ export class MemoryScoreStore implements ScoreStore {
 
   getReplay(id: number): Promise<{ score: StoredSoloScore; replay: string } | null> {
     const row = this.rows.find((r) => r.id === id && !r.hidden);
-    return Promise.resolve(row ? { score: publicCopy(row), replay: row.replay } : null);
+    return Promise.resolve(
+      row && row.replay !== null ? { score: publicCopy(row), replay: row.replay } : null,
+    );
+  }
+
+  replayCandidates(before: number, limit: number): Promise<StoredSoloScore[]> {
+    const rows = this.rows
+      .filter((r) => !r.hidden && r.replay !== null && r.createdAt < before)
+      .sort((a, b) => a.createdAt - b.createdAt || a.id - b.id);
+    return Promise.resolve(rows.slice(0, limit).map(publicCopy));
+  }
+
+  dropReplays(ids: readonly number[]): Promise<void> {
+    for (const row of this.rows) if (ids.includes(row.id)) row.replay = null;
+    return Promise.resolve();
   }
 
   setHidden(id: number, hidden: boolean): Promise<boolean> {

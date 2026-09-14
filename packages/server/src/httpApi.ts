@@ -12,6 +12,8 @@ import { ApiError, type SoloScoreboard } from './scoreboard.js';
 
 /** A ticket request needs no body; anything past this much is refused unread. */
 const TICKET_MAX_BODY_BYTES = 1024;
+/** For a refusal that leaves the body unread: close the connection rather than drain it. */
+const CLOSE_CONNECTION = { Connection: 'close' } as const;
 
 export interface ScoreboardApiOptions {
   /**
@@ -19,7 +21,9 @@ export interface ScoreboardApiOptions {
    * `X-Forwarded-For` (true = 1). The client's address is taken that many
    * entries from the right: behind nginx alone, the one nginx added; behind a
    * CDN and nginx, the one the CDN added. Only set this behind proxies that
-   * set the header, or clients could pick their own rate-limit key.
+   * set the header, or clients could pick their own rate-limit key; and with
+   * more than one, the inner proxies must be reachable only through the outer
+   * ones (a client reaching nginx directly could forge the CDN's entry).
    */
   trustProxy?: boolean | number | undefined;
   /** `Access-Control-Allow-Origin` for the API (the client's origin, or `*`); unset = same-origin only. */
@@ -77,6 +81,13 @@ async function handle(
       send(res, 200, await scoreboard.issueTicket(client));
     } else if (route === '/submit') {
       allow(req, 'POST');
+      // A client over its limit is turned away before its body is read (up to
+      // 256 KiB) and parsed; the connection goes with the unread body.
+      try {
+        scoreboard.checkSubmitLimit(client);
+      } catch (err) {
+        throw err instanceof ApiError ? err.withHeaders(CLOSE_CONNECTION) : err;
+      }
       send(res, 200, await scoreboard.submit(client, await readJson(req)));
     } else if (route === '/scores') {
       allow(req, 'GET');
@@ -86,7 +97,7 @@ async function handle(
       if (!replay) throw new ApiError(404, 'not_found', 'not found');
       allow(req, 'GET');
       // Briefly: a run hidden by a moderator should drop out of caches soon.
-      send(res, 200, await scoreboard.replay(replay[1]!), 'public, max-age=60');
+      sendText(res, 200, await scoreboard.replay(client, replay[1]!), 'public, max-age=60');
     }
   } catch (err) {
     if (err instanceof ClientGoneError) return; // an aborted upload: nothing to say, no one to say it to
@@ -166,9 +177,9 @@ async function readJson(req: IncomingMessage): Promise<unknown> {
  * {@link ClientGoneError}.
  */
 function readBody(req: IncomingMessage, maxBytes: number): Promise<Buffer> {
-  // The rest is left unread, so close the connection rather than drain it.
+  // The rest is left unread.
   const tooLarge = () =>
-    new ApiError(413, 'too_large', `the body is over ${maxBytes} bytes`, { Connection: 'close' });
+    new ApiError(413, 'too_large', `the body is over ${maxBytes} bytes`, CLOSE_CONNECTION);
   return new Promise((resolve, reject) => {
     if (Number(req.headers['content-length']) > maxBytes) {
       reject(tooLarge());
@@ -206,7 +217,17 @@ function send(
   cache = 'no-store',
   extra: Readonly<Record<string, string>> = {},
 ): void {
-  const text = JSON.stringify(body);
+  sendText(res, status, JSON.stringify(body), cache, extra);
+}
+
+/** {@link send} for a body that's already JSON text. */
+function sendText(
+  res: ServerResponse,
+  status: number,
+  text: string,
+  cache = 'no-store',
+  extra: Readonly<Record<string, string>> = {},
+): void {
   res.writeHead(status, {
     'Content-Type': 'application/json; charset=utf-8',
     'Content-Length': Buffer.byteLength(text),

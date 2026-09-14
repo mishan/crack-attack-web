@@ -142,6 +142,70 @@ describe('scoreboard HTTP API', () => {
     expect(status).toBe(413);
   });
 
+  it('turns away a client over its submission limit before reading the body', async () => {
+    const scoreboard = new SoloScoreboard({
+      store: new MemoryScoreStore(),
+      submitLimit: { capacity: 1, refillMs: 60_000 },
+    });
+    const relay = await startRelayWsServer({
+      port: 0,
+      host: '127.0.0.1',
+      http: createScoreboardApi(scoreboard),
+    });
+    try {
+      const url = `http://127.0.0.1:${relay.port}/api/solo/submit`;
+      expect((await fetch(url, { method: 'POST', body: '{}' })).status).toBe(400);
+      // The body is declared but never sent, so any answer came before reading it.
+      const answer = await new Promise<{ status: number; headers: Record<string, unknown> }>(
+        (resolve, reject) => {
+          const req = request(
+            {
+              host: '127.0.0.1',
+              port: relay.port,
+              method: 'POST',
+              path: '/api/solo/submit',
+              headers: { 'content-type': 'application/json', 'content-length': '100000' },
+            },
+            (res) => {
+              resolve({ status: res.statusCode ?? 0, headers: res.headers });
+              res.resume();
+              req.destroy();
+            },
+          );
+          req.on('error', (err) => (req.destroyed ? undefined : reject(err)));
+          req.write('{');
+        },
+      );
+      expect(answer.status).toBe(429);
+      expect(answer.headers['connection']).toBe('close');
+      expect(answer.headers['retry-after']).toBe('60');
+    } finally {
+      await relay.close();
+    }
+  });
+
+  it('rate-limits replay requests, HEAD included', async () => {
+    const scoreboard = new SoloScoreboard({
+      store: new MemoryScoreStore(),
+      replayLimit: { capacity: 2, refillMs: 60_000 },
+    });
+    const relay = await startRelayWsServer({
+      port: 0,
+      host: '127.0.0.1',
+      http: createScoreboardApi(scoreboard),
+    });
+    try {
+      const url = `http://127.0.0.1:${relay.port}/api/solo/replay/1`;
+      expect((await fetch(url)).status).toBe(404);
+      expect((await fetch(url, { method: 'HEAD' })).status).toBe(404);
+      const limited = await fetch(url);
+      expect(limited.status).toBe(429);
+      expect(limited.headers.get('retry-after')).toBe('60');
+    } finally {
+      await relay.close();
+    }
+  });
+
   it('refuses a ticket request with a body over 1 KiB', async () => {
     expect((await post('/api/solo/ticket', 'x'.repeat(2048))).status).toBe(413);
     expect((await post('/api/solo/ticket', '{}')).status).toBe(200);
