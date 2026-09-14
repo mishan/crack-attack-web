@@ -74,6 +74,8 @@ export interface ScoreStore {
   topScores(board: ScoreBoard, range: TimeRange, limit: number): Promise<StoredSoloScore[]>;
   /** A visible run and its replay JSON; null if unknown, hidden, or its replay was dropped. */
   getReplay(id: number): Promise<{ score: StoredSoloScore; replay: string } | null>;
+  /** A visible run, whether or not it still has its replay; null if unknown or hidden. */
+  visibleScore(id: number): Promise<StoredSoloScore | null>;
   /**
    * Visible runs created before `before` whose replay isn't settled yet,
    * oldest first, at most `limit`: the candidates for {@link settleReplays}.
@@ -184,6 +186,11 @@ export class MemoryScoreStore implements ScoreStore {
     return Promise.resolve(
       row && row.replay !== null ? { score: publicCopy(row), replay: row.replay } : null,
     );
+  }
+
+  visibleScore(id: number): Promise<StoredSoloScore | null> {
+    const row = this.rows.find((r) => r.id === id && !r.hidden);
+    return Promise.resolve(row ? publicCopy(row) : null);
   }
 
   replayCandidates(before: number, limit: number): Promise<StoredSoloScore[]> {

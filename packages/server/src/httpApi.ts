@@ -9,6 +9,7 @@ import { isIP } from 'node:net';
 import { SOLO_API_PREFIX, SOLO_SUBMIT_MAX_BYTES } from '@crack-attack/protocol';
 import { clientKey } from './rateLimit.js';
 import { ApiError, type SoloScoreboard } from './scoreboard.js';
+import { renderSharePage, sharePageCsp } from './sharePage.js';
 
 /** A ticket request needs no body; anything past this much is refused unread. */
 const TICKET_MAX_BODY_BYTES = 1024;
@@ -28,6 +29,13 @@ export interface ScoreboardApiOptions {
   trustProxy?: boolean | number | undefined;
   /** `Access-Control-Allow-Origin` for the API (the client's origin, or `*`); unset = same-origin only. */
   corsOrigin?: string | undefined;
+  /**
+   * The game's address, ending in `/`: where share pages send people, and
+   * where their preview image is. Unset = the request's own host, over the
+   * scheme a trusted proxy reports in `X-Forwarded-Proto` (else http), which
+   * fits a relay behind the game's own nginx.
+   */
+  publicUrl?: string | undefined;
 }
 
 /** The client went away mid-request: there's no one left to answer. */
@@ -94,11 +102,18 @@ async function handle(
       allow(req, 'GET');
       send(res, 200, await scoreboard.scores(client, url.searchParams), 'no-cache');
     } else {
-      const replay = /^\/replay\/([^/]+)$/.exec(route);
-      if (!replay) throw new ApiError(404, 'not_found', 'not found');
+      const [, kind, idText] = /^\/(replay|share)\/([^/]+)$/.exec(route) ?? [];
+      if (idText === undefined) throw new ApiError(404, 'not_found', 'not found');
       allow(req, 'GET');
-      // Briefly: a run hidden by a moderator should drop out of caches soon.
-      sendText(res, 200, await scoreboard.replay(client, replay[1]!), 'public, max-age=60');
+      if (kind === 'replay') {
+        // Briefly: a run hidden by a moderator should drop out of caches soon.
+        sendText(res, 200, await scoreboard.replay(client, idText), 'public, max-age=60');
+      } else {
+        const card = await scoreboard.shareCard(client, idText);
+        const game = options.publicUrl ?? requestGameUrl(req, proxyHops);
+        // A few minutes: a run's places move, and a hidden run should drop out.
+        sendHtml(res, card ? 200 : 404, renderSharePage(card, game), sharePageCsp(game));
+      }
     }
   } catch (err) {
     if (err instanceof ClientGoneError) return; // an aborted upload: nothing to say, no one to say it to
@@ -126,6 +141,19 @@ function allow(req: IncomingMessage, method: 'GET' | 'POST'): void {
       Allow: method === 'GET' ? 'GET, HEAD, OPTIONS' : 'POST, OPTIONS',
     });
   }
+}
+
+/**
+ * The game's address, taken to be this request's host: the default for
+ * {@link ScoreboardApiOptions.publicUrl}. A malformed `Host` gets localhost.
+ */
+export function requestGameUrl(req: IncomingMessage, proxyHops: number): string {
+  const forwarded = req.headers['x-forwarded-proto'];
+  const proto = proxyHops > 0 && typeof forwarded === 'string' ? forwarded.split(',')[0] : '';
+  const scheme = proto?.trim() === 'https' ? 'https' : 'http';
+  const host = req.headers.host ?? '';
+  const valid = /^(?:[\w.-]+|\[[\da-fA-F:.]+\])(?::\d{1,5})?$/.test(host);
+  return `${scheme}://${valid ? host : 'localhost'}/`;
 }
 
 /** The client's address: from `X-Forwarded-For` behind trusted proxies, else the socket's. */
@@ -236,4 +264,16 @@ function sendText(
     ...extra,
   });
   res.end(text);
+}
+
+/** A share page: HTML, locked down by its CSP, cached a few minutes. */
+function sendHtml(res: ServerResponse, status: number, html: string, csp: string): void {
+  res.writeHead(status, {
+    'Content-Type': 'text/html; charset=utf-8',
+    'Content-Length': Buffer.byteLength(html),
+    'Cache-Control': 'public, max-age=300',
+    'Content-Security-Policy': csp,
+    'X-Content-Type-Options': 'nosniff',
+  });
+  res.end(html);
 }

@@ -29,7 +29,7 @@ import {
   type AiDifficultyLevel,
   type SoloReplay,
 } from '@crack-attack/core';
-import { normalizeScoreName } from '@crack-attack/protocol';
+import { normalizeScoreName, type SoloSubmitResponse } from '@crack-attack/protocol';
 import { pickAiDifficulty } from './render/aiDifficultyPicker.js';
 import { pickAiMatchup } from './render/aiMatchupPicker.js';
 import { AttractOverlay } from './render/attractOverlay.js';
@@ -76,6 +76,8 @@ import {
 import { createRankedServices, type RankedServices } from './score/rankedServices.js';
 import type { HeldTicket } from './score/ticketPool.js';
 import { namePromptOpen, promptScoreName } from './render/namePrompt.js';
+import { closeShareDialog, openShareDialog, shareDialogOpen } from './render/shareDialog.js';
+import { gameUrlFor, shareInfo } from './view/share.js';
 import {
   NOT_SUBMITTED_LINE,
   RETRY_LINE,
@@ -263,6 +265,8 @@ function boot(): void {
     };
     const onClick = (e: MouseEvent): void => {
       const t = e.target;
+      // A link (the source code) opens rather than starting play.
+      if (t instanceof Element && t.closest('a[href]')) return;
       if (t instanceof Node && (app.contains(t) || attract.contains(t))) toSolo();
     };
     globalThis.addEventListener('keydown', onKeyDown);
@@ -373,6 +377,8 @@ function bootSolo(
   let gameNo = 0;
   /** This game's submitted ranked run, whose result the HUD is waiting for. */
   let awaitingRunId: string | null = null;
+  /** This game's run as the scoreboard verified it, once it has: what Share links to. */
+  let verified: SoloSubmitResponse | null = null;
   /**
    * A fresh board every game, as the reference seeds each run
    * (`Random::seed(Random::generateSeed())`, Attack.cxx:143) — from a
@@ -381,6 +387,7 @@ function bootSolo(
   const nextSeed = (): number => {
     gameNo++;
     awaitingRunId = null;
+    verified = null;
     if (!rankedOn) {
       run = { kind: 'practice', ticket: null };
       return generateSeed();
@@ -464,8 +471,10 @@ function bootSolo(
   // A ranked run's result replaces the tag once the scoreboard answers.
   const stopListening = ranked?.outbox.listen((runId, outcome) => {
     if (runId !== awaitingRunId) return;
-    if (outcome.ok) hud?.setRunLine(standingLine(outcome.response), 'good');
-    else if (outcome.kept) hud?.setRunLine(RETRY_LINE);
+    if (outcome.ok) {
+      verified = outcome.response;
+      hud?.setRunLine(standingLine(outcome.response), 'good');
+    } else if (outcome.kept) hud?.setRunLine(RETRY_LINE);
     else hud?.setRunLine(rejectionLine(outcome.error.code), 'bad');
   });
 
@@ -628,11 +637,28 @@ function bootSolo(
   saveBtn.onclick = saveReplay;
   document.body.appendChild(markChrome(saveBtn));
 
+  // Below it: share the score. A verified ranked run shares its share page,
+  // whose link preview shows the score; any other run shares the game.
+  const gameUrl = gameUrlFor(
+    import.meta.env['VITE_PUBLIC_URL'] as string | undefined,
+    globalThis.location,
+  );
+  const shareBtn = document.createElement('button');
+  shareBtn.textContent = 'Share score';
+  shareBtn.style.cssText =
+    'position:fixed;top:252px;right:12px;z-index:5;padding:6px 12px;opacity:.85;display:none';
+  shareBtn.onclick = () => {
+    shareBtn.blur(); // so Space (swap) doesn't reopen it
+    openShareDialog(shareInfo(score.score, verified, gameUrl, ranked?.client.baseUrl ?? null));
+  };
+  document.body.appendChild(markChrome(shareBtn));
+
   // --- input ---------------------------------------------------------------
   const restart = (): void => {
     // A restart (R, or the touch button) during the first game's ticket hold
     // ends the hold; otherwise the loop would restart again once it lapsed.
     waitUntil = null;
+    closeShareDialog();
     seed = nextSeed(); // a restart abandons a ranked run: its ticket is dropped
     sim = new GameSim(seed); // fresh game on a new board
     recorder = new SoloRecorder(seed);
@@ -673,7 +699,7 @@ function bootSolo(
     // the dialog's, not the game's; while it's open, nothing reaches the game
     // (not R, which would start a game under it), wherever focus has gone.
     const inDialog = e.target instanceof Element && e.target.closest('[role="dialog"]') !== null;
-    if (isTypingTarget(e.target) || inDialog || namePromptOpen()) return;
+    if (isTypingTarget(e.target) || inDialog || namePromptOpen() || shareDialogOpen()) return;
     if (e.code === 'KeyR') {
       restart();
       return;
@@ -800,6 +826,7 @@ function bootSolo(
     hud?.updateScore(score.formatted());
     if (sim.lost) submitScore();
     saveBtn.style.display = sim.lost ? '' : 'none';
+    shareBtn.style.display = sim.lost ? '' : 'none';
 
     // Cosmetic garbage-landing impacts: kick the shake spring and flash the
     // lights; both tick with the sim (they freeze when it does).
@@ -875,6 +902,8 @@ function bootSolo(
       scoresBtn.remove();
       rankedBtn.remove();
       saveBtn.remove();
+      shareBtn.remove();
+      closeShareDialog();
       stopListening?.();
       overlay.dispose();
       view.dispose(); // release the WebGL context (browsers cap them)
