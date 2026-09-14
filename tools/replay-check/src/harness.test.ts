@@ -67,9 +67,13 @@ describe('runReplay', () => {
     ).toThrow();
   });
 
-  it('rejects a malformed command bitmask (stray bit or non-integer)', () => {
+  it('rejects a malformed command bitmask (stray bit, past 32 bits, or non-integer)', () => {
     expect(() =>
       runReplay({ seed: 1, ticks: 5, actions: [{ tick: 1, command: 1 << 20 }] }),
+    ).toThrow(/valid CC_\* mask/);
+    // Bitwise operators truncate to int32: 2**32 & ~63 is 0.
+    expect(() =>
+      runReplay({ seed: 1, ticks: 5, actions: [{ tick: 1, command: 2 ** 32 }] }),
     ).toThrow(/valid CC_\* mask/);
     expect(() => runReplay({ seed: 1, ticks: 5, actions: [{ tick: 1, command: 1.5 }] })).toThrow();
     expect(() => runReplay({ seed: 1, ticks: 5, actions: [{ tick: 1, command: -4 }] })).toThrow();

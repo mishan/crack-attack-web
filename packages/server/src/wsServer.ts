@@ -1,15 +1,18 @@
 /**
- * wsServer.ts — WebSocket transport for the relay.
+ * wsServer.ts — the relay's network front: one HTTP server on one port,
+ * carrying the relay's WebSocket and (optionally) the scoreboard's HTTP API.
  *
  * The thin Node layer: accepts `ws` connections and forwards them to the
  * transport-free {@link RelayServer}. WebSocket's ordered+reliable delivery
  * subsumes the original's ENet reliable channels (Communicator.h:51).
  * Message handling is async (the relay touches the store on hello/result),
- * so each connection's messages are chained to preserve ordering.
+ * so each connection's messages are chained to preserve ordering. Plain HTTP
+ * requests go to the `http` listener (`httpApi.ts`), or get a 404.
  *
  * Original work Copyright (C) 2000 Daniel Nelson. GPL-2.0-or-later.
  */
 
+import { createServer, type RequestListener } from 'node:http';
 import { WebSocketServer, type WebSocket } from 'ws';
 import { RelayServer, type ClientConnection, type RelayServerOptions } from './relay.js';
 
@@ -17,6 +20,8 @@ export interface RelayWsServerOptions extends RelayServerOptions {
   /** TCP port; 0 lets the OS pick (tests). Default 8080 (CO_DEFAULT_PORT). */
   port?: number | undefined;
   host?: string | undefined;
+  /** Serves plain (non-WebSocket) HTTP requests — the scoreboard API. Default: 404s. */
+  http?: RequestListener | undefined;
 }
 
 export interface RelayWsServer {
@@ -41,6 +46,14 @@ export const DEFAULT_PORT = 8080;
  */
 export const MAX_CLIENT_MESSAGE_BYTES = 16 * 1024;
 
+/** How long `close()` lets HTTP requests in flight finish before cutting them. */
+export const CLOSE_GRACE_MS = 10_000;
+
+const notFound: RequestListener = (_req, res) => {
+  res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
+  res.end('not found\n');
+};
+
 /** Start a relay on a WebSocket server. Resolves once listening. */
 export function startRelayWsServer(options: RelayWsServerOptions = {}): Promise<RelayWsServer> {
   // Entropy defaults to a CSPRNG inside RelayServer itself.
@@ -51,11 +64,8 @@ export function startRelayWsServer(options: RelayWsServerOptions = {}): Promise<
     graceMs: options.graceMs,
     now: options.now,
   });
-  const wss = new WebSocketServer({
-    maxPayload: MAX_CLIENT_MESSAGE_BYTES,
-    port: options.port ?? DEFAULT_PORT,
-    ...(options.host !== undefined ? { host: options.host } : {}),
-  });
+  const server = createServer(options.http ?? notFound);
+  const wss = new WebSocketServer({ server, maxPayload: MAX_CLIENT_MESSAGE_BYTES });
 
   wss.on('connection', (ws: WebSocket) => {
     const conn: ClientConnection = {
@@ -98,10 +108,14 @@ export function startRelayWsServer(options: RelayWsServerOptions = {}): Promise<
   });
 
   return new Promise((resolve, reject) => {
-    wss.once('error', reject);
-    wss.once('listening', () => {
-      const address = wss.address();
-      const port = typeof address === 'object' && address ? address.port : (options.port ?? 0);
+    server.once('error', reject);
+    const listen = {
+      port: options.port ?? DEFAULT_PORT,
+      ...(options.host !== undefined ? { host: options.host } : {}),
+    };
+    server.listen(listen, () => {
+      const address = server.address();
+      const port = typeof address === 'object' && address ? address.port : listen.port;
       resolve({
         port,
         relay,
@@ -109,7 +123,17 @@ export function startRelayWsServer(options: RelayWsServerOptions = {}): Promise<
           new Promise<void>((res, rej) => {
             relay.shutdown();
             for (const client of wss.clients) client.terminate();
-            wss.close((err) => (err ? rej(err) : res()));
+            wss.close();
+            // Let requests in flight (a replay being verified) finish before the
+            // caller closes the store; drop idle keep-alives, which would hold
+            // close() open, and cut any request still going after a grace period.
+            const force = setTimeout(() => server.closeAllConnections(), CLOSE_GRACE_MS);
+            server.close((err) => {
+              clearTimeout(force);
+              if (err) rej(err);
+              else res();
+            });
+            server.closeIdleConnections();
           }),
       });
     });

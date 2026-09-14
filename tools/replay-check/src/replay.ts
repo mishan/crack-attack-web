@@ -62,7 +62,14 @@ function indexActions(replay: Replay): Map<number, number> {
     // Replays come from JSON; reject a malformed command up front rather than
     // letting a non-integer or a stray bit slip silently through `new
     // ActionState(command)` and produce a confusing digest divergence.
-    if (!Number.isInteger(a.command) || a.command < 0 || (a.command & ~ALL_COMMAND_BITS) !== 0) {
+    // Range before mask: bitwise operators truncate to int32, so 2**32 would
+    // pass the mask test alone.
+    if (
+      !Number.isInteger(a.command) ||
+      a.command < 0 ||
+      a.command > ALL_COMMAND_BITS ||
+      (a.command & ~ALL_COMMAND_BITS) !== 0
+    ) {
       throw new RangeError(
         `action command ${a.command} at tick ${a.tick} is not a valid CC_* mask`,
       );
