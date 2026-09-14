@@ -113,8 +113,10 @@ unranked run can never become ranked.
 ### Submitting
 
 - **Name.** The first ranked game over asks for a name before submitting,
-  saved as `crack-attack.name` (the key the lobby already uses). Later runs
-  submit with no prompt.
+  saved as `crack-attack.name` (the key the lobby already uses). A name
+  already saved in the lobby only prefills the prompt, so the player still
+  sees that the boards are public. Once a name is confirmed
+  (`crack-attack.scoreNameConfirmed`), later runs submit with no prompt.
 - **Outbox.** A finished run waits in a `localStorage` outbox until the server
   acknowledges it, so a network blip or a closed tab doesn't lose it. The
   outbox retries on the next page load while the ticket is still valid.
@@ -245,17 +247,51 @@ Each phase is one PR.
 - **Moderation:** `node relay.mjs admin recent [n] | hide <id> | unhide <id>`.
   It refuses a `DB` path with no database there rather than create one.
 
-### Phase 3 — client: ranked runs, submitting and the scoreboard screen
+### Phase 3 — client: ranked runs, submitting and the scoreboard screen — DONE
 
-- Everything in [Ranked vs unranked runs](#ranked-vs-unranked-runs): the
-  toggle, prefetching tickets, HUD tags, hiding the board on pause, the name
-  prompt, the outbox, and the ranks at game over.
-- **Scoreboard screen.** Opened from a solo-screen button or with `?scores`.
-  It has Score and Multiplier tabs (like the original's two tables) and All
-  time / This month / Last month tabs, highlights this browser's runs, and has
-  a "watch" link on each row. New overlays call `markChrome`.
-- **Attract mode.** The loop becomes title → demo match → high score table,
-  like an arcade cabinet.
+Everything in [Ranked vs unranked runs](#ranked-vs-unranked-runs):
+
+- **API URL.** `score/scoreboardApi.ts` derives the API from the relay URL
+  (`wss://host/ws` → `https://host/api/solo`). Its `ScoreboardClient`
+  shape-checks every response, and failures come back as a `ScoreboardError`
+  that says whether a retry might work.
+- **Tickets.** `score/ticketPool.ts` keeps one ticket ahead. It's fetched at
+  page load and replaced as soon as it's taken. Expiry is timed on the
+  browser's clock (when the ticket was requested, plus `SOLO_TICKET_TTL_MS`),
+  not the server's `expiresAt`, so clock skew doesn't matter. A ticket within
+  an hour of expiry is dropped; a timer fetches its replacement then, and so
+  does the tab coming back into view (a sleeping laptop's timers run late). A
+  ticket for other rules makes the pool `stale` until a reload.
+- **First game.** The first game of a page load holds its board, hidden, for
+  up to a second for its ticket.
+- **Outbox.** `score/outbox.ts` keeps up to 20 finished runs in localStorage,
+  falling back to memory, and submits them oldest first. A rejected run is
+  dropped. A run that fails for a reason that may pass is kept and retried at
+  page load and at each new game. Being offline or rate-limited stops the
+  flush, and every waiting run is reported as kept. A failure on one run
+  (busy, a server error, a garbled response) moves on to the next, so it can't
+  hold up later runs. A run the server fails on 5 times is dropped, but a
+  failure only counts an hour or more after the run's last counted one: an
+  outage (a proxy's error page reads as a server error) fails every run on
+  every flush, and a few games in a bad hour mustn't drop good runs.
+- **Solo screen (`main.ts`).**
+  - A **Ranked: on/off** button (`crack-attack.ranked`).
+  - The HUD run line (`view/ranked.ts`): the tag while playing, then
+    "Verifying…" and the monthly and all-time places.
+  - The name prompt (`render/namePrompt.ts`) on the first ranked game over,
+    with an explicit "Don't submit". Only one is open at a time, and game
+    keys are ignored while it is.
+  - A ranked run's board hidden while paused.
+  - Game keys ignored while typing.
+  - Player names shown with `dir="auto"` (the boards, the title card, the
+    prompt), so a right-to-left name can't reorder the text around it.
+- **Scoreboard screen** (`highScores.ts`, its own chunk). Opened from the solo
+  screen's **High scores** button or with `?scores`. It has Score / Chain ×
+  This month / Last month / All time tabs, and highlights this browser's runs
+  (ids remembered on successful submits). The "watch" links wait for phase 4:
+  there's no viewer to open yet.
+- **Attract mode.** Rather than a separate step in the loop, the title card
+  (shown between demo matches) lists this month's top five under the logo.
 
 ### Phase 4 — replay viewer
 

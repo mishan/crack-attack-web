@@ -114,6 +114,7 @@ export class HudView {
   private readonly scoreWrap: HTMLElement;
   private readonly status: HTMLElement;
   private readonly record: HTMLElement;
+  private readonly run: HTMLElement;
   /** The HUD lose bar, when shown; tick it with the sim like {@link LoseBarView}. */
   readonly loseBar: LoseBarCanvas | null;
 
@@ -156,7 +157,16 @@ export class HudView {
       opacity: '0.9',
       whiteSpace: 'nowrap',
     });
-    root.append(starPair, clockPair, this.status);
+    // Solo's ranked-run line: RANKED / PRACTICE while playing, the result after.
+    // Hidden until setRunLine is first called, so other modes' HUDs (and the
+    // board framing around them) don't gain an empty row.
+    this.run = el('div', {
+      display: 'none',
+      fontSize: '12px',
+      minHeight: '14px',
+      whiteSpace: 'pre-line',
+    });
+    root.append(starPair, clockPair, this.status, this.run);
     container.append(root);
   }
 
@@ -187,6 +197,14 @@ export class HudView {
   setScoreRecord(line: string): void {
     this.record.textContent = line;
     this.record.style.display = line ? 'block' : 'none';
+  }
+
+  /** Show the ranked-run line (see `view/ranked.ts`); `tone` colours it. */
+  setRunLine(text: string, tone: 'normal' | 'good' | 'bad' = 'normal'): void {
+    // Shown from now on, even blank, so its row doesn't come and go.
+    this.run.style.display = 'block';
+    this.run.textContent = text;
+    this.run.style.color = tone === 'good' ? '#8fe39a' : tone === 'bad' ? '#ff8f8f' : '#d7dce5';
   }
 
   private set(text: string, color: string, bold: boolean): void {

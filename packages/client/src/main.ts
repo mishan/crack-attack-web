@@ -27,7 +27,9 @@ import {
   ScoreState,
   SoloRecorder,
   type AiDifficultyLevel,
+  type SoloReplay,
 } from '@crack-attack/core';
+import { normalizeScoreName } from '@crack-attack/protocol';
 import { pickAiDifficulty } from './render/aiDifficultyPicker.js';
 import { pickAiMatchup } from './render/aiMatchupPicker.js';
 import { AttractOverlay } from './render/attractOverlay.js';
@@ -59,12 +61,31 @@ import { AudioManager } from './audio/audioManager.js';
 import { mountAudioControls } from './audio/audioControls.js';
 import { humanRank, insertMult, insertScore } from './view/scoreRecords.js';
 import {
+  hasPlayerName,
   loadMultRecords,
   loadPlayerName,
+  loadRankedPlay,
+  loadScoreNameConfirmed,
   loadScoreRecords,
   saveMultRecords,
+  savePlayerName,
+  saveRankedPlay,
+  saveScoreNameConfirmed,
   saveScoreRecords,
 } from './score/scoreStore.js';
+import { createRankedServices, type RankedServices } from './score/rankedServices.js';
+import type { HeldTicket } from './score/ticketPool.js';
+import { namePromptOpen, promptScoreName } from './render/namePrompt.js';
+import {
+  NOT_SUBMITTED_LINE,
+  RETRY_LINE,
+  VERIFYING_LINE,
+  rejectionLine,
+  runTag,
+  scoreNameWithoutPrompt,
+  standingLine,
+  type RunKind,
+} from './view/ranked.js';
 
 const MS_PER_TICK = 1000 / GC_STEPS_PER_SECOND;
 /** Cap sign advance per frame so a long stall (tab refocus) doesn't warp them away. */
@@ -76,6 +97,9 @@ const NET_HELP =
   '←→↑↓ move · Z / Space swap · X raise · R ready/rematch · Esc concede/stop watching · M mute';
 const DEMO_HELP = 'AI vs AI demo · N next match · F speed · P pause · M mute · Esc leave';
 const ATTRACT_HELP = 'AI vs AI demo · press any key or click to play · M mute';
+const SCORES_HELP = 'High scores · Esc back · M mute';
+/** How long the first ranked game of a page load waits for its ticket before starting unranked. */
+const FIRST_TICKET_WAIT_MS = 1000;
 
 /** A running mode (solo board or netplay shell); dispose to switch away. */
 interface ModeHandle {
@@ -89,6 +113,7 @@ interface ModeHandle {
 const loadAiMatch = () => import('./aiMatch.js');
 const loadAiDemo = () => import('./aiDemo.js');
 const loadNetplay = () => import('./netplay.js');
+const loadHighScores = () => import('./highScores.js');
 /** Warm a lazy chunk; a failure here resurfaces (and is handled) when the mode boots. */
 const prefetch = (load: () => Promise<unknown>): void => void load().catch(() => {});
 
@@ -129,6 +154,16 @@ function boot(): void {
   const params = new URLSearchParams(globalThis.location.search);
   const relayUrl = resolveRelayUrl(params);
   const help = document.getElementById('help');
+
+  // Ranked solo play: the scoreboard lives on the relay's host. Fetch the first
+  // run ticket now, so it's in hand by the time a game starts, and send any
+  // run left waiting from an earlier visit. With ranked play off, nothing
+  // touches the network; waiting runs keep until it's turned back on.
+  const ranked = createRankedServices(relayUrl);
+  if (ranked && loadRankedPlay()) {
+    ranked.tickets.refill();
+    ranked.flush();
+  }
 
   // One AudioManager spans both modes so music and settings survive a switch.
   // Browsers gate audio behind a gesture: unlock on the first key/pointer, and
@@ -238,6 +273,14 @@ function boot(): void {
       attract.dispose();
     };
     current = { dispose: teardown }; // until the demo lands
+    // The title card doubles as the high-score table: this month's best runs
+    // (not with ranked play off, which keeps the game off the network).
+    if (loadRankedPlay()) {
+      void ranked?.client.scores({ period: 'month', limit: 5 }).then(
+        (res) => attract.setHighScores('THIS MONTH', res.entries),
+        () => undefined, // unreachable: just the logo
+      );
+    }
     const { left, right } = demoMatchup;
     bootLazy(loadAiDemo, (m) => {
       const demo = m.bootAiDemo(app, hudEl, left, right, audio, toSolo, attract);
@@ -256,8 +299,9 @@ function boot(): void {
     net: NET_HELP,
     ai: AI_HELP,
     demo: DEMO_HELP,
+    scores: SCORES_HELP,
   };
-  const enter = (mode: 'attract' | 'solo' | 'net' | 'ai' | 'demo'): void => {
+  const enter = (mode: 'attract' | 'solo' | 'net' | 'ai' | 'demo' | 'scores'): void => {
     current?.dispose();
     current = null;
     modeGen++;
@@ -274,8 +318,19 @@ function boot(): void {
       } else if (mode === 'demo') {
         const { left, right } = demoMatchup;
         bootLazy(loadAiDemo, (m) => m.bootAiDemo(app, hudEl, left, right, audio, toSolo));
+      } else if (mode === 'scores') {
+        bootLazy(loadHighScores, (m) => m.bootHighScores(ranked?.client ?? null, toSolo));
       } else {
-        current = bootSolo(app, hudEl, () => enter('net'), playAi, watchAi, audio);
+        current = bootSolo(
+          app,
+          hudEl,
+          () => enter('net'),
+          playAi,
+          watchAi,
+          () => enter('scores'),
+          audio,
+          ranked,
+        );
       }
     } catch (err) {
       startFailed(err);
@@ -287,9 +342,11 @@ function boot(): void {
       ? 'demo'
       : params.has('net')
         ? 'net'
-        : params.has('solo')
-          ? 'solo'
-          : 'attract',
+        : params.has('scores')
+          ? 'scores'
+          : params.has('solo')
+            ? 'solo'
+            : 'attract',
   );
   // Booted: drop the placeholder (a failed start has already replaced it).
   document.getElementById('loading')?.remove();
@@ -301,11 +358,48 @@ function bootSolo(
   onPlayOnline: () => void,
   onPlayAi: () => void,
   onWatchAi: () => void,
+  onHighScores: () => void,
   audio: AudioManager,
+  ranked: RankedServices | null,
 ): ModeHandle {
-  // A fresh board every game, as the reference seeds each run
-  // (`Random::seed(Random::generateSeed())`, Attack.cxx:143).
-  let seed = generateSeed();
+  // --- ranked play (docs/SCOREBOARD_PLAN.md) -------------------------------
+  let rankedOn = loadRankedPlay();
+  /** The current run: what kind it is, and its ticket while it's ranked. */
+  let run: { kind: RunKind; ticket: HeldTicket | null } = {
+    kind: 'practice',
+    ticket: null,
+  };
+  /** Bumped every game, so a late name prompt can tell its game has moved on. */
+  let gameNo = 0;
+  /** This game's submitted ranked run, whose result the HUD is waiting for. */
+  let awaitingRunId: string | null = null;
+  /**
+   * A fresh board every game, as the reference seeds each run
+   * (`Random::seed(Random::generateSeed())`, Attack.cxx:143) — from a
+   * server-issued ticket when the run is ranked, since the seed decides the board.
+   */
+  const nextSeed = (): number => {
+    gameNo++;
+    awaitingRunId = null;
+    if (!rankedOn) {
+      run = { kind: 'practice', ticket: null };
+      return generateSeed();
+    }
+    const got = ranked ? ranked.tickets.take() : ({ reason: 'offline' } as const);
+    if ('ticket' in got) {
+      run = { kind: 'ranked', ticket: got };
+      return got.ticket.seed;
+    }
+    run = { kind: got.reason, ticket: null };
+    return generateSeed();
+  };
+  // The first ranked game of a page load can beat its ticket here: hold the
+  // board, hidden, for up to a second rather than start it unranked.
+  let waitUntil: number | null =
+    rankedOn && ranked && !ranked.tickets.ready && ranked.tickets.fetching
+      ? performance.now() + FIRST_TICKET_WAIT_MS
+      : null;
+  let seed = waitUntil === null ? nextSeed() : generateSeed();
   let sim = new GameSim(seed);
   // Every run is recorded (seed + input changes), so it can be saved or replayed.
   let recorder = new SoloRecorder(seed);
@@ -359,6 +453,58 @@ function bootSolo(
   const showBest = (): void => hud?.setScoreRecord(`BEST ${bestScore()}`);
   hud?.updateScore(score.formatted());
   showBest();
+  /** The HUD's run line: what kind of run this is (blank while holding for a ticket). */
+  const showRunTag = (): void =>
+    hud?.setRunLine(
+      waitUntil === null ? runTag(run.kind) : '',
+      run.kind === 'ranked' ? 'good' : 'normal',
+    );
+  showRunTag();
+
+  // A ranked run's result replaces the tag once the scoreboard answers.
+  const stopListening = ranked?.outbox.listen((runId, outcome) => {
+    if (runId !== awaitingRunId) return;
+    if (outcome.ok) hud?.setRunLine(standingLine(outcome.response), 'good');
+    else if (outcome.kept) hud?.setRunLine(RETRY_LINE);
+    else hud?.setRunLine(rejectionLine(outcome.error.code), 'bad');
+  });
+
+  /** Queue a finished ranked run for the scoreboard, asking for a name the first time. */
+  const submitRanked = (held: HeldTicket, replay: SoloReplay): void => {
+    if (!ranked) return;
+    const { ticket } = held;
+    const game = gameNo;
+    const send = (name: string): void => {
+      ranked.outbox.add({
+        request: { runId: ticket.runId, name, replay },
+        expiresAt: held.expiresAt,
+      });
+      if (game === gameNo) {
+        awaitingRunId = ticket.runId;
+        hud?.setRunLine(VERIFYING_LINE);
+      }
+      ranked.flush();
+    };
+    // Until the player has confirmed a name in the prompt (which says the
+    // boards are public, and offers "Don't submit"), ask, even if the lobby
+    // saved one: it only prefills the prompt. After that, runs go straight in.
+    const saved = hasPlayerName() ? loadPlayerName() : null;
+    const name = scoreNameWithoutPrompt(saved, loadScoreNameConfirmed());
+    if (name !== null) {
+      send(name);
+      return;
+    }
+    const prefill = saved === null ? '' : (normalizeScoreName(saved) ?? '');
+    void promptScoreName(prefill).then((chosen) => {
+      if (chosen === null) {
+        if (game === gameNo) hud?.setRunLine(NOT_SUBMITTED_LINE);
+        return;
+      }
+      savePlayerName(chosen);
+      saveScoreNameConfirmed();
+      send(chosen);
+    });
+  };
 
   /** On a loss, fold points into the score and record any new high score / multiplier. */
   const submitScore = (): void => {
@@ -380,6 +526,8 @@ function bootSolo(
     } else {
       showBest();
     }
+
+    if (run.kind === 'ranked' && run.ticket) submitRanked(run.ticket, recorder.replay());
   };
 
   // Temporary lighting/material tuner — open with `?tune` in the URL.
@@ -422,7 +570,44 @@ function bootSolo(
   demoBtn.onclick = onWatchAi;
   document.body.appendChild(markChrome(demoBtn));
 
-  // Appears once the game is over, fourth in the column: download the run as a
+  // The online high-score boards, fourth in the column.
+  const scoresBtn = document.createElement('button');
+  scoresBtn.textContent = 'High scores';
+  scoresBtn.style.cssText =
+    'position:fixed;top:132px;right:12px;z-index:5;padding:6px 12px;opacity:.85';
+  scoresBtn.onclick = onHighScores;
+  document.body.appendChild(markChrome(scoresBtn));
+
+  // Ranked play on/off, fifth. Off makes every run practice (no tickets, no
+  // submissions); turning it off mid-run unranks that run at once, while
+  // turning it on applies from the next game (the board's seed is already set).
+  const rankedBtn = document.createElement('button');
+  rankedBtn.style.cssText =
+    'position:fixed;top:172px;right:12px;z-index:5;padding:6px 12px;opacity:.85';
+  const showRankedBtn = (): void => {
+    rankedBtn.textContent = rankedOn ? 'Ranked: on' : 'Ranked: off';
+    rankedBtn.setAttribute('aria-pressed', String(rankedOn));
+    rankedBtn.title = rankedOn
+      ? 'Runs go on the online high-score boards'
+      : 'Practice: runs stay off the online boards';
+  };
+  showRankedBtn();
+  rankedBtn.onclick = () => {
+    rankedBtn.blur(); // so Space (swap) doesn't toggle it again
+    rankedOn = !rankedOn;
+    saveRankedPlay(rankedOn);
+    showRankedBtn();
+    if (rankedOn) {
+      ranked?.tickets.refill();
+      ranked?.flush(); // runs held while ranked play was off
+    } else if (run.kind === 'ranked' && !sim.lost) {
+      run = { kind: 'practice', ticket: null };
+      showRunTag();
+    }
+  };
+  document.body.appendChild(markChrome(rankedBtn));
+
+  // Appears once the game is over, last in the column: download the run as a
   // solo replay (seed + inputs; core `verifySoloReplay` re-scores it).
   const saveReplay = (): void => {
     const replay = { kind: 'crack-attack-solo-replay', ...recorder.replay() };
@@ -439,13 +624,16 @@ function bootSolo(
   const saveBtn = document.createElement('button');
   saveBtn.textContent = 'Save replay';
   saveBtn.style.cssText =
-    'position:fixed;top:132px;right:12px;z-index:5;padding:6px 12px;opacity:.85;display:none';
+    'position:fixed;top:212px;right:12px;z-index:5;padding:6px 12px;opacity:.85;display:none';
   saveBtn.onclick = saveReplay;
   document.body.appendChild(markChrome(saveBtn));
 
   // --- input ---------------------------------------------------------------
   const restart = (): void => {
-    seed = generateSeed();
+    // A restart (R, or the touch button) during the first game's ticket hold
+    // ends the hold; otherwise the loop would restart again once it lapsed.
+    waitUntil = null;
+    seed = nextSeed(); // a restart abandons a ranked run: its ticket is dropped
     sim = new GameSim(seed); // fresh game on a new board
     recorder = new SoloRecorder(seed);
     clock.reset();
@@ -476,9 +664,16 @@ function bootSolo(
     scoreSubmitted = false;
     hud?.updateScore(score.formatted());
     showBest();
+    showRunTag();
+    if (rankedOn) ranked?.flush(); // retry any run still waiting on the scoreboard
   };
 
   const onKeyDown = (e: KeyboardEvent): void => {
+    // Keys typed into the name prompt, or pressing its buttons (Space), are
+    // the dialog's, not the game's; while it's open, nothing reaches the game
+    // (not R, which would start a game under it), wherever focus has gone.
+    const inDialog = e.target instanceof Element && e.target.closest('[role="dialog"]') !== null;
+    if (isTypingTarget(e.target) || inDialog || namePromptOpen()) return;
     if (e.code === 'KeyR') {
       restart();
       return;
@@ -523,10 +718,33 @@ function bootSolo(
   fitToWindow();
   const stopWatchingChrome = onChromeResize(fitToWindow);
 
+  // A ranked run's board is hidden while paused, so a pause can't be used to
+  // study it; so is the board held back for its first ticket.
+  let boardShown = true;
+  const syncBoardShown = (): void => {
+    const shown = waitUntil === null && !(paused && run.kind === 'ranked');
+    if (shown === boardShown) return;
+    boardShown = shown;
+    view.renderer.domElement.style.visibility = shown ? '' : 'hidden';
+  };
+  syncBoardShown();
+
   // --- loop ----------------------------------------------------------------
   let lastMs = performance.now();
   const frame = (nowMs: number): void => {
     if (disposed) return;
+    if (waitUntil !== null) {
+      // Holding the first board for its ticket: start once it arrives, the
+      // request fails, or the wait runs out.
+      clock.sample(nowMs);
+      if (!ranked?.tickets.fetching || nowMs >= waitUntil) {
+        waitUntil = null;
+        restart();
+      }
+      syncBoardShown();
+      rafId = globalThis.requestAnimationFrame(frame);
+      return;
+    }
     // Advance the sim only while the game is live. On a loss we stop stepping, so
     // the clock (and thus the HUD timer) and the board freeze on the final tick
     // until the player restarts.
@@ -632,6 +850,7 @@ function bootSolo(
     // Lights tick through the countdown gate too (Game.cxx:389 runs before
     // the gate check) — the start-of-game fade completes exactly at GO.
     levelLights.update(gateTicks + stepped, vm.hud.topEffectiveRow, !sim.lost, impacts);
+    syncBoardShown();
     view.render();
     hud?.update(vm.hud);
 
@@ -653,7 +872,10 @@ function bootSolo(
       onlineBtn.remove();
       aiBtn.remove();
       demoBtn.remove();
+      scoresBtn.remove();
+      rankedBtn.remove();
       saveBtn.remove();
+      stopListening?.();
       overlay.dispose();
       view.dispose(); // release the WebGL context (browsers cap them)
     },

@@ -630,8 +630,30 @@ A generator header that a real, non-AI tool always writes (e.g. a lockfile's own
   per-client token buckets (IPv6 per /64; tickets also per /48 and
   globally), `TRUST_PROXY=<proxies>` for `X-Forwarded-For`, `CORS_ORIGIN`,
   name cleanup (grapheme-counted), and `relay.mjs admin recent|hide|unhide`
-  moderation. Next: phase 3, the
-  client (ranked toggle, tickets, submission outbox, scoreboard screen).
+  moderation. **Phase 3 landed**
+  (the client): `score/scoreboardApi.ts` (API URL derived from the relay
+  URL; shape-checked responses; `ScoreboardError.retryable`),
+  `score/ticketPool.ts` (one ticket ahead, fetched at page load; expiry on
+  the local clock, request time + `SOLO_TICKET_TTL_MS`, so clock skew
+  doesn't matter; refilled by a timer before expiry and when the tab comes
+  back into view; `stale` on a rules mismatch), `score/outbox.ts` (finished
+  runs in localStorage until the server answers; retried at page load and
+  each new game; only `network`/`rate_limited` stop a flush, a run's own
+  failure skips to the next, and a run the server fails on 5 times, counted
+  at most once an hour so an outage can't drop good runs, is dropped), wired
+  in `score/rankedServices.ts`. The solo screen gets a
+  **Ranked: on/off** button, a HUD run line (`view/ranked.ts`: RANKED /
+  PRACTICE / UNRANKED — offline|reload, then the monthly and all-time
+  places; solo only, other HUDs don't get the row), a name prompt
+  (`render/namePrompt.ts`) shown until a name is confirmed
+  (`crack-attack.scoreNameConfirmed`; a lobby name only prefills it; game
+  keys ignored while it's open), a hidden board while a ranked run is
+  paused, and a ≤1 s hidden hold for the first game's ticket. **High
+  scores** / `?scores` opens `highScores.ts` (lazy; Score/Chain × this
+  month/last month/all time, own runs highlighted); the attract title card
+  lists this month's top five. Player names render with `dir="auto"`, so a
+  right-to-left name can't reorder its row. Next: phase 4, a replay viewer
+  for stored runs.
 - [ ] Phase 6 stretch (X-mode, replays, WebRTC, binary codec if
       measurements demand it)
 
