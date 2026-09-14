@@ -113,8 +113,8 @@ File:line references are into `crack-attack/src/`.
     layer. The core emits a cosmetic `ScoreEvent` snapshot of the reporting
     combo at the exact `ComboManager::timeStep` elimination point
     (ComboManager.cxx:73) via `core/score.ts` + `GameSim.drainScoreEvents` —
-    RNG-free and out of the digest, so determinism is untouched. The client
-    `view/score.ts` (pure, tested) reproduces the C++ math: per-elimination
+    RNG-free and out of the digest, so determinism is untouched.
+    `core/scoreState.ts` (pure, tested) reproduces the C++ math: per-elimination
     points (magnitude / gray / special-block bonuses), the ComboManager base_*
     bookkeeping + `reportMultiplier` chain bonus (reconstructed per-combo from
     the snapshot, keyed on id + creation stamp for pool reuse; the per-step

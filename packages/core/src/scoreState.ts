@@ -1,12 +1,14 @@
 /**
- * score.ts — pure solo scoring, ported from `Score.{h,cxx}` (display layer).
+ * scoreState.ts — pure solo scoring, ported from `Score.{h,cxx}` (display layer).
  *
  * Scoring is a solo-only display concern in the original. The deterministic core
  * emits a {@link ScoreEvent} snapshot of a combo each time it reports an
  * elimination (ComboManager.cxx:73); this module turns those snapshots into
  * points and runs the "backlog" that drips into the shown total, plus the
- * top-multiplier tracking and the record-table insertion. All integer, all
- * deterministic, no DOM — `render`/`main` own the pixels and persistence.
+ * top-multiplier tracking. All integer, all deterministic. It lives in core,
+ * outside the sim, so the solo screen and a scoreboard server replaying a run
+ * (`soloReplay.ts`) compute the same score; the record tables stay in the
+ * client (`view/scoreRecords.ts`).
  *
  * The math is faithful to the C++:
  *   - `Score::reportElimination` — per-elimination points from the accumulated
@@ -29,8 +31,8 @@ import {
   GC_MIN_PATTERN_SCORE,
   GC_MIN_SCORE_INCREMENT_DELAY,
   GC_SCORE_DELAY_SLOPE,
-  type ScoreEvent,
-} from '@crack-attack/core';
+} from './constants.js';
+import type { ScoreEvent } from './score.js';
 
 /**
  * Per-special-flavor point bonuses, indexed by special-flavor code

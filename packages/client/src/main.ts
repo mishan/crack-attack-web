@@ -24,6 +24,8 @@ import {
   GameSim,
   GC_STEPS_PER_SECOND,
   generateSeed,
+  ScoreState,
+  SoloRecorder,
   type AiDifficultyLevel,
 } from '@crack-attack/core';
 import { pickAiDifficulty } from './render/aiDifficultyPicker.js';
@@ -55,7 +57,6 @@ import { Spring } from './view/spring.js';
 import { ViewInterpolator } from './view/viewInterpolator.js';
 import { AudioManager } from './audio/audioManager.js';
 import { mountAudioControls } from './audio/audioControls.js';
-import { ScoreState } from './view/score.js';
 import { humanRank, insertMult, insertScore } from './view/scoreRecords.js';
 import {
   loadMultRecords,
@@ -304,7 +305,10 @@ function bootSolo(
 ): ModeHandle {
   // A fresh board every game, as the reference seeds each run
   // (`Random::seed(Random::generateSeed())`, Attack.cxx:143).
-  let sim = new GameSim(generateSeed());
+  let seed = generateSeed();
+  let sim = new GameSim(seed);
+  // Every run is recorded (seed + input changes), so it can be saved or replayed.
+  let recorder = new SoloRecorder(seed);
   const clock = new FixedTimestep();
   const input = new KeyboardInput();
   const interp = new ViewInterpolator();
@@ -418,9 +422,32 @@ function bootSolo(
   demoBtn.onclick = onWatchAi;
   document.body.appendChild(markChrome(demoBtn));
 
+  // Appears once the game is over, fourth in the column: download the run as a
+  // solo replay (seed + inputs; core `verifySoloReplay` re-scores it).
+  const saveReplay = (): void => {
+    const replay = { kind: 'crack-attack-solo-replay', ...recorder.replay() };
+    const blob = new Blob([JSON.stringify(replay)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `replay-solo-${replay.seed}.json`;
+    link.click();
+    // Revoking synchronously can cancel the download in some browsers — give
+    // the navigation ample time to start before releasing the blob.
+    setTimeout(() => URL.revokeObjectURL(url), 30_000);
+  };
+  const saveBtn = document.createElement('button');
+  saveBtn.textContent = 'Save replay';
+  saveBtn.style.cssText =
+    'position:fixed;top:132px;right:12px;z-index:5;padding:6px 12px;opacity:.85;display:none';
+  saveBtn.onclick = saveReplay;
+  document.body.appendChild(markChrome(saveBtn));
+
   // --- input ---------------------------------------------------------------
   const restart = (): void => {
-    sim = new GameSim(generateSeed()); // fresh game on a new board
+    seed = generateSeed();
+    sim = new GameSim(seed); // fresh game on a new board
+    recorder = new SoloRecorder(seed);
     clock.reset();
     interp.reset();
     const fresh = deriveViewModel(sim);
@@ -519,7 +546,9 @@ function bootSolo(
           gateTicks++;
           continue;
         }
-        sim.step(input.actionState());
+        const act = input.actionState();
+        recorder.record(act.state);
+        sim.step(act);
         stepped++;
         metaTicks++;
         // Interpolation only needs the last two ticks, so under catch-up (steps > 1)
@@ -552,6 +581,7 @@ function bootSolo(
     score.timeStep(stepped);
     hud?.updateScore(score.formatted());
     if (sim.lost) submitScore();
+    saveBtn.style.display = sim.lost ? '' : 'none';
 
     // Cosmetic garbage-landing impacts: kick the shake spring and flash the
     // lights; both tick with the sim (they freeze when it does).
@@ -623,6 +653,7 @@ function bootSolo(
       onlineBtn.remove();
       aiBtn.remove();
       demoBtn.remove();
+      saveBtn.remove();
       overlay.dispose();
       view.dispose(); // release the WebGL context (browsers cap them)
     },
