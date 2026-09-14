@@ -72,7 +72,10 @@ export const MIGRATIONS: readonly string[] = [
     ticks          INTEGER NOT NULL,
     sim_version    INTEGER NOT NULL,
     created_at     INTEGER NOT NULL,
-    replay         TEXT NOT NULL,
+    -- NULL once dropped: kept only for runs on a board (see SoloScoreboard).
+    replay         TEXT,
+    -- 1 once a sweep has kept or dropped the replay for good.
+    replay_settled INTEGER NOT NULL DEFAULT 0,
     hidden         INTEGER NOT NULL DEFAULT 0
   ) STRICT;
   -- Covering indexes, so the boards, counts and standings read only the
@@ -81,6 +84,10 @@ export const MIGRATIONS: readonly string[] = [
   CREATE INDEX solo_scores_board_mult
     ON solo_scores (hidden, top_multiplier DESC, score DESC, id, created_at);
   CREATE INDEX solo_scores_visible_time ON solo_scores (hidden, created_at);
+  -- Runs whose replay no sweep has settled. Partial, so a settled run (kept
+  -- or dropped) leaves it and each sweep reads only runs it hasn't judged.
+  CREATE INDEX solo_scores_replay_pending ON solo_scores (created_at)
+    WHERE replay_settled = 0 AND hidden = 0;
   `,
 ];
 
@@ -122,6 +129,11 @@ export const SCORE_QUERIES = {
       (SELECT COUNT(*) FROM solo_scores s WHERE ${inRange('s')}) AS total
     FROM solo_scores t
     WHERE t.id = :id AND ${inRange('t')}`,
+  // Pinned: a planner without statistics picks the time index, which also
+  // walks every run whose replay is already settled.
+  replayCandidates: `SELECT ${SCORE_COLUMNS} FROM solo_scores s INDEXED BY solo_scores_replay_pending
+    WHERE s.replay_settled = 0 AND s.hidden = 0 AND s.created_at < :before
+    ORDER BY s.created_at LIMIT :limit`,
 } as const;
 
 export class SqliteStore implements LobbyStore, ScoreStore {
@@ -143,6 +155,9 @@ export class SqliteStore implements LobbyStore, ScoreStore {
   private readonly topByScore: StatementSync;
   private readonly topByMult: StatementSync;
   private readonly selectReplay: StatementSync;
+  private readonly selectReplayCandidates: StatementSync;
+  private readonly keepReplay: StatementSync;
+  private readonly dropReplay: StatementSync;
   private readonly updateHidden: StatementSync;
   private readonly selectRecent: StatementSync;
 
@@ -192,7 +207,16 @@ export class SqliteStore implements LobbyStore, ScoreStore {
     this.topByScore = this.db.prepare(SCORE_QUERIES.topByScore);
     this.topByMult = this.db.prepare(SCORE_QUERIES.topByMult);
     this.selectReplay = this.db.prepare(
-      `SELECT ${SCORE_COLUMNS}, replay FROM solo_scores WHERE id = ? AND hidden = 0`,
+      `SELECT ${SCORE_COLUMNS}, replay FROM solo_scores
+       WHERE id = ? AND hidden = 0 AND replay IS NOT NULL`,
+    );
+    this.selectReplayCandidates = this.db.prepare(SCORE_QUERIES.replayCandidates);
+    // `hidden = 0`: a run the admin CLI hid since the sweep read it is left alone.
+    this.keepReplay = this.db.prepare(
+      'UPDATE solo_scores SET replay_settled = 1 WHERE id = ? AND hidden = 0',
+    );
+    this.dropReplay = this.db.prepare(
+      'UPDATE solo_scores SET replay_settled = 1, replay = NULL WHERE id = ? AND hidden = 0',
     );
     this.updateHidden = this.db.prepare('UPDATE solo_scores SET hidden = ? WHERE id = ?');
     this.selectRecent = this.db.prepare(
@@ -334,6 +358,19 @@ export class SqliteStore implements LobbyStore, ScoreStore {
   getReplay(id: number): Promise<{ score: StoredSoloScore; replay: string } | null> {
     const row = this.selectReplay.get(id) as (ScoreRow & { replay: string }) | undefined;
     return Promise.resolve(row ? { score: scoreOf(row), replay: row.replay } : null);
+  }
+
+  replayCandidates(before: number, limit: number): Promise<StoredSoloScore[]> {
+    const rows = this.selectReplayCandidates.all({ before, limit }) as unknown as ScoreRow[];
+    return Promise.resolve(rows.map(scoreOf));
+  }
+
+  settleReplays(keep: readonly number[], drop: readonly number[]): Promise<void> {
+    this.transaction(() => {
+      for (const id of keep) this.keepReplay.run(id);
+      for (const id of drop) this.dropReplay.run(id);
+    });
+    return Promise.resolve();
   }
 
   setHidden(id: number, hidden: boolean): Promise<boolean> {

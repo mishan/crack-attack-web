@@ -165,6 +165,42 @@ function conformance(name: string, make: () => ScoreStore): void {
       expect(await store.getReplay(999)).toBeNull();
       await store.close();
     });
+
+    it('offers old visible unsettled replays, oldest first, and settles them', async () => {
+      const store = make();
+      const late = await add(store, run(1, { createdAt: T0 + 20 }));
+      const early = await add(store, run(2, { createdAt: T0 + 10 }));
+      const hidden = await add(store, run(3, { createdAt: T0 }));
+      const kept = await add(store, run(4, { createdAt: T0 + 15 }));
+      await add(store, run(5, { createdAt: T0 + 30 })); // too new
+      await store.setHidden(hidden, true);
+      const ids = async (limit = 10) =>
+        (await store.replayCandidates(T0 + 30, limit)).map((r) => r.id);
+      expect(await ids()).toEqual([early, kept, late]);
+      expect(await ids(1)).toEqual([early]);
+
+      await store.settleReplays([kept], [early]);
+      expect(await store.getReplay(early)).toBeNull();
+      expect((await store.getReplay(kept))?.replay).toBe('{"n":4}');
+      // Settled either way, so no longer offered: a later sweep moves on.
+      expect(await ids()).toEqual([late]);
+      // A dropped replay's run stays on the boards.
+      expect((await store.topScores('score', ALL_TIME, 10)).map((r) => r.id)).toContain(early);
+      expect(await store.standing(early, ALL_TIME)).not.toBeNull();
+      await store.close();
+    });
+
+    it('leaves a run hidden since it was offered as it is', async () => {
+      const store = make();
+      const id = await add(store, run(1));
+      expect((await store.replayCandidates(T0 + 1, 10)).map((r) => r.id)).toEqual([id]);
+      await store.setHidden(id, true); // the admin CLI, between a sweep's read and write
+      await store.settleReplays([], [id]);
+      await store.setHidden(id, false);
+      expect((await store.getReplay(id))?.replay).toBe('{"n":1}');
+      expect((await store.replayCandidates(T0 + 1, 10)).map((r) => r.id)).toEqual([id]);
+      await store.close();
+    });
   });
 }
 
@@ -279,6 +315,7 @@ describe('SqliteStore query plans', () => {
         topByScore: explain(SCORE_QUERIES.topByScore, { ...range, limit: 10 }),
         topByMult: explain(SCORE_QUERIES.topByMult, { ...range, limit: 10 }),
         standing: explain(SCORE_QUERIES.standing, { ...range, id: 1 }),
+        replayCandidates: explain(SCORE_QUERIES.replayCandidates, { before: 1, limit: 10 }),
       };
       db.close();
       return result;
@@ -306,5 +343,11 @@ describe('SqliteStore query plans', () => {
     const { topByScore, topByMult } = plans();
     expect(topByScore).toEqual(['SEARCH s USING INDEX solo_scores_board_score (hidden=?)']);
     expect(topByMult).toEqual(['SEARCH s USING INDEX solo_scores_board_mult (hidden=?)']);
+  });
+
+  it('finds replay candidates through the partial index, runs already settled left out', () => {
+    const { replayCandidates } = plans();
+    expect(replayCandidates).toHaveLength(1);
+    expect(replayCandidates[0]).toMatch(/^SEARCH s USING INDEX solo_scores_replay_pending /);
   });
 });

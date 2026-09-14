@@ -184,13 +184,13 @@ are logged to stderr and the relay keeps serving.
 
 ### Server environment variables
 
-| Var           | Default             | Meaning                                                                                                                                                                                                                                                                               |
-| ------------- | ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `PORT`        | `8080`              | TCP port. Base-10 integer `0..65535`; `0` lets the OS pick a port.                                                                                                                                                                                                                    |
-| `HOST`        | all interfaces      | Interface to bind (e.g. `127.0.0.1` for local-only).                                                                                                                                                                                                                                  |
-| `DB`          | `./crack-attack.db` | SQLite file for identities, records and the solo scoreboard. Use `:memory:` for ephemeral.                                                                                                                                                                                            |
-| `TRUST_PROXY` | off                 | The number of reverse proxies in front that append to `X-Forwarded-For` (`1` or `true` behind nginx alone, `2` behind a CDN and nginx); the scoreboard's rate limits then key on the client address that many entries from the right. Set it only behind proxies that set the header. |
-| `CORS_ORIGIN` | unset               | `Access-Control-Allow-Origin` for the scoreboard API, if the client is served from another origin (e.g. `https://example.com`, or `*`).                                                                                                                                               |
+| Var           | Default             | Meaning                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| ------------- | ------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `PORT`        | `8080`              | TCP port. Base-10 integer `0..65535`; `0` lets the OS pick a port.                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| `HOST`        | all interfaces      | Interface to bind (e.g. `127.0.0.1` for local-only).                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| `DB`          | `./crack-attack.db` | SQLite file for identities, records and the solo scoreboard. Use `:memory:` for ephemeral.                                                                                                                                                                                                                                                                                                                                                                                                           |
+| `TRUST_PROXY` | off                 | The number of reverse proxies in front that append to `X-Forwarded-For` (`1` or `true` behind nginx alone, `2` behind a CDN and nginx); the scoreboard's rate limits then key on the client address that many entries from the right. Set it only behind proxies that set the header, and with two or more, only if the inner proxy accepts connections from the outer one alone (see the notes under [Production: TLS termination with nginx](#production-tls-termination-with-nginx-recommended)). |
+| `CORS_ORIGIN` | unset               | `Access-Control-Allow-Origin` for the scoreboard API, if the client is served from another origin (e.g. `https://example.com`, or `*`).                                                                                                                                                                                                                                                                                                                                                              |
 
 Examples:
 
@@ -223,17 +223,26 @@ Limits:
 - A run can't be submitted sooner than it takes to play.
 - Submissions are capped at 256 KiB.
 - Each client address (IPv6: each /64) gets a burst of 30 tickets (then one
-  every 10 s), 20 submissions (then one every 20 s) and 60 board requests
-  (then one a second). Tickets are also limited per IPv6 /48 (120, then one
-  every 2.5 s) and across all clients (600, then five a second).
+  every 10 s), 20 submissions (then one every 20 s), 60 board requests (then
+  one a second) and 30 replay requests (then one every 2 s).
+- Tickets and submissions are also limited per IPv6 /48 (tickets 120, then
+  one every 2.5 s; submissions 80, then one every 5 s) and across all clients
+  (tickets 600, then five a second; submissions 300, then one a second). While
+  a limit shared by all clients is turning requests away, the relay logs it
+  (at most every 10 minutes): if it's tickets, every player is playing
+  unranked.
+- A replay may change its input at most once every 3 ticks on average (plus
+  100), more than anyone keeps up over a whole game.
 - Board responses are cached for 5 s, so a run hidden with `admin hide` may
   show for that long (and its replay for a minute, in HTTP caches).
 - Replays are verified one at a time in short slices, so a long one never
   stalls netplay. If too many are waiting, the API answers 503. Copies of a
   submission sent while it's being verified share its result.
 
-Every run's replay is kept. To take a run off the boards, find it with
-`recent` and hide it. This works while the relay is running:
+A run's replay is kept for a week, then only if the run is among the top 100
+of its month or of all time, on either board (what the boards can show). Runs
+past that stay on the boards, without a replay. To take a run off the boards,
+find it with `recent` and hide it. This works while the relay is running:
 
 ```sh
 DB=/var/lib/crack-attack/lobby.db node relay.mjs admin recent 50
@@ -346,6 +355,11 @@ Notes:
   `X-Forwarded-For` hop, the one nginx adds; the WebSocket side doesn't use
   client addresses. Behind a CDN in front of nginx, set `TRUST_PROXY=2` to use
   the entry the CDN added instead (else every client shares the CDN's bucket).
+  Then nginx must accept connections from the CDN only (firewall it to the
+  CDN's address ranges, or use the CDN's authenticated origin pulls). A client
+  that reaches nginx directly can send its own `X-Forwarded-For: 9.9.9.9`;
+  nginx appends the client's real address, and the forged entry lands where
+  the CDN's would be.
   Ports (`1.2.3.4:5678`, `[2001:db8::1]:443`) are stripped, and an entry that
   isn't an IP address falls back to the connection's own address.
 - To keep the relay running, a systemd unit works well (it shuts down cleanly

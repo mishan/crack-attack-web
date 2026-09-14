@@ -142,6 +142,79 @@ describe('scoreboard HTTP API', () => {
     expect(status).toBe(413);
   });
 
+  it('spends a submission before reading its body, so a burst is turned away unread', async () => {
+    const scoreboard = new SoloScoreboard({
+      store: new MemoryScoreStore(),
+      submitLimit: { capacity: 1, refillMs: 60_000 },
+    });
+    const api = createScoreboardApi(scoreboard);
+    let arrived!: () => void;
+    const firstArrived = new Promise<void>((resolve) => (arrived = resolve));
+    const relay = await startRelayWsServer({
+      port: 0,
+      host: '127.0.0.1',
+      http: (req, res) => {
+        api(req, res); // admits (or refuses) before it first waits
+        arrived();
+      },
+    });
+    // Each declares a body it never sends, so any answer came before reading it.
+    const submit = () =>
+      request({
+        host: '127.0.0.1',
+        port: relay.port,
+        method: 'POST',
+        path: '/api/solo/submit',
+        headers: { 'content-type': 'application/json', 'content-length': '100000' },
+      });
+    const first = submit();
+    first.on('error', () => undefined); // hung up on below
+    first.write('{');
+    try {
+      await firstArrived; // let in, and waiting for its body
+      const answer = await new Promise<{ status: number; headers: Record<string, unknown> }>(
+        (resolve, reject) => {
+          const req = submit();
+          req.on('response', (res) => {
+            resolve({ status: res.statusCode ?? 0, headers: res.headers });
+            res.resume();
+            req.destroy();
+          });
+          req.on('error', (err) => (req.destroyed ? undefined : reject(err)));
+          req.write('{');
+        },
+      );
+      expect(answer.status).toBe(429);
+      expect(answer.headers['connection']).toBe('close');
+      expect(answer.headers['retry-after']).toBe('60');
+    } finally {
+      first.destroy();
+      await relay.close();
+    }
+  });
+
+  it('rate-limits replay requests, HEAD included', async () => {
+    const scoreboard = new SoloScoreboard({
+      store: new MemoryScoreStore(),
+      replayLimit: { capacity: 2, refillMs: 60_000 },
+    });
+    const relay = await startRelayWsServer({
+      port: 0,
+      host: '127.0.0.1',
+      http: createScoreboardApi(scoreboard),
+    });
+    try {
+      const url = `http://127.0.0.1:${relay.port}/api/solo/replay/1`;
+      expect((await fetch(url)).status).toBe(404);
+      expect((await fetch(url, { method: 'HEAD' })).status).toBe(404);
+      const limited = await fetch(url);
+      expect(limited.status).toBe(429);
+      expect(limited.headers.get('retry-after')).toBe('60');
+    } finally {
+      await relay.close();
+    }
+  });
+
   it('refuses a ticket request with a body over 1 KiB', async () => {
     expect((await post('/api/solo/ticket', 'x'.repeat(2048))).status).toBe(413);
     expect((await post('/api/solo/ticket', '{}')).status).toBe(200);
