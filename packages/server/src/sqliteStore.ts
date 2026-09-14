@@ -155,6 +155,7 @@ export class SqliteStore implements LobbyStore, ScoreStore {
   private readonly topByScore: StatementSync;
   private readonly topByMult: StatementSync;
   private readonly selectReplay: StatementSync;
+  private readonly selectVisibleScore: StatementSync;
   private readonly selectReplayCandidates: StatementSync;
   private readonly keepReplay: StatementSync;
   private readonly dropReplay: StatementSync;
@@ -209,6 +210,9 @@ export class SqliteStore implements LobbyStore, ScoreStore {
     this.selectReplay = this.db.prepare(
       `SELECT ${SCORE_COLUMNS}, replay FROM solo_scores
        WHERE id = ? AND hidden = 0 AND replay IS NOT NULL`,
+    );
+    this.selectVisibleScore = this.db.prepare(
+      `SELECT ${SCORE_COLUMNS} FROM solo_scores WHERE id = ? AND hidden = 0`,
     );
     this.selectReplayCandidates = this.db.prepare(SCORE_QUERIES.replayCandidates);
     // `hidden = 0`: a run the admin CLI hid since the sweep read it is left alone.
@@ -358,6 +362,11 @@ export class SqliteStore implements LobbyStore, ScoreStore {
   getReplay(id: number): Promise<{ score: StoredSoloScore; replay: string } | null> {
     const row = this.selectReplay.get(id) as (ScoreRow & { replay: string }) | undefined;
     return Promise.resolve(row ? { score: scoreOf(row), replay: row.replay } : null);
+  }
+
+  visibleScore(id: number): Promise<StoredSoloScore | null> {
+    const row = this.selectVisibleScore.get(id) as ScoreRow | undefined;
+    return Promise.resolve(row ? scoreOf(row) : null);
   }
 
   replayCandidates(before: number, limit: number): Promise<StoredSoloScore[]> {

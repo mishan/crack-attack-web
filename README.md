@@ -158,6 +158,7 @@ are logged to stderr and the relay keeps serving.
 | `DB`          | `./crack-attack.db` | SQLite file for identities, records and the solo scoreboard. Use `:memory:` for ephemeral.                                                                                                                                                                                                                                                                                                                            |
 | `TRUST_PROXY` | off                 | The number of reverse proxies in front that append to `X-Forwarded-For` (`1` or `true` behind nginx alone, `2` behind a CDN and nginx); the scoreboard's rate limits then key on the client address that many entries from the right. Set it only behind proxies that set the header, and with two or more, only if the inner proxy accepts connections from the outer one alone (see [Other setups](#other-setups)). |
 | `CORS_ORIGIN` | unset               | `Access-Control-Allow-Origin` for the scoreboard API, if the client is served from another origin (e.g. `https://example.com`, or `*`).                                                                                                                                                                                                                                                                               |
+| `PUBLIC_URL`  | the request's host  | The game's address (e.g. `https://example.com/`), for the scoreboard's share pages: their preview image, and where they send visitors. Unset, it's the host the request came to, over `https` only if a trusted proxy says so in `X-Forwarded-Proto`.                                                                                                                                                                 |
 
 Examples:
 
@@ -177,12 +178,13 @@ over the client submits its replay, and the relay re-simulates it and ranks the
 score _it_ computed, so a client can't claim a score it didn't play. The design
 is in [`docs/SCOREBOARD_PLAN.md`](docs/SCOREBOARD_PLAN.md).
 
-| Route                      | What it does                                                                        |
-| -------------------------- | ----------------------------------------------------------------------------------- |
-| `POST /api/solo/ticket`    | Issues a run ticket: `{runId, seed, simVersion, expiresAt}`.                        |
-| `POST /api/solo/submit`    | `{runId, name, replay}` → the verified score, with its all-time and monthly rank.   |
-| `GET /api/solo/scores`     | A board: `board=score\|mult`, `period=all\|month`, `month=YYYY-MM`, `limit=1..100`. |
-| `GET /api/solo/replay/:id` | A run's replay.                                                                     |
+| Route                      | What it does                                                                                 |
+| -------------------------- | -------------------------------------------------------------------------------------------- |
+| `POST /api/solo/ticket`    | Issues a run ticket: `{runId, seed, simVersion, expiresAt}`.                                 |
+| `POST /api/solo/submit`    | `{runId, name, replay}` → the verified score, with its all-time and monthly rank.            |
+| `GET /api/solo/scores`     | A board: `board=score\|mult`, `period=all\|month`, `month=YYYY-MM`, `limit=1..100`.          |
+| `GET /api/solo/replay/:id` | A run's replay.                                                                              |
+| `GET /api/solo/share/:id`  | A run's share page: HTML whose link preview shows the score; it sends people on to the game. |
 
 Limits:
 
@@ -313,7 +315,8 @@ On your machine, from the repo root:
 pnpm install
 pnpm --filter @crack-attack/server bundle
 node packages/server/scripts/smoke-bundle.mjs
-VITE_RELAY_URL=wss://example.com/ws pnpm --filter @crack-attack/client build
+VITE_RELAY_URL=wss://example.com/ws VITE_PUBLIC_URL=https://example.com/ \
+  pnpm --filter @crack-attack/client build
 ```
 
 That makes the two things to copy to the server:
@@ -327,6 +330,11 @@ That makes the two things to copy to the server:
 `VITE_RELAY_URL` is the address browsers use to reach the relay, fixed at build
 time. The client finds the scoreboard from it: `wss://example.com/ws` →
 `https://example.com/api/solo`.
+
+`VITE_PUBLIC_URL` is the game's own address. Link previews on Facebook,
+LinkedIn and the like need the game's preview image as a full URL, so the build
+adds it only when this is set. Without it, shared links still work, with a
+preview that has no picture.
 
 ### 2. Install the relay
 
@@ -348,7 +356,7 @@ After=network.target
 [Service]
 ExecStart=/usr/bin/node /opt/crack-attack/relay.mjs
 WorkingDirectory=/opt/crack-attack
-Environment=HOST=127.0.0.1 PORT=8080 TRUST_PROXY=1 DB=/var/lib/crack-attack/lobby.db
+Environment=HOST=127.0.0.1 PORT=8080 TRUST_PROXY=1 DB=/var/lib/crack-attack/lobby.db PUBLIC_URL=https://example.com/
 StateDirectory=crack-attack
 User=crack-attack
 Restart=on-failure
@@ -365,6 +373,10 @@ WantedBy=multi-user.target
 - `DB` is the database: player records and the scoreboard. `StateDirectory`
   has systemd create `/var/lib/crack-attack` for the relay's user, and the
   relay creates the file on first start.
+- `PUBLIC_URL` is the game's address. When a player shares a ranked score,
+  the link goes to a page the relay serves, and Facebook, LinkedIn and Bluesky
+  show that page's preview, score included. The page uses this address for the
+  preview image and to send visitors on to the game.
 - If `which node` doesn't print `/usr/bin/node`, change `ExecStart` to match.
 
 Start the relay, and have it start at boot:
@@ -429,6 +441,8 @@ server {
     proxy_set_header Host $host;
     # Each player's address, for the scoreboard's limits (TRUST_PROXY=1).
     proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    # http or https, for score share pages' links if PUBLIC_URL isn't set.
+    proxy_set_header X-Forwarded-Proto $scheme;
   }
 
   # These file names change whenever their contents do, so browsers can keep

@@ -4,13 +4,13 @@
  */
 
 import { readFileSync } from 'node:fs';
-import { request } from 'node:http';
+import { request, type IncomingMessage } from 'node:http';
 import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import WebSocket from 'ws';
 import type { SoloReplay } from '@crack-attack/core';
 import { PROTOCOL_VERSION, SOLO_SUBMIT_MAX_BYTES, encodeMessage } from '@crack-attack/protocol';
-import { createScoreboardApi, forwardedAddress, parseAddress } from './httpApi.js';
+import { createScoreboardApi, forwardedAddress, parseAddress, requestGameUrl } from './httpApi.js';
 import { SoloScoreboard } from './scoreboard.js';
 import { MemoryScoreStore } from './scoreStore.js';
 import { SoloVerifier } from './soloVerifier.js';
@@ -87,6 +87,46 @@ describe('scoreboard HTTP API', () => {
     // Short, so a run a moderator hides soon drops out of caches.
     expect(replayRes.headers.get('cache-control')).toBe('public, max-age=60');
     expect(((await replayRes.json()) as { replay: unknown }).replay).toEqual(FIXTURE);
+  });
+
+  it("serves a run's share page, and a plain one for a run it doesn't show", async () => {
+    const ticket = (await (await post('/api/solo/ticket')).json()) as { runId: string };
+    clock.now += FIXTURE.ticks * 20 + 3000;
+    await post('/api/solo/submit', { runId: ticket.runId, name: 'misha', replay: FIXTURE });
+
+    // No PUBLIC_URL here: the game is taken to be at this host, over the
+    // scheme the (trusted) proxy reports.
+    const game = `https://127.0.0.1:${server.port}/`;
+    const res = await fetch(`${base}/api/solo/share/1`, {
+      headers: { 'x-forwarded-proto': 'https' },
+    });
+    expect(res.status).toBe(200);
+    expect(res.headers.get('content-type')).toBe('text/html; charset=utf-8');
+    expect(res.headers.get('cache-control')).toBe('public, max-age=300');
+    expect(res.headers.get('content-security-policy')).toContain(
+      `img-src https://127.0.0.1:${server.port};`,
+    );
+    const html = await res.text();
+    expect(html).toContain('<meta property="og:title" content="misha scored 48 in Crack Attack!">');
+    expect(html).toContain(`<a id="play" href="${game}">`);
+
+    const missing = await fetch(`${base}/api/solo/share/99`);
+    expect(missing.status).toBe(404);
+    expect(await missing.text()).toContain('<title>Crack Attack!</title>');
+    expect((await fetch(`${base}/api/solo/share/1/x`)).status).toBe(404);
+  });
+
+  it("takes the game's address from the request when none is configured", () => {
+    const req = (headers: Record<string, string>) => ({ headers }) as unknown as IncomingMessage;
+    const https = { host: 'example.com', 'x-forwarded-proto': 'https' };
+    expect(requestGameUrl(req(https), 1)).toBe('https://example.com/');
+    // Only a trusted proxy's word counts.
+    expect(requestGameUrl(req(https), 0)).toBe('http://example.com/');
+    expect(requestGameUrl(req({ host: '[::1]:8080' }), 0)).toBe('http://[::1]:8080/');
+    expect(requestGameUrl(req({ host: 'x.example/"><script>' }), 0)).toBe('http://localhost/');
+    // Shaped like a host, but no URL can hold it.
+    expect(requestGameUrl(req({ host: 'example.com:99999' }), 0)).toBe('http://localhost/');
+    expect(requestGameUrl(req({}), 0)).toBe('http://localhost/');
   });
 
   it('answers CORS preflights', async () => {

@@ -660,6 +660,19 @@ A generator header that a real, non-AI tool always writes (e.g. a lockfile's own
   README's "Deploying the scoreboard" rollout checklist, plus CORS for a
   relay on its own host. The smoke test doesn't submit a run yet. Next:
   phase 4, a replay viewer for stored runs.
+- [x] **Score sharing landed**: after a solo game, **Share score** opens
+      `render/shareDialog.ts`: the browser's share sheet (where there is one),
+      Facebook, LinkedIn and Bluesky links, and Copy; wording and links are the
+      pure `view/share.ts`. Facebook and LinkedIn take only a URL and build the
+      preview from its Open Graph tags, so a verified ranked run links its
+      share page, `GET /api/solo/share/:id` (`server/sharePage.ts`): the run's
+      score, places, chain and length in the tags, a strict CSP, and a
+      hash-pinned script that sends visitors on to the game (crawlers don't run
+      it). Any other run links the game, whose `index.html` carries static tags.
+      Absolute URLs come from `PUBLIC_URL` (relay) and `VITE_PUBLIC_URL`
+      (client build); the preview image is `public/og-image.png`. The title
+      card, high-score screen, share dialog and share page link the source on
+      GitHub (`SOURCE_URL` in protocol).
 - [ ] Phase 6 stretch (X-mode, replays, WebRTC, binary codec if
       measurements demand it)
 

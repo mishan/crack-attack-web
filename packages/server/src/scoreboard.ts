@@ -34,6 +34,7 @@ import {
   type ScoreboardErrorCode,
   type SoloScoreEntry,
   type SoloScoresResponse,
+  type SoloStanding,
   type SoloSubmitRequest,
   type SoloSubmitResponse,
   type SoloTicketResponse,
@@ -99,6 +100,11 @@ export const DEFAULT_SUBMIT_GLOBAL_LIMIT: RateLimit = { capacity: 300, refillMs:
 export const DEFAULT_SCORES_LIMIT: RateLimit = { capacity: 60, refillMs: 1_000 };
 /** Replay requests per client: a burst of 30, then one per 2 s. */
 export const DEFAULT_REPLAY_LIMIT: RateLimit = { capacity: 30, refillMs: 2_000 };
+/**
+ * Share-page requests per client: a burst of 60, then one a second. Generous,
+ * as link-preview crawlers fetch every shared run from a few addresses.
+ */
+export const DEFAULT_SHARE_LIMIT: RateLimit = { capacity: 60, refillMs: 1_000 };
 /**
  * How long a board response is reused. Recording a run here clears the cache;
  * the admin CLI hides runs from another process, so this bounds how long a
@@ -167,8 +173,17 @@ export interface SoloScoreboardOptions {
   scoresLimit?: RateLimit | undefined;
   /** Replay requests per client. */
   replayLimit?: RateLimit | undefined;
+  /** Share-page requests per client. */
+  shareLimit?: RateLimit | undefined;
   /** How long a board response is reused, in ms; 0 turns the cache off. */
   scoresCacheMs?: number | undefined;
+}
+
+/** What a run's share page shows: the run, its month (`YYYY-MM`), and its places now. */
+export interface ShareCard {
+  entry: SoloScoreEntry;
+  month: string;
+  standing: { all: SoloStanding | null; month: SoloStanding | null };
 }
 
 interface CachedScores {
@@ -233,6 +248,7 @@ export class SoloScoreboard {
   private readonly submitLimit: TieredLimit;
   private readonly scoresLimiter: RateLimiter;
   private readonly replayLimiter: RateLimiter;
+  private readonly shareLimiter: RateLimiter;
   private readonly scoresCacheMs: number;
   /** Board responses by their normalized query, oldest first. */
   private readonly scoresCache = new Map<string, CachedScores>();
@@ -272,6 +288,7 @@ export class SoloScoreboard {
     );
     this.scoresLimiter = new RateLimiter(options.scoresLimit ?? DEFAULT_SCORES_LIMIT, this.now);
     this.replayLimiter = new RateLimiter(options.replayLimit ?? DEFAULT_REPLAY_LIMIT, this.now);
+    this.shareLimiter = new RateLimiter(options.shareLimit ?? DEFAULT_SHARE_LIMIT, this.now);
     this.scoresCacheMs = options.scoresCacheMs ?? DEFAULT_SCORES_CACHE_MS;
   }
 
@@ -404,12 +421,31 @@ export class SoloScoreboard {
    */
   async replay(client: string, idText: string): Promise<string> {
     take(this.replayLimiter, client);
-    const id = /^[1-9]\d{0,14}$/.test(idText) ? Number(idText) : null;
+    const id = parseEntryId(idText);
     const found = id === null ? null : await this.store.getReplay(id);
     if (!found) throw new ApiError(404, 'not_found', 'no such replay');
     // The replay is JSON this server wrote: spliced in as it is, not parsed
     // and written out again.
     return `{"entry":${JSON.stringify(entryOf(found.score))},"replay":${found.replay}}`;
+  }
+
+  /**
+   * A visible run and its current places, for its share page, by id (the path
+   * segment, unparsed); null if there's no such run, or it's hidden.
+   */
+  async shareCard(client: string, idText: string): Promise<ShareCard | null> {
+    take(this.shareLimiter, client);
+    const id = parseEntryId(idText);
+    const run = id === null ? null : await this.store.visibleScore(id);
+    if (!run) return null;
+    const month = monthKey(run.createdAt);
+    const monthly = await this.store.standing(run.id, monthRange(month)!);
+    // Read last: a visible run always has an all-time place, so none means a
+    // moderator hid it since the lookup (the admin CLI writes from another
+    // process), and it gets the hidden run's page.
+    const all = await this.store.standing(run.id, ALL_TIME);
+    if (!all) return null;
+    return { entry: entryOf(run), month, standing: { all, month: monthly } };
   }
 
   /** Check a submission against its ticket, verify it, and record it. */
@@ -615,6 +651,11 @@ function oneOf<T extends string>(value: string, allowed: readonly T[], field: st
     throw new ApiError(400, 'bad_request', `${field} must be one of ${allowed.join('|')}`);
   }
   return value as T;
+}
+
+/** A run id from a URL path segment: a positive integer, digits only; else null. */
+function parseEntryId(text: string): number | null {
+  return /^[1-9]\d{0,14}$/.test(text) ? Number(text) : null;
 }
 
 function entryOf(run: StoredSoloScore): SoloScoreEntry {

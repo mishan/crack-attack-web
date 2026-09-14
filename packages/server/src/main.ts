@@ -6,7 +6,8 @@
  * (default ./crack-attack.db; set DB=:memory: for an ephemeral server).
  * TRUST_PROXY=<n> reads client addresses from X-Forwarded-For, behind n
  * proxies (1 = nginx alone; true = 1); CORS_ORIGIN lets a client on another
- * origin call the scoreboard API.
+ * origin call the scoreboard API. PUBLIC_URL is the game's address, for the
+ * share pages' links and preview image (default: each request's own host).
  * `admin …` runs a scoreboard moderation command instead (see admin.ts).
  */
 
@@ -49,6 +50,27 @@ function parseProxyHops(raw: string | undefined): number {
   return hops;
 }
 
+/**
+ * Parse PUBLIC_URL: the game's absolute http(s) address, given a trailing
+ * slash; unset = undefined; else exit.
+ */
+function parsePublicUrl(raw: string | undefined): string | undefined {
+  if (raw === undefined || raw === '') return undefined;
+  let url: URL | null;
+  try {
+    url = new URL(raw);
+  } catch {
+    url = null;
+  }
+  if (!url || !/^https?:$/.test(url.protocol) || url.search || url.hash) {
+    console.error(
+      `invalid PUBLIC_URL ${JSON.stringify(raw)}: expected the game's address, e.g. https://example.com/`,
+    );
+    process.exit(1);
+  }
+  return url.href.endsWith('/') ? url.href : `${url.href}/`;
+}
+
 const dbPath = process.env['DB'] ?? './crack-attack.db';
 
 if (process.argv[2] === 'admin') {
@@ -71,6 +93,7 @@ const port = parsePort(process.env['PORT']);
 const host = process.env['HOST'];
 const trustProxy = parseProxyHops(process.env['TRUST_PROXY']);
 const corsOrigin = process.env['CORS_ORIGIN'] || undefined;
+const publicUrl = parsePublicUrl(process.env['PUBLIC_URL']);
 
 const store = new SqliteStore(dbPath);
 const scoreboard = new SoloScoreboard({ store });
@@ -78,7 +101,7 @@ const server = await startRelayWsServer({
   port,
   host,
   store,
-  http: createScoreboardApi(scoreboard, { trustProxy, corsOrigin }),
+  http: createScoreboardApi(scoreboard, { trustProxy, corsOrigin, publicUrl }),
 });
 console.log(`crack-attack relay listening on :${server.port} (db: ${dbPath})`);
 

@@ -585,6 +585,50 @@ describe('SoloScoreboard boards', () => {
     await expect(board.replay('198.51.100.1', '1')).rejects.toMatchObject({ code: 'not_found' });
   });
 
+  it("serves a visible run's share card, with its places now", async () => {
+    const s = setup();
+    const { id } = await s.board.submit(CLIENT, submission(await playRun(s)));
+    expect(await s.board.shareCard(CLIENT, String(id))).toEqual({
+      entry: {
+        id,
+        name: 'misha',
+        score: 48,
+        topMultiplier: 3,
+        ticks: FIXTURE.ticks,
+        createdAt: s.clock.now,
+      },
+      month: '2026-09',
+      standing: { all: { rank: 1, total: 1 }, month: { rank: 1, total: 1 } },
+    });
+
+    await s.store.setHidden(id, true);
+    for (const idText of [String(id), '999', '0', 'abc', '1e3']) {
+      expect(await s.board.shareCard(CLIENT, idText)).toBeNull();
+    }
+  });
+
+  it('gives no card for a run a moderator hides mid-lookup', async () => {
+    const s = setup();
+    const { id } = await s.board.submit(CLIENT, submission(await playRun(s)));
+    const lookup = s.store.visibleScore.bind(s.store);
+    s.store.visibleScore = async (runId) => {
+      const found = await lookup(runId);
+      await s.store.setHidden(runId, true); // the admin CLI, between the reads
+      return found;
+    };
+    expect(await s.board.shareCard(CLIENT, String(id))).toBeNull();
+  });
+
+  it('rate-limits share-page requests per client', async () => {
+    const { board } = setup({ shareLimit: { capacity: 1, refillMs: 1_000 } });
+    expect(await board.shareCard(CLIENT, '1')).toBeNull();
+    await expect(board.shareCard(CLIENT, '1')).rejects.toMatchObject({
+      status: 429,
+      code: 'rate_limited',
+    });
+    expect(await board.shareCard('198.51.100.1', '1')).toBeNull();
+  });
+
   it("keeps a run's replay a week, then only if a board shows it", async () => {
     const s = setup();
     // The top 100 of all time and of September, on both boards.
