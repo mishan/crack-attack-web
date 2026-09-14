@@ -205,13 +205,14 @@ Each phase is one PR.
   upgrades existing databases in place. Version 1 adds:
   - `solo_tickets(run_id PK, seed, sim_version, issued_at)`: outstanding
     tickets only. Using one deletes it, and expired ones are swept.
-  - `solo_scores(id PK, run_id UNIQUE, name, score, top_multiplier, ticks, sim_version, created_at, replay TEXT, hidden)`,
+  - `solo_scores(id PK, run_id UNIQUE, name, score, top_multiplier, ticks, sim_version, created_at, replay TEXT, replay_settled, hidden)`,
     with covering indexes for both boards and by time, so boards, counts and
     standings never read the table rows. `replay` is NULL once dropped: a
     run keeps it for a week, then only if it's in the top 100 of its month
     or of all time on either board. An hourly sweep (after a run is
-    recorded) judges each run once as it comes of age, through a partial
-    index of runs still holding a replay.
+    recorded) judges each run once as it comes of age and marks it
+    `replay_settled`, kept or dropped, reading candidates through a partial
+    index of unsettled runs. A run hidden meanwhile is left alone.
 
   A separate `ScoreStore` interface (`scoreStore.ts`) sits beside
   `LobbyStore`; `SqliteStore` implements both on one file. `recordRun` uses
@@ -239,7 +240,8 @@ Each phase is one PR.
     burst 600, then 5 per s; submissions 300, then 1 per s), so rotating
     addresses doesn't help; a full global bucket is logged, at most every
     10 min
-  - a submission over its limits is refused before its body is read, and
+  - a submission is spent against its limits before its body is read, so
+    one over them (or one of a burst sent at once) is refused unread, and
     the connection closed
   - `TRUST_PROXY=<n>` takes the client from `X-Forwarded-For`, _n_ entries
     from the right (1 behind nginx, 2 behind a CDN and nginx), ports

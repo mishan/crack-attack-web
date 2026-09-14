@@ -75,12 +75,16 @@ export interface ScoreStore {
   /** A visible run and its replay JSON; null if unknown, hidden, or its replay was dropped. */
   getReplay(id: number): Promise<{ score: StoredSoloScore; replay: string } | null>;
   /**
-   * Visible runs created before `before` that still keep their replay, oldest
-   * first, at most `limit`: the candidates for {@link dropReplays}.
+   * Visible runs created before `before` whose replay isn't settled yet,
+   * oldest first, at most `limit`: the candidates for {@link settleReplays}.
    */
   replayCandidates(before: number, limit: number): Promise<StoredSoloScore[]>;
-  /** Drop these runs' replays, keeping the runs themselves on the boards. */
-  dropReplays(ids: readonly number[]): Promise<void>;
+  /**
+   * Settle runs' replays for good: `keep` keep theirs, `drop` lose theirs
+   * (the runs stay on the boards). Either way they're candidates no more. A
+   * run hidden meanwhile is left as it is: the moderator's word wins.
+   */
+  settleReplays(keep: readonly number[], drop: readonly number[]): Promise<void>;
   /** Hide a run from the boards (or restore it); false if the id is unknown. */
   setHidden(id: number, hidden: boolean): Promise<boolean>;
   /** The newest `limit` runs, hidden ones included, newest first. */
@@ -97,9 +101,10 @@ export function compareScores(
     : (a, b) => b.topMultiplier - a.topMultiplier || b.score - a.score || a.id - b.id;
 }
 
-type Row = StoredSoloScore & { replay: string | null };
+type Row = StoredSoloScore & { replay: string | null; replaySettled: boolean };
 
-const publicCopy = ({ replay: _replay, ...score }: Row): StoredSoloScore => score;
+const publicCopy = ({ replay: _replay, replaySettled: _settled, ...score }: Row): StoredSoloScore =>
+  score;
 
 /** In-memory score store: tests and zero-persistence deployments. */
 export class MemoryScoreStore implements ScoreStore {
@@ -144,7 +149,7 @@ export class MemoryScoreStore implements ScoreStore {
     }
     this.tickets.delete(run.runId);
     const id = this.rows.length + 1;
-    this.rows.push({ ...run, id, hidden: false });
+    this.rows.push({ ...run, id, hidden: false, replaySettled: false });
     return Promise.resolve(id);
   }
 
@@ -180,13 +185,19 @@ export class MemoryScoreStore implements ScoreStore {
 
   replayCandidates(before: number, limit: number): Promise<StoredSoloScore[]> {
     const rows = this.rows
-      .filter((r) => !r.hidden && r.replay !== null && r.createdAt < before)
+      .filter((r) => !r.hidden && !r.replaySettled && r.createdAt < before)
       .sort((a, b) => a.createdAt - b.createdAt || a.id - b.id);
     return Promise.resolve(rows.slice(0, limit).map(publicCopy));
   }
 
-  dropReplays(ids: readonly number[]): Promise<void> {
-    for (const row of this.rows) if (ids.includes(row.id)) row.replay = null;
+  settleReplays(keep: readonly number[], drop: readonly number[]): Promise<void> {
+    for (const row of this.rows) {
+      if (row.hidden) continue;
+      const dropped = drop.includes(row.id);
+      if (!dropped && !keep.includes(row.id)) continue;
+      row.replaySettled = true;
+      if (dropped) row.replay = null;
+    }
     return Promise.resolve();
   }
 

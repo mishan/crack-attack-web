@@ -207,13 +207,6 @@ class TieredLimit {
     }
   }
 
-  /** Refuse as {@link take} would, but spend nothing. */
-  check(client: string): void {
-    for (const [limiter, key] of this.buckets(client)) {
-      if (limiter.waitMs(key) > 0) throw this.refusal(limiter, key);
-    }
-  }
-
   private buckets(client: string): [RateLimiter, string][] {
     const site = siteKey(client);
     return [
@@ -304,19 +297,26 @@ export class SoloScoreboard {
   }
 
   /**
-   * Refuse `client` as {@link submit} would for its rate limits, but spend
-   * nothing: lets the HTTP layer turn a client away before reading its body.
-   */
-  checkSubmitLimit(client: string): void {
-    this.submitLimit.check(client);
-  }
-
-  /**
    * Verify and record a finished run. Submitting a run that's already recorded
    * returns its current standing, so a client can safely retry.
    */
   async submit(client: string, body: unknown): Promise<SoloSubmitResponse> {
+    this.admitSubmission(client);
+    return this.submitAdmitted(body);
+  }
+
+  /**
+   * Spend one of `client`'s submissions, or refuse with a 429: the first half
+   * of {@link submit}, for a caller that hasn't read the body yet. Spending
+   * up front (not just checking) also turns away a client that sends many at
+   * once before any of their bodies is read.
+   */
+  admitSubmission(client: string): void {
     this.submitLimit.take(client);
+  }
+
+  /** The rest of {@link submit}, for a submission {@link admitSubmission} let in. */
+  async submitAdmitted(body: unknown): Promise<SoloSubmitResponse> {
     let request: SoloSubmitRequest;
     try {
       request = decodeSoloSubmitRequest(body);
@@ -499,17 +499,19 @@ export class SoloScoreboard {
         const bar = await last;
         return bar === null || compareScores(board)(run, bar) <= 0;
       };
+      const keep: number[] = [];
       const drop: number[] = [];
       for (const run of runs) {
-        let keep = false;
+        let listed = false;
         for (const board of SCORE_BOARDS) {
           for (const month of [null, monthKey(run.createdAt)]) {
-            keep ||= await onBoard(run, board, month);
+            listed ||= await onBoard(run, board, month);
           }
         }
-        if (!keep) drop.push(run.id);
+        (listed ? keep : drop).push(run.id);
       }
-      if (drop.length > 0) await this.store.dropReplays(drop);
+      // The kept are settled too, so later sweeps move on past them.
+      if (runs.length > 0) await this.store.settleReplays(keep, drop);
     } catch (err) {
       this.log(`scoreboard: replay sweep failed: ${String(err)}`);
     }

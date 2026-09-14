@@ -388,18 +388,19 @@ describe('SoloScoreboard submissions', () => {
     expect(lines[0]).toMatch(/submission limit shared by all clients/);
   });
 
-  it('checks the submission limits without spending them', async () => {
+  it('spends a submission on admission, before there is a body', async () => {
     const s = setup({ submitLimit: { capacity: 1, refillMs: 60_000 } });
-    s.board.checkSubmitLimit(CLIENT);
-    s.board.checkSubmitLimit(CLIENT);
-    await expect(s.board.submit(CLIENT, {})).rejects.toMatchObject({ code: 'bad_request' });
+    s.board.admitSubmission(CLIENT);
+    // A second sent before the first's body arrives is refused straight away.
     let refusal: unknown;
     try {
-      s.board.checkSubmitLimit(CLIENT);
+      s.board.admitSubmission(CLIENT);
     } catch (err) {
       refusal = err;
     }
     expect(refusal).toMatchObject({ status: 429, headers: { 'Retry-After': '60' } });
+    // The one let in goes on without spending again.
+    await expect(s.board.submitAdmitted({})).rejects.toMatchObject({ code: 'bad_request' });
   });
 
   it('refuses a replay padded with more input than anyone can press, keeping the ticket', async () => {
@@ -607,5 +608,7 @@ describe('SoloScoreboard boards', () => {
     for (const id of [...listed, august, chain, fresh]) {
       expect(await s.store.getReplay(id)).not.toBeNull();
     }
+    // Kept or dropped, every run of age is settled: the next sweep moves on.
+    expect(await s.store.replayCandidates(s.clock.now - DEFAULT_REPLAY_GRACE_MS, 1000)).toEqual([]);
   });
 });

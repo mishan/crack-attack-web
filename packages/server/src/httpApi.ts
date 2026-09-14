@@ -81,14 +81,15 @@ async function handle(
       send(res, 200, await scoreboard.issueTicket(client));
     } else if (route === '/submit') {
       allow(req, 'POST');
-      // A client over its limit is turned away before its body is read (up to
-      // 256 KiB) and parsed; the connection goes with the unread body.
+      // The submission is spent before its body is read (up to 256 KiB) and
+      // parsed, so a client over its limit, or sending a burst at once, is
+      // turned away unread; the connection goes with the unread body.
       try {
-        scoreboard.checkSubmitLimit(client);
+        scoreboard.admitSubmission(client);
       } catch (err) {
         throw err instanceof ApiError ? err.withHeaders(CLOSE_CONNECTION) : err;
       }
-      send(res, 200, await scoreboard.submit(client, await readJson(req)));
+      send(res, 200, await scoreboard.submitAdmitted(await readJson(req)));
     } else if (route === '/scores') {
       allow(req, 'GET');
       send(res, 200, await scoreboard.scores(client, url.searchParams), 'no-cache');
