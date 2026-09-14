@@ -242,6 +242,8 @@ export class SoloScoreboard {
   private readonly sharedRefusals = new Map<string, { count: number; loggedAt: number }>();
   private lastPrune = -Infinity;
   private lastReplaySweep = -Infinity;
+  /** Whether a replay sweep is under way. */
+  private sweeping = false;
 
   constructor(options: SoloScoreboardOptions) {
     this.store = options.store;
@@ -475,15 +477,16 @@ export class SoloScoreboard {
    * A failure is logged, not passed on: the run that set it off is recorded.
    */
   private async sweepReplays(now: number): Promise<void> {
-    if (now - this.lastReplaySweep < REPLAY_SWEEP_EVERY_MS) return;
+    // One at a time: a run recorded mid-sweep doesn't start another over the
+    // same candidates.
+    if (this.sweeping || now - this.lastReplaySweep < REPLAY_SWEEP_EVERY_MS) return;
+    this.sweeping = true;
     this.lastReplaySweep = now;
     try {
       const runs = await this.store.replayCandidates(
         now - DEFAULT_REPLAY_GRACE_MS,
         REPLAY_SWEEP_BATCH,
       );
-      // A full batch may have left some behind: sweep again after the next run.
-      if (runs.length === REPLAY_SWEEP_BATCH) this.lastReplaySweep = -Infinity;
       // Each board's last listed run, by board and range (null: room to spare).
       const lastListed = new Map<string, Promise<StoredSoloScore | null>>();
       const onBoard = async (run: StoredSoloScore, board: ScoreBoard, month: string | null) => {
@@ -512,8 +515,13 @@ export class SoloScoreboard {
       }
       // The kept are settled too, so later sweeps move on past them.
       if (runs.length > 0) await this.store.settleReplays(keep, drop);
+      // A full batch may have left some behind: now that this one is done,
+      // sweep again after the next run.
+      if (runs.length === REPLAY_SWEEP_BATCH) this.lastReplaySweep = -Infinity;
     } catch (err) {
       this.log(`scoreboard: replay sweep failed: ${String(err)}`);
+    } finally {
+      this.sweeping = false;
     }
   }
 

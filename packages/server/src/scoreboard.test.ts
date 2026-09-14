@@ -611,4 +611,35 @@ describe('SoloScoreboard boards', () => {
     // Kept or dropped, every run of age is settled: the next sweep moves on.
     expect(await s.store.replayCandidates(s.clock.now - DEFAULT_REPLAY_GRACE_MS, 1000)).toEqual([]);
   });
+
+  it('runs one replay sweep at a time', async () => {
+    const s = setup();
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    const candidates = s.store.replayCandidates.bind(s.store);
+    const sweeps = vi
+      .spyOn(s.store, 'replayCandidates')
+      .mockImplementation(async (before, limit) => {
+        await gate;
+        return candidates(before, limit);
+      });
+    const [a, b, c] = [
+      await s.board.issueTicket(CLIENT),
+      await s.board.issueTicket(CLIENT),
+      await s.board.issueTicket(CLIENT),
+    ];
+    s.clock.now += PLAY_MS;
+    const first = s.board.submit(CLIENT, submission(a.runId));
+    await vi.waitFor(() => expect(sweeps).toHaveBeenCalledTimes(1));
+    // Past the hourly spacing, but the first sweep is still going: no second one.
+    s.clock.now += 2 * 60 * 60 * 1000;
+    expect((await s.board.submit(CLIENT, submission(b.runId))).score).toBe(48);
+    expect(sweeps).toHaveBeenCalledTimes(1);
+    release();
+    await first;
+    // Once it's done, the next run due a sweep gets one.
+    s.clock.now += 2 * 60 * 60 * 1000;
+    await s.board.submit(CLIENT, submission(c.runId));
+    expect(sweeps).toHaveBeenCalledTimes(2);
+  });
 });
