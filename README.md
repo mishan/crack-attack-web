@@ -441,6 +441,8 @@ server {
     proxy_set_header Host $host;
     # Each player's address, for the scoreboard's limits (TRUST_PROXY=1).
     proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    # http or https, for score share pages' links if PUBLIC_URL isn't set.
+    proxy_set_header X-Forwarded-Proto $scheme;
   }
 
   # These file names change whenever their contents do, so browsers can keep

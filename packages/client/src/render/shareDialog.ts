@@ -75,7 +75,7 @@ export function openShareDialog(info: ShareInfo): void {
     actions.append(link(label, href, LINK_STYLE));
   }
   actions.append(
-    button('Copy link', () => {
+    button('Copy message', () => {
       const copied = navigator.clipboard?.writeText(message);
       (copied ?? Promise.reject(new Error('no clipboard'))).then(
         () => (status.textContent = 'Copied!'),

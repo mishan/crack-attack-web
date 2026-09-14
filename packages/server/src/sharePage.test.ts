@@ -78,7 +78,8 @@ describe('renderSharePage', () => {
 
   it("allows exactly the page's own script, and images from the game", () => {
     const html = renderSharePage(card(), GAME);
-    const script = /<script>(.*)<\/script>/.exec(html)![1]!;
+    const start = html.indexOf('<script>') + '<script>'.length;
+    const script = html.slice(start, html.indexOf('</script>', start));
     const hash = createHash('sha256').update(script).digest('base64');
     const csp = sharePageCsp(GAME);
     expect(csp).toContain(`script-src 'sha256-${hash}'`);

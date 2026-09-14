@@ -152,8 +152,15 @@ export function requestGameUrl(req: IncomingMessage, proxyHops: number): string 
   const proto = proxyHops > 0 && typeof forwarded === 'string' ? forwarded.split(',')[0] : '';
   const scheme = proto?.trim() === 'https' ? 'https' : 'http';
   const host = req.headers.host ?? '';
-  const valid = /^(?:[\w.-]+|\[[\da-fA-F:.]+\])(?::\d{1,5})?$/.test(host);
-  return `${scheme}://${valid ? host : 'localhost'}/`;
+  // The shape check keeps out a path or query; URL refuses the rest (a port past 65535).
+  if (/^(?:[\w.-]+|\[[\da-fA-F:.]+\])(?::\d{1,5})?$/.test(host)) {
+    try {
+      return new URL(`${scheme}://${host}/`).href;
+    } catch {
+      // Malformed after all: localhost, below.
+    }
+  }
+  return `${scheme}://localhost/`;
 }
 
 /** The client's address: from `X-Forwarded-For` behind trusted proxies, else the socket's. */

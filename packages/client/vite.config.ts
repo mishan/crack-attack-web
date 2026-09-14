@@ -16,11 +16,11 @@ const root = fileURLToPath(new URL('.', import.meta.url));
  * (e.g. `https://example.com/`).
  */
 function linkPreviewUrls(publicUrl: string | undefined): Plugin {
+  const base = parsePublicUrl(publicUrl);
   return {
     name: 'link-preview-urls',
     transformIndexHtml() {
-      if (!publicUrl) return [];
-      const base = publicUrl.endsWith('/') ? publicUrl : `${publicUrl}/`;
+      if (!base) return [];
       const meta = (property: string, content: string) =>
         ({ tag: 'meta', attrs: { property, content }, injectTo: 'head' }) as const;
       return [
@@ -31,6 +31,27 @@ function linkPreviewUrls(publicUrl: string | undefined): Plugin {
       ];
     },
   };
+}
+
+/**
+ * `VITE_PUBLIC_URL`, checked: an absolute http(s) address without a query or
+ * hash, given a trailing slash; unset = undefined. Anything else fails the
+ * build, rather than ship relative preview URLs (`example.com` alone, say).
+ */
+function parsePublicUrl(raw: string | undefined): string | undefined {
+  if (!raw) return undefined;
+  let url: URL | null;
+  try {
+    url = new URL(raw);
+  } catch {
+    url = null;
+  }
+  if (!url || !/^https?:$/.test(url.protocol) || url.search || url.hash) {
+    throw new Error(
+      `VITE_PUBLIC_URL must be the game's full http(s) address, e.g. https://example.com/ (got ${JSON.stringify(raw)})`,
+    );
+  }
+  return url.href.endsWith('/') ? url.href : `${url.href}/`;
 }
 
 export default defineConfig(({ mode }) => ({

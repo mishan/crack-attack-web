@@ -607,6 +607,18 @@ describe('SoloScoreboard boards', () => {
     }
   });
 
+  it('gives no card for a run a moderator hides mid-lookup', async () => {
+    const s = setup();
+    const { id } = await s.board.submit(CLIENT, submission(await playRun(s)));
+    const lookup = s.store.visibleScore.bind(s.store);
+    s.store.visibleScore = async (runId) => {
+      const found = await lookup(runId);
+      await s.store.setHidden(runId, true); // the admin CLI, between the reads
+      return found;
+    };
+    expect(await s.board.shareCard(CLIENT, String(id))).toBeNull();
+  });
+
   it('rate-limits share-page requests per client', async () => {
     const { board } = setup({ shareLimit: { capacity: 1, refillMs: 1_000 } });
     expect(await board.shareCard(CLIENT, '1')).toBeNull();

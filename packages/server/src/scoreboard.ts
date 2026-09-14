@@ -439,14 +439,13 @@ export class SoloScoreboard {
     const run = id === null ? null : await this.store.visibleScore(id);
     if (!run) return null;
     const month = monthKey(run.createdAt);
-    return {
-      entry: entryOf(run),
-      month,
-      standing: {
-        all: await this.store.standing(run.id, ALL_TIME),
-        month: await this.store.standing(run.id, monthRange(month)!),
-      },
-    };
+    const monthly = await this.store.standing(run.id, monthRange(month)!);
+    // Read last: a visible run always has an all-time place, so none means a
+    // moderator hid it since the lookup (the admin CLI writes from another
+    // process), and it gets the hidden run's page.
+    const all = await this.store.standing(run.id, ALL_TIME);
+    if (!all) return null;
+    return { entry: entryOf(run), month, standing: { all, month: monthly } };
   }
 
   /** Check a submission against its ticket, verify it, and record it. */

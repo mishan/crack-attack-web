@@ -124,6 +124,8 @@ describe('scoreboard HTTP API', () => {
     expect(requestGameUrl(req(https), 0)).toBe('http://example.com/');
     expect(requestGameUrl(req({ host: '[::1]:8080' }), 0)).toBe('http://[::1]:8080/');
     expect(requestGameUrl(req({ host: 'x.example/"><script>' }), 0)).toBe('http://localhost/');
+    // Shaped like a host, but no URL can hold it.
+    expect(requestGameUrl(req({ host: 'example.com:99999' }), 0)).toBe('http://localhost/');
     expect(requestGameUrl(req({}), 0)).toBe('http://localhost/');
   });
 
