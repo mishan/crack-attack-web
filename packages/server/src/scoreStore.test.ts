@@ -166,6 +166,19 @@ function conformance(name: string, make: () => ScoreStore): void {
       await store.close();
     });
 
+    it('finds a visible run by id, with or without its replay', async () => {
+      const store = make();
+      const id = await add(store, run(1));
+      expect(await store.visibleScore(id)).toEqual(await store.scoreByRun(rid(1)));
+      await store.settleReplays([], [id]);
+      expect(await store.getReplay(id)).toBeNull();
+      expect((await store.visibleScore(id))?.id).toBe(id);
+      await store.setHidden(id, true);
+      expect(await store.visibleScore(id)).toBeNull();
+      expect(await store.visibleScore(999)).toBeNull();
+      await store.close();
+    });
+
     it('offers old visible unsettled replays, oldest first, and settles them', async () => {
       const store = make();
       const late = await add(store, run(1, { createdAt: T0 + 20 }));

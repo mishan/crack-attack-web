@@ -1,5 +1,5 @@
 import { fileURLToPath } from 'node:url';
-import { defineConfig } from 'vite';
+import { defineConfig, loadEnv, type Plugin } from 'vite';
 
 // Resolve the workspace packages to their TypeScript source so `vite dev`/`build`
 // don't require a prior `tsc -b`, and — critically — never pick up a *stale*
@@ -7,10 +7,36 @@ import { defineConfig } from 'vite';
 // message fields). Vite compiles the source inline.
 const coreSrc = fileURLToPath(new URL('../core/src/index.ts', import.meta.url));
 const protocolSrc = fileURLToPath(new URL('../protocol/src/index.ts', import.meta.url));
+const root = fileURLToPath(new URL('.', import.meta.url));
 
-export default defineConfig({
+/**
+ * Link previews (Facebook, LinkedIn, …) need the page's address and its
+ * preview image (`public/og-image.png`) as absolute URLs, so those tags go in
+ * only when the build knows where the game is served: `VITE_PUBLIC_URL`
+ * (e.g. `https://example.com/`).
+ */
+function linkPreviewUrls(publicUrl: string | undefined): Plugin {
+  return {
+    name: 'link-preview-urls',
+    transformIndexHtml() {
+      if (!publicUrl) return [];
+      const base = publicUrl.endsWith('/') ? publicUrl : `${publicUrl}/`;
+      const meta = (property: string, content: string) =>
+        ({ tag: 'meta', attrs: { property, content }, injectTo: 'head' }) as const;
+      return [
+        meta('og:url', base),
+        meta('og:image', `${base}og-image.png`),
+        meta('og:image:width', '1200'),
+        meta('og:image:height', '630'),
+      ];
+    },
+  };
+}
+
+export default defineConfig(({ mode }) => ({
   // The package directory is the Vite root (index.html lives here).
-  root: fileURLToPath(new URL('.', import.meta.url)),
+  root,
+  plugins: [linkPreviewUrls(loadEnv(mode, root, 'VITE_')['VITE_PUBLIC_URL'])],
   // Relative asset paths so the built bundle works when served from any
   // subdirectory (e.g. a sub-path deploy), not just the domain root. Note: the
   // app must still be *served over HTTP* — opening dist/web/index.html directly
@@ -44,4 +70,4 @@ export default defineConfig({
       },
     },
   },
-});
+}));

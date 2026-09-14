@@ -8,6 +8,11 @@
  *   POST /api/solo/submit   (SoloSubmitRequest)         → SoloSubmitResponse
  *   GET  /api/solo/scores?board=&period=&month=&limit=  → SoloScoresResponse
  *   GET  /api/solo/replay/:id                           → SoloReplayResponse
+ *   GET  /api/solo/share/:id                            → an HTML page (see below)
+ *
+ * A run's share page is what a link posted to Facebook, LinkedIn or Bluesky
+ * points at: its Open Graph tags put the score in the link preview, and a
+ * person opening it is sent on to the game.
  *
  * Failures come back as a {@link ScoreboardErrorBody} with a 4xx/5xx status.
  * A submission's replay is validated by core's `parseSoloReplay`, not here:
@@ -21,6 +26,14 @@ import { ProtocolError } from './codec.js';
 
 /** Path prefix of every scoreboard route. */
 export const SOLO_API_PREFIX = '/api/solo';
+
+/** The game's source code, linked from the game and its share pages. */
+export const SOURCE_URL = 'https://github.com/mishan/crack-attack-web';
+
+/** A run's share page, relative to the scoreboard's base URL (`…/api/solo`). */
+export function soloSharePath(id: number): string {
+  return `/share/${id}`;
+}
 
 /** Run ids: lowercase hex, fixed length (128 bits). */
 export const RUN_ID_LENGTH = 32;
