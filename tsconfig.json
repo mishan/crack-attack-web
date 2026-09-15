@@ -8,6 +8,7 @@
     { "path": "./tools/replay-check" },
     { "path": "./tools/obj2gltf" },
     { "path": "./tools/ai-arena" },
-    { "path": "./tools/replay-analyze" }
+    { "path": "./tools/replay-analyze" },
+    { "path": "./tools/load-test" }
   ]
 }

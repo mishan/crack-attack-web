@@ -1,0 +1,30 @@
+{
+  "name": "@crack-attack/load-test",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Relay load generator: wire, sim and spectator bots, lobby idlers and churners, abusive clients and a scoreboard driver, run as the named scenarios of docs/LOAD_TEST_PLAN.md, each writing a CSV.",
+  "license": "GPL-2.0-or-later",
+  "type": "module",
+  "main": "./dist/index.js",
+  "bin": {
+    "load-test": "./dist/cli.js"
+  },
+  "engines": {
+    "node": ">=22.13.0"
+  },
+  "scripts": {
+    "build": "tsc -b",
+    "clean": "rm -rf dist tsconfig.tsbuildinfo"
+  },
+  "dependencies": {
+    "@crack-attack/client": "workspace:*",
+    "@crack-attack/core": "workspace:*",
+    "@crack-attack/protocol": "workspace:*",
+    "@crack-attack/server": "workspace:*",
+    "ws": "^8.21.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "@types/ws": "^8.18.1"
+  }
+}

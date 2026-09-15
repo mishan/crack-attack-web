@@ -135,6 +135,30 @@ describe('relay over WebSocket', () => {
     bob.close();
   });
 
+  it('counts bytes out as UTF-8 on the wire, not UTF-16 code units', async () => {
+    server = await startRelayWsServer({ port: 0 });
+    const ws = new WebSocket(`ws://127.0.0.1:${server.port}`);
+    let received = 0;
+    const texts: string[] = [];
+    ws.on('message', (data: Buffer) => {
+      received += data.length;
+      texts.push(data.toString('utf8'));
+    });
+    await new Promise((resolve) => ws.once('open', resolve));
+
+    // A non-ASCII name comes back in the room list once its room is open.
+    const name = 'Ωμέγα';
+    ws.send(encodeMessage({ type: 'hello', protocolVersion: PROTOCOL_VERSION, name }));
+    ws.send(encodeMessage({ type: 'create_room' }));
+    const listed = (): boolean => texts.some((t) => t.includes('"room_list"') && t.includes(name));
+    for (let i = 0; i < 80 && !listed(); i++) await new Promise((r) => setTimeout(r, 25));
+    expect(listed()).toBe(true);
+    await new Promise((r) => setTimeout(r, 100)); // let anything still in flight land
+
+    expect(server.traffic().bytesOut).toBe(received);
+    ws.close();
+  });
+
   it('sizes the payload limit well above the largest legitimate client message', () => {
     const worstInputs = encodeMessage({
       type: 'inputs',

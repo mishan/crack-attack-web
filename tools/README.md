@@ -16,4 +16,9 @@ Tools (see `../BROWSER_PORT_PLAN.md`):
   sources; do not transcribe the generated `obj_*.cxx` files. See its own README
   for usage and the deferred texture-embedding step.
 
+- **load-test/** — relay load generator (see `../docs/LOAD_TEST_PLAN.md`).
+  Wire, sim and spectator bots, lobby idlers and churners, abusive clients and
+  a scoreboard driver, run as the plan's named scenarios (L1–L12), each writing
+  a CSV of generator and relay (`STATS=1`) numbers. See its own README.
+
 Each tool is its own workspace package (`tools/*`) and may depend on Node APIs.
