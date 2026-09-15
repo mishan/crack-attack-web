@@ -1,25 +1,30 @@
 /**
  * harness.ts — the load engine. It owns this process's bot populations and,
  * on a fast pump loop, drives every game and reconciles the live populations
- * toward their targets, spawning at a bounded rate. It also measures its own
- * health (event-loop delay, CPU): the numbers that tell whether the generator,
- * not the relay, is the bottleneck. One harness runs the whole load in a
- * single-process run, or a share of it inside a forked worker.
+ * toward their targets, starting each population's bots at its arrival rate.
+ * It also measures its own health (event-loop delay, CPU): the numbers that
+ * tell whether the generator, not the relay, is the bottleneck. One harness
+ * runs the whole load in a single-process run, or a share of it inside a
+ * forked worker.
  */
 
 import { monitorEventLoopDelay } from 'node:perf_hooks';
 import { Abuser, type AbuseKind } from './abuse.js';
-import type {
-  AbuseSpec,
-  ChurnConfig,
-  Directive,
-  Populations,
-  ScoreboardConfig,
+import type { BotClient } from './client.js';
+import {
+  DEFAULT_ARRIVALS,
+  NO_POPULATIONS,
+  type AbuseSpec,
+  type ArrivalRates,
+  type ChurnConfig,
+  type Directive,
+  type Populations,
+  type ScoreboardConfig,
 } from './directives.js';
 import { Game, type GameKind } from './bots.js';
 import { Churner, Idler, RoomSitter } from './lobby.js';
 import { Metrics, type WorkerSample } from './metrics.js';
-import { ScoreboardDriver } from './scoreboardDriver.js';
+import { ScoreboardDriver, httpOrigin } from './scoreboardDriver.js';
 import { SpectatorBot } from './spectator.js';
 import { absNow } from './time.js';
 
@@ -27,8 +32,8 @@ import { absNow } from './time.js';
 const PUMP_MS = 4;
 /** Reconcile populations this often (spawning is paced, so not every pump). */
 const RECONCILE_MS = 100;
-/** New bots started per reconcile, so a big ramp doesn't stall the loop. */
-const SPAWN_BUDGET = 40;
+
+type Arrival = keyof ArrivalRates;
 
 let nextId = 0;
 
@@ -37,25 +42,31 @@ export class Harness {
   private url = '';
   private tag = '';
   private rotateMs = 0;
-  private inputDelay = 3;
+  private arrivals: ArrivalRates = DEFAULT_ARRIVALS;
+  /** Bots each population may start now; refilled at its arrival rate. */
+  private readonly allowance: Record<Arrival, number> = {
+    games: 1,
+    spectators: 1,
+    idlers: 1,
+    rooms: 1,
+    churners: 1,
+  };
 
   private readonly games: Game[] = [];
   private readonly spectators: SpectatorBot[] = [];
+  /** A late-join burst's watchers: kept out of reconciliation, so they stay to be measured. */
+  private readonly lateJoiners: SpectatorBot[] = [];
   private readonly idlers: Idler[] = [];
   private readonly rooms: RoomSitter[] = [];
   private readonly churners: Churner[] = [];
   private readonly abusers: Abuser[] = [];
   private scoreboard: ScoreboardDriver | null = null;
+  /** Fake scoreboard client addresses handed out so far. */
+  private clientsIssued = 0;
+  /** Where the next spread spectator goes, round the games. */
+  private spreadCursor = 0;
 
-  private target: Required<Populations> = {
-    wireGames: 0,
-    simGames: 0,
-    spectatorsPerGame: 0,
-    spectatorsOnFirst: 0,
-    idlers: 0,
-    rooms: 0,
-    churners: 0,
-  };
+  private target: Required<Populations> = { ...NO_POPULATIONS };
   private churn: ChurnConfig | null = null;
 
   private readonly loop = monitorEventLoopDelay({ resolution: 1 });
@@ -69,12 +80,18 @@ export class Harness {
   private peakLoopMax = 0;
   private peakCpu = 0;
 
-  /** Address the scoreboard driver stamps for each fake client. */
+  /**
+   * Addresses for a new scoreboard driver's fake clients. Each is its own /48
+   * (the relay keys IPv6 limits per /64 and per /48), and none was used by an
+   * earlier driver, so a step doesn't start on buckets an earlier step spent.
+   */
   private clientAddresses(n: number): string[] {
-    // Distinct /64s (the relay keys IPv6 per /64), so each is its own client.
+    const count = Math.max(1, n);
+    const first = this.clientsIssued;
+    this.clientsIssued += count;
     return Array.from(
-      { length: Math.max(1, n) },
-      (_, i) => `2001:db8:${(i & 0xffff).toString(16)}::1`,
+      { length: count },
+      (_, i) => `2001:db8:${((first + i) & 0xffff).toString(16)}::1`,
     );
   }
 
@@ -96,7 +113,7 @@ export class Harness {
         this.url = directive.url;
         this.tag = directive.tag;
         if (directive.rotateMs !== undefined) this.rotateMs = directive.rotateMs;
-        if (directive.inputDelay !== undefined) this.inputDelay = directive.inputDelay;
+        if (directive.arrivals !== undefined) this.arrivals = directive.arrivals;
         return;
       case 'populations':
         Object.assign(this.target, directive.populations);
@@ -110,6 +127,9 @@ export class Harness {
         return;
       case 'scoreboard':
         this.setScoreboard(directive.config);
+        return;
+      case 'scoreBurst':
+        this.scoreboard?.burst();
         return;
       case 'reconnectStorm':
         void this.reconnectStorm(directive.fraction, directive.spreadMs);
@@ -138,16 +158,17 @@ export class Harness {
   sample(): WorkerSample {
     const taken = this.metrics.take();
     const playing = this.games.filter((g) => g.playing).length;
+    const open = (list: readonly BotClient[]): number => list.filter((b) => b.open).length;
     const sample: WorkerSample = {
       ...taken,
       gauges: {
         games: this.games.length,
         playing,
         simGames: this.games.filter((g) => g.kind === 'sim').length,
-        spectators: this.spectators.filter((s) => s.watching).length,
-        idlers: this.idlers.length,
-        rooms: this.rooms.length,
-        churners: this.churners.length,
+        spectators: [...this.spectators, ...this.lateJoiners].filter((s) => s.watching).length,
+        idlers: open(this.idlers),
+        rooms: open(this.rooms),
+        churners: open(this.churners),
         abusers: this.abusers.length,
         sockets: this.socketCount(),
       },
@@ -164,12 +185,14 @@ export class Harness {
     return sample;
   }
 
+  private lobbyLists(): BotClient[][] {
+    return [this.spectators, this.lateJoiners, this.idlers, this.rooms, this.churners];
+  }
+
   private socketCount(): number {
     let n = 0;
     for (const g of this.games) for (const p of g.players) if (p.open) n++;
-    for (const list of [this.spectators, this.idlers, this.rooms, this.churners]) {
-      for (const b of list) if (b.open) n++;
-    }
+    for (const list of this.lobbyLists()) for (const b of list) if (b.open) n++;
     return n;
   }
 
@@ -197,38 +220,63 @@ export class Harness {
     this.lastCpu = process.cpuUsage();
     if (dt > 0) this.peakCpu = Math.max(this.peakCpu, ((cpu.user + cpu.system) / 1000 / dt) * 100);
 
+    this.refill(dt);
     this.pruneDead();
-    let budget = SPAWN_BUDGET;
-    budget = this.reconcileGames('wire', this.target.wireGames, budget);
-    budget = this.reconcileGames('sim', this.target.simGames, budget);
-    budget = this.reconcileSimple(
+    this.reconcileGames('wire', this.target.wireGames);
+    this.reconcileGames('sim', this.target.simGames);
+    this.reconcileSimple(
       this.idlers,
       this.target.idlers,
+      'idlers',
       () => new Idler(this.env(), this.name('i')),
-      (b) => void b.join().catch(() => this.metrics.count('startFailures')),
-      budget,
+      (b) => void b.join().catch(() => this.failed(b)),
     );
-    budget = this.reconcileSimple(
+    this.reconcileSimple(
       this.rooms,
       this.target.rooms,
+      'rooms',
       () => new RoomSitter(this.env(), this.name('r')),
-      (b) => void b.start().catch(() => this.metrics.count('startFailures')),
-      budget,
+      (b) => void b.start().catch(() => this.failed(b)),
     );
-    budget = this.reconcileSimple(
+    this.reconcileSimple(
       this.churners,
       this.target.churners,
+      'churners',
       () => new Churner(this.env(), this.name('c')),
-      (b) => void b.join().catch(() => this.metrics.count('startFailures')),
-      budget,
+      (b) => void b.join().catch(() => this.failed(b)),
     );
-    this.reconcileSpectators(budget);
+    this.reconcileSpectators();
+  }
+
+  /** Add `dt` ms of each population's arrival rate to its allowance. */
+  private refill(dt: number): void {
+    for (const kind of Object.keys(this.allowance) as Arrival[]) {
+      const rate = this.arrivals[kind];
+      // Bank at most two reconciles' worth (and at least one bot), so a late
+      // reconcile catches up without the pacing turning into bursts.
+      const cap = Math.max(1, (rate * 2 * RECONCILE_MS) / 1000);
+      this.allowance[kind] = Math.min(cap, this.allowance[kind] + (rate * dt) / 1000);
+    }
+  }
+
+  /** How many of `wanted` bots a population may start now; spends its allowance. */
+  private take(kind: Arrival, wanted: number): number {
+    const n = Math.max(0, Math.min(wanted, Math.floor(this.allowance[kind])));
+    this.allowance[kind] -= n;
+    return n;
+  }
+
+  /** A bot that didn't start: count it and hang up, so it's pruned and replaced. */
+  private failed(bot: BotClient): void {
+    this.metrics.count('startFailures');
+    bot.close();
   }
 
   private name(prefix: string): string {
     return `${this.tag}${prefix}${nextId++}`;
   }
 
+  /** Drop finished games and closed bots. Bots still connecting stay: they count toward targets. */
   private pruneDead(): void {
     for (let i = this.games.length - 1; i >= 0; i--) {
       const g = this.games[i]!;
@@ -237,19 +285,15 @@ export class Harness {
         this.games.splice(i, 1);
       }
     }
-    const prune = (list: { open: boolean }[]): void => {
-      for (let i = list.length - 1; i >= 0; i--) if (!list[i]!.open) list.splice(i, 1);
-    };
-    prune(this.spectators);
-    prune(this.idlers);
-    prune(this.rooms);
-    prune(this.churners);
+    for (const list of this.lobbyLists()) {
+      for (let i = list.length - 1; i >= 0; i--) if (list[i]!.gone) list.splice(i, 1);
+    }
   }
 
-  private reconcileGames(kind: GameKind, want: number, budget: number): number {
+  private reconcileGames(kind: GameKind, want: number): void {
     const have = this.games.filter((g) => g.kind === kind).length;
     if (have < want) {
-      const add = Math.min(budget, want - have);
+      const add = this.take('games', want - have);
       for (let i = 0; i < add; i++) {
         const game = new Game(this.env(), kind, nextId++, this.rotateMs);
         this.games.push(game);
@@ -259,72 +303,72 @@ export class Harness {
           game.alive = false;
         });
       }
-      return budget - add;
+      return;
     }
-    if (have > want) {
-      let remove = have - want;
-      for (let i = this.games.length - 1; i >= 0 && remove > 0; i--) {
-        if (this.games[i]!.kind === kind) {
-          this.games[i]!.stop();
-          this.games.splice(i, 1);
-          remove--;
-        }
-      }
-    }
-    return budget;
-  }
-
-  private reconcileSimple<T extends { open: boolean; close(): void }>(
-    list: T[],
-    want: number,
-    make: () => T,
-    begin: (bot: T) => void,
-    budget: number,
-  ): number {
-    if (list.length < want) {
-      const add = Math.min(budget, want - list.length);
-      for (let i = 0; i < add; i++) {
-        const bot = make();
-        list.push(bot);
-        begin(bot);
-      }
-      return budget - add;
-    }
-    while (list.length > want) list.pop()!.close();
-    return budget;
-  }
-
-  private reconcileSpectators(budget: number): void {
-    const playing = this.games.filter((g) => g.playing && g.code);
-    const first = playing[0];
-    const want =
-      playing.length * this.target.spectatorsPerGame + (first ? this.target.spectatorsOnFirst : 0);
-    const alive = this.spectators.filter((s) => s.open);
-    if (alive.length < want && playing.length > 0) {
-      const add = Math.min(budget, want - alive.length);
-      for (let i = 0; i < add; i++) {
-        // Fill the pile-on quota first (L4a), then spread the rest.
-        const onFirst =
-          i < this.target.spectatorsOnFirst - alive.filter((s) => s.code === first?.code).length;
-        const target = onFirst && first ? first : playing[i % playing.length]!;
-        this.addSpectator(target.code!);
-      }
-    } else if (alive.length > want) {
-      let remove = alive.length - want;
-      for (let i = this.spectators.length - 1; i >= 0 && remove > 0; i--) {
-        this.spectators[i]!.close();
-        this.spectators.splice(i, 1);
+    let remove = have - want;
+    for (let i = this.games.length - 1; i >= 0 && remove > 0; i--) {
+      if (this.games[i]!.kind === kind) {
+        this.games[i]!.stop();
+        this.games.splice(i, 1);
         remove--;
       }
     }
   }
 
-  private addSpectator(code: string): void {
-    const bot = new SpectatorBot(this.env(), this.name('s'), code, (c) =>
+  private reconcileSimple<T extends BotClient>(
+    list: T[],
+    want: number,
+    kind: Arrival,
+    make: () => T,
+    begin: (bot: T) => void,
+  ): void {
+    if (list.length < want) {
+      const add = this.take(kind, want - list.length);
+      for (let i = 0; i < add; i++) {
+        const bot = make();
+        list.push(bot);
+        begin(bot);
+      }
+      return;
+    }
+    while (list.length > want) list.pop()!.close();
+  }
+
+  private reconcileSpectators(): void {
+    // Watch any game with a room (the relay seats watchers in waiting rooms
+    // too), so a rematch's moment between matches doesn't drop its watchers.
+    const hosts = this.games.filter((g) => g.alive && g.code !== null);
+    const first = hosts[0];
+    const want =
+      hosts.length * this.target.spectatorsPerGame + (first ? this.target.spectatorsOnFirst : 0);
+    // Watchers still connecting count: they're on their way.
+    const have = this.spectators.length;
+    if (have < want) {
+      const add = this.take('spectators', want - have);
+      // Fill the pile-on quota first (L4a), then spread the rest round the games.
+      let onFirst = first
+        ? this.target.spectatorsOnFirst -
+          this.spectators.filter((s) => s.code === first.code).length
+        : 0;
+      for (let i = 0; i < add; i++) {
+        const game = onFirst-- > 0 ? first! : hosts[this.spreadCursor++ % hosts.length]!;
+        this.addSpectator(game.code!);
+      }
+      return;
+    }
+    while (this.spectators.length > want) this.spectators.pop()!.close();
+  }
+
+  private newSpectator(code: string): SpectatorBot {
+    return new SpectatorBot(this.env(), this.name('s'), code, (c) =>
       this.games.find((g) => g.code === c),
     );
+  }
+
+  private addSpectator(code: string): void {
+    const bot = this.newSpectator(code);
     this.spectators.push(bot);
-    bot.start().catch(() => this.metrics.count('startFailures'));
+    bot.start().catch(() => this.failed(bot));
   }
 
   private restartChurn(): void {
@@ -364,9 +408,8 @@ export class Harness {
     this.scoreboard?.stop();
     this.scoreboard = null;
     if (!config) return;
-    const baseUrl = this.url.replace(/^ws/, 'http');
     this.scoreboard = new ScoreboardDriver({
-      baseUrl,
+      baseUrl: httpOrigin(this.url),
       metrics: this.metrics,
       clients: this.clientAddresses(config.clientCount ?? 8),
       ticketsPerSec: config.ticketsPerSec,
@@ -375,6 +418,7 @@ export class Harness {
       replaysPerSec: config.replaysPerSec,
       submitKinds: config.submitKinds,
       aiTicks: config.aiTicks,
+      prefill: config.prefill,
     });
     this.scoreboard.start();
   }
@@ -404,11 +448,9 @@ export class Harness {
     if (!game) return;
     await Promise.all(
       Array.from({ length: count }, () => {
-        const bot = new SpectatorBot(this.env(), this.name('s'), game.code!, (c) =>
-          this.games.find((g) => g.code === c),
-        );
-        this.spectators.push(bot);
-        return bot.start().catch(() => this.metrics.count('startFailures'));
+        const bot = this.newSpectator(game.code!);
+        this.lateJoiners.push(bot);
+        return bot.start().catch(() => this.failed(bot));
       }),
     );
   }
@@ -418,9 +460,14 @@ export class Harness {
     for (const s of active.slice(0, count)) s.slow(ms);
   }
 
+  /**
+   * `fraction` of the players reconnect once. One seat per chosen game (both
+   * seats gone at once isn't a reconnect), so games are chosen at twice the
+   * rate; a fraction over one half is capped there.
+   */
   private async reconnectSome(fraction: number): Promise<void> {
     const playing = this.games.filter((g) => g.playing && g.kind === 'wire');
-    const chosen = playing.filter(() => Math.random() < fraction);
+    const chosen = playing.filter(() => Math.random() < Math.min(1, fraction * 2));
     await Promise.all(
       chosen.map((g) => g.players[Math.random() < 0.5 ? 0 : 1].reconnectAfter(200)),
     );
@@ -434,8 +481,6 @@ export class Harness {
     this.scoreboard?.stop();
     for (const a of this.abusers) a.stop();
     for (const g of this.games) g.stop();
-    for (const list of [this.spectators, this.idlers, this.rooms, this.churners]) {
-      for (const b of list) b.close();
-    }
+    for (const list of this.lobbyLists()) for (const b of list) b.close();
   }
 }

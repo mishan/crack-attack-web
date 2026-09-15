@@ -99,12 +99,20 @@ export class ForkedWorker implements WorkerHandle {
 
   stop(): Promise<void> {
     return new Promise((resolve) => {
-      this.child.once('exit', () => resolve());
-      this.child.send({ type: 'shutdown' });
-      setTimeout(() => {
+      if (this.child.exitCode !== null || this.child.signalCode !== null) {
+        resolve();
+        return;
+      }
+      // A fallback only: a worker that exits cleanly clears it.
+      const timer = setTimeout(() => {
         this.child.kill('SIGKILL');
         resolve();
       }, 5_000);
+      this.child.once('exit', () => {
+        clearTimeout(timer);
+        resolve();
+      });
+      this.child.send({ type: 'shutdown' });
     });
   }
 }

@@ -71,7 +71,9 @@ export class SpectatorBot extends BotClient {
       this.spectateAt = null;
       this.lens = [a.length, b.length];
     } else if (msg.type === 'room_closed') {
+      // Nothing left to watch: hang up, so the harness puts a new watcher on a live game.
       this.watching = false;
+      this.close();
     }
   }
 

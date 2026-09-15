@@ -1,7 +1,9 @@
 /**
- * abuse.ts — misbehaving WebSocket clients (scenario L10). Each proves the
- * relay closes it by its existing rules while the real games run untouched.
- * They count sockets opened, messages sent, and sockets the relay closed.
+ * abuse.ts — misbehaving WebSocket clients (scenario L10), run while real
+ * games play. Of the relay's existing rules only the pacing check closes one
+ * (the over-pacing player); the rest it answers with an `error` or ignores, so
+ * L10 measures what they cost. They count sockets opened, messages sent, and
+ * sockets the relay closed (not ones they hung up themselves).
  */
 
 import {
@@ -16,10 +18,10 @@ import { sleep } from './time.js';
 
 export const ABUSE_KINDS = ['silent', 'churn', 'bigframes', 'malformed', 'flood'] as const;
 /**
- * - `silent`: connect and never hello.
+ * - `silent`: connect and never hello (hang up after two minutes and go again).
  * - `churn`: connect, hello, disconnect, repeat as fast as `rate` allows.
- * - `bigframes`: hello, then send 16 KiB frames (the relay's `maxPayload`) as fast as it can.
- * - `malformed`: hello, then send junk that isn't valid JSON.
+ * - `bigframes`: hello, then send 16 KiB frames (the relay's `maxPayload`), 100 a second.
+ * - `malformed`: hello, then send junk that isn't valid JSON, 1,000 a second (the plan's rate).
  * - `flood`: play, then send `inputs` far ahead of real time until the pacing check closes it.
  */
 export type AbuseKind = (typeof ABUSE_KINDS)[number];
@@ -67,6 +69,8 @@ async function flood(
 export class Abuser {
   private ws: WebSocket | null = null;
   private stopped = false;
+  /** Sockets this client hung up itself, so their close isn't counted as the relay's. */
+  private readonly hungUp = new WeakSet<WebSocket>();
 
   constructor(
     private readonly env: { url: string; metrics: Metrics },
@@ -83,7 +87,7 @@ export class Abuser {
 
   /** Messages a second for the bounded flood kinds (see {@link flood}). */
   private floodRate(): number {
-    return this.rate ?? (this.kind === 'bigframes' ? 100 : 500);
+    return this.rate ?? (this.kind === 'bigframes' ? 100 : 1000);
   }
 
   start(): void {
@@ -92,17 +96,30 @@ export class Abuser {
 
   stop(): void {
     this.stopped = true;
-    this.ws?.terminate();
+    if (this.ws) this.hangUp(this.ws, true);
+  }
+
+  private hangUp(ws: WebSocket, abruptly = false): void {
+    this.hungUp.add(ws);
+    if (abruptly) ws.terminate();
+    else ws.close();
   }
 
   private open(): Promise<WebSocket> {
     const ws = new WebSocket(this.env.url, { perMessageDeflate: false });
     this.ws = ws;
     this.env.metrics.count('abuseOpened');
+    let opened = false;
     ws.on('error', () => undefined);
-    ws.on('close', () => this.env.metrics.count('abuseClosed'));
+    ws.on('close', () => {
+      // Only an open socket the relay closed: not a refusal, not our own hang-up.
+      if (opened && !this.hungUp.has(ws)) this.env.metrics.count('abuseClosed');
+    });
     return new Promise((resolve, reject) => {
-      ws.once('open', () => resolve(ws));
+      ws.once('open', () => {
+        opened = true;
+        resolve(ws);
+      });
       ws.once('close', () => reject(new Error('closed before open')));
     });
   }
@@ -127,11 +144,14 @@ export class Abuser {
     const ws = await this.open();
     switch (this.kind) {
       case 'silent':
-        await this.until(ws, 120_000); // just sit there
+        // Just sit there. The relay has no hello deadline, so hang up after a
+        // while (or each round would leave one more socket open) and go again.
+        await this.until(ws, 120_000);
+        this.hangUp(ws);
         return;
       case 'churn':
         this.hello(ws);
-        ws.close();
+        this.hangUp(ws);
         return;
       case 'malformed':
       case 'bigframes': {

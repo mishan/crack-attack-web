@@ -251,8 +251,8 @@ socket whose `bufferedAmount` passes a cap. Re-run after.
 
 200 games in progress. Cut 200 player connections at once (kill the
 generator's sockets, not the bots' state); all reconnect with their tokens
-within 5 s. Then repeat with reconnects spread over 25 s so some fall past
-the 30 s grace.
+within 5 s. Then repeat with reconnects spread over 40 s, so about a quarter
+fall past the 30 s grace.
 
 Watch: `match_resume` sizes and encode time, reconnect time p99, grace
 timer firing accuracy, forfeits recorded (SQLite burst), loop delay, that
@@ -282,8 +282,11 @@ In parallel, 2 minutes each, alongside 50 games:
   closes them, in a loop.
 
 Watch: loop delay, CPU, RSS, fds, and the 50 real games' forward latency.
-Pass: real games unaffected; every abusive connection is closed by the
-rules that already exist; RSS returns to baseline after.
+Pass: real games unaffected; every over-pacing player is closed by the
+pacing check; RSS returns to baseline after. The other four are not closed
+by any rule that exists today (there is no hello deadline, and a malformed or
+16 KiB message gets an `error` on a socket that stays open), so for them
+record what they cost rather than expect a close.
 
 ### L11. Scoreboard alongside netplay
 

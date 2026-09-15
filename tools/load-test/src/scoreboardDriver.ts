@@ -2,11 +2,11 @@
  * scoreboardDriver.ts — the scoreboard's load. Each fake client stamps its own
  * `X-Forwarded-For` (the relay keys rate limits on it under TRUST_PROXY), so a
  * pool of them looks like a pool of addresses; per-route status codes are
- * tallied. Replays are made ahead of time by the factory and reused, since a
- * ticket only fixes the seed the run scores under — the driver plays the seed
- * with `makeReplay`, which is the honest path. It runs several loops at target
- * rates: tickets, submits, board reads (queries varied to defeat the cache),
- * and replay reads.
+ * tallied. Each ticket's seed is played into a replay with `makeReplay` (the
+ * honest path) and queued until the server's pacing floor would accept it. It
+ * runs several loops at target rates — tickets, submits, board reads (queries
+ * varied to defeat the cache), and replay reads — each offering its rate
+ * whether or not earlier requests have come back.
  */
 
 import { GC_STEPS_PER_SECOND, type SoloReplay } from '@crack-attack/core';
@@ -19,23 +19,40 @@ import type { Metrics } from './metrics.js';
 import { makeReplay, type ReplayKind } from './replays.js';
 import { absNow, sleep } from './time.js';
 
-/** A rate loop: `perSec` calls a second until stopped. */
-function everyRate(perSec: number, fn: () => Promise<void> | void): { stop: () => void } {
+/** Most calls one rate loop keeps in flight (requests, replay builds) before it skips a beat. */
+const MAX_IN_FLIGHT = 32;
+
+/**
+ * A rate loop: starts `fn` `perSec` times a second without waiting for earlier
+ * calls, so a slow relay doesn't lower the load offered to it. At most
+ * {@link MAX_IN_FLIGHT} calls run at once; a beat past that is skipped and
+ * `onSkip` counts it, so a rate the driver couldn't sustain shows in the CSV.
+ */
+function everyRate(
+  perSec: number,
+  fn: () => Promise<void>,
+  onSkip: () => void,
+): { stop: () => void } {
   if (perSec <= 0) return { stop: () => undefined };
   let stopped = false;
+  let inFlight = 0;
   const period = 1000 / perSec;
   let next = absNow();
   void (async () => {
     while (!stopped) {
       next += period;
-      try {
-        await fn();
-      } catch {
-        // A driver error must not kill the loop (a socket hiccup, a 5xx).
+      if (inFlight >= MAX_IN_FLIGHT) {
+        onSkip();
+      } else {
+        inFlight++;
+        fn()
+          // A driver error must not kill the loop (a socket hiccup, a 5xx).
+          .catch(() => undefined)
+          .finally(() => inFlight--);
       }
       const wait = next - absNow();
-      if (wait > 0) await sleep(wait);
-      else next = absNow(); // fell behind: don't spiral
+      if (wait <= 0) next = absNow(); // fell behind: don't spiral
+      await sleep(wait); // yields even when behind
     }
   })();
   return {
@@ -45,7 +62,20 @@ function everyRate(perSec: number, fn: () => Promise<void> | void): { stop: () =
   };
 }
 
+/**
+ * The HTTP origin of a relay's WebSocket URL, as the client derives it:
+ * `wss://example.com/ws` → `https://example.com` (the API is at `/api/`, not
+ * under the WebSocket's path).
+ */
+export function httpOrigin(relayUrl: string): string {
+  const url = new URL(relayUrl);
+  if (url.protocol === 'wss:') url.protocol = 'https:';
+  else if (url.protocol === 'ws:') url.protocol = 'http:';
+  return url.origin;
+}
+
 export interface ScoreboardDriverOptions {
+  /** The relay's HTTP origin ({@link httpOrigin}). */
   baseUrl: string;
   metrics: Metrics;
   /** Fake client addresses to spread requests over. */
@@ -58,6 +88,8 @@ export interface ScoreboardDriverOptions {
   submitKinds?: ReplayKind[] | undefined;
   /** Ticks the `ai` submit kind plays. */
   aiTicks?: number | undefined;
+  /** Stop taking tickets once this many runs are made (for a {@link ScoreboardDriver.burst}). */
+  prefill?: number | undefined;
 }
 
 /** Milliseconds of wall time a run must age before the server will accept it. */
@@ -78,6 +110,8 @@ export class ScoreboardDriver {
   private readonly recordedIds: number[] = [];
   /** Tickets whose replay is ready, awaiting submission. */
   private readonly ready: Pending[] = [];
+  /** Tickets asked for or held, against `prefill`. */
+  private claimed = 0;
   private kindCursor = 0;
   private clientCursor = 0;
 
@@ -91,11 +125,12 @@ export class ScoreboardDriver {
   start(): void {
     const o = this.options;
     const kinds = o.submitKinds ?? ['advance', 'ai'];
+    const skipped = (): void => o.metrics.count('scoreboardSkipped');
     this.loops.push(
-      everyRate(o.ticketsPerSec, () => this.getTicket(kinds)),
-      everyRate(o.submitsPerSec, () => this.submitReady()),
-      everyRate(o.scoresPerSec, () => this.readBoard()),
-      everyRate(o.replaysPerSec, () => this.readReplay()),
+      everyRate(o.ticketsPerSec, () => this.getTicket(kinds), skipped),
+      everyRate(o.submitsPerSec, () => this.submitReady(), skipped),
+      everyRate(o.scoresPerSec, () => this.readBoard(), skipped),
+      everyRate(o.replaysPerSec, () => this.readReplay(), skipped),
     );
   }
 
@@ -103,11 +138,30 @@ export class ScoreboardDriver {
     for (const l of this.loops) l.stop();
   }
 
+  /** Submit every run the pacing floor already allows, all at once (verifier saturation). */
+  burst(): void {
+    const now = absNow();
+    for (let i = this.ready.length - 1; i >= 0; i--) {
+      const pending = this.ready[i]!;
+      if (pending.earliestAt > now) continue;
+      this.ready.splice(i, 1);
+      void this.submit(pending);
+    }
+  }
+
   /** Get a ticket, play its seed into the next replay kind, and queue it to submit. */
   private async getTicket(kinds: ReplayKind[]): Promise<void> {
-    const issuedAt = absNow();
+    const prefill = this.options.prefill;
+    if (prefill !== undefined && this.claimed >= prefill) return;
+    this.claimed++;
     const ticket = (await this.fetch('/ticket', { method: 'POST' })) as SoloTicketResponse | null;
-    if (!ticket) return;
+    if (!ticket) {
+      this.claimed--;
+      return;
+    }
+    // The server starts the run's pacing clock when it issues the ticket: time
+    // it from the response, which is a little late and so never too early.
+    const issuedAt = absNow();
     const kind = kinds[this.kindCursor++ % kinds.length]!;
     const replay = await makeReplay(kind, ticket.seed, { aiTicks: this.options.aiTicks });
     this.options.metrics.count('replaysMade');
@@ -124,7 +178,10 @@ export class ScoreboardDriver {
     const i = this.ready.findIndex((p) => p.earliestAt <= now);
     if (i < 0) return;
     const [pending] = this.ready.splice(i, 1);
-    if (!pending) return;
+    if (pending) await this.submit(pending);
+  }
+
+  private async submit(pending: Pending): Promise<void> {
     const request: SoloSubmitRequest = {
       runId: pending.ticket.runId,
       name: 'loadtest',

@@ -100,7 +100,7 @@ export function startRelayWsServer(options: RelayWsServerOptions = {}): Promise<
         if (ws.readyState === ws.OPEN) {
           ws.send(text);
           counts.messagesOut++;
-          counts.bytesOut += text.length;
+          counts.bytesOut += Buffer.byteLength(text, 'utf8');
         }
       },
       close: () => ws.close(),

@@ -1,26 +1,34 @@
 /**
  * lobby.ts — bots that load the lobby rather than play: idlers (hello and
- * nothing else; they exist to receive `room_list` pushes), room sitters (an
- * open room each, which makes every push bigger), and churners (a lobby
- * event per step, each one a push to every session).
+ * nothing else; they exist to receive `room_list` pushes, and time them),
+ * room sitters (an open room each, which makes every push bigger), and
+ * churners (a lobby event per step, each one a push to every session).
  */
 
 import type { ServerMessage } from '@crack-attack/protocol';
 import { BotClient } from './client.js';
+import { absNow } from './time.js';
 
 export class Idler extends BotClient {
-  /** When the latest `room_list` arrived (absolute time). */
-  lastListAt = 0;
+  /** Lobby events already covered by a push; null until the hello's own list. */
+  private seenLobby: number | null = null;
 
   protected override onRoomList(): void {
-    this.lastListAt = this.receivedAt;
+    const metrics = this.env.metrics;
+    // The first list answers this idler's hello, not a lobby event.
+    this.seenLobby =
+      this.seenLobby === null
+        ? metrics.lobbySeq
+        : metrics.pushReceived(this.seenLobby, this.receivedAt);
   }
 }
 
 export class RoomSitter extends BotClient {
   async start(): Promise<void> {
     await this.join();
-    await this.request({ type: 'create_room' }, 'room_created');
+    const created = this.request({ type: 'create_room' }, 'room_created');
+    this.env.metrics.lobbyEvent(absNow());
+    await created;
   }
 }
 
@@ -46,7 +54,7 @@ export class Churner extends BotClient {
       this.send({ type: 'spectate', code });
       this.inRoom = true;
     }
-    this.env.metrics.count('lobbyEvents');
+    this.env.metrics.lobbyEvent(absNow());
   }
 
   protected override onMessage(msg: ServerMessage): void {

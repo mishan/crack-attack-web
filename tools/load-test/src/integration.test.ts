@@ -3,37 +3,45 @@
  * server build in its own process (as a run does) and plays a short scenario,
  * asserting the pipeline works end to end: a wire game exchanges input through
  * the relay (forward latency is measured), the relay's STATS line is parsed,
- * and a CSV with the header and rows lands on disk. Skips itself if the server
- * hasn't been built (the CSV path check makes the failure obvious).
+ * and a CSV with the header and rows lands on disk. It builds the server
+ * first (incremental: a no-op when the build is current), so a clean checkout
+ * runs it too rather than skipping it.
  */
 
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { afterAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { COLUMNS } from './columns.js';
 import { Coordinator } from './coordinator.js';
 import { getScenario } from './scenarios.js';
 import { startRelayProcess } from './relayProcess.js';
-import { ScoreboardDriver } from './scoreboardDriver.js';
+import { ScoreboardDriver, httpOrigin } from './scoreboardDriver.js';
 import { Metrics } from './metrics.js';
 import { sleep } from './time.js';
 
-const serverBuilt = existsSync(
-  fileURLToPath(new URL('../../../packages/server/dist/main.js', import.meta.url)),
+const serverProject = fileURLToPath(
+  new URL('../../../packages/server/tsconfig.json', import.meta.url),
 );
+
+beforeAll(() => {
+  const tsc = createRequire(import.meta.url).resolve('typescript/bin/tsc');
+  execFileSync(process.execPath, [tsc, '-b', serverProject], { stdio: 'inherit' });
+}, 180_000);
 
 const dir = mkdtempSync(join(tmpdir(), 'load-test-'));
 afterAll(() => rmSync(dir, { recursive: true, force: true }));
 
-describe.runIf(serverBuilt)('load-test against a real relay', () => {
+describe('load-test against a real relay', () => {
   it(
     'plays L1 briefly: forward latency measured, relay stats parsed, CSV written',
     { timeout: 60_000 },
     async () => {
       const csv = join(dir, 'l1.csv');
-      const scenario = getScenario('l1', { holdMs: 4000, rampMs: 2000 })!;
+      const scenario = getScenario('l1')!;
       const logs: string[] = [];
       const coordinator = new Coordinator({
         scenario,
@@ -69,7 +77,7 @@ describe.runIf(serverBuilt)('load-test against a real relay', () => {
     try {
       const metrics = new Metrics();
       const driver = new ScoreboardDriver({
-        baseUrl: relay.url.replace(/^ws/, 'http'),
+        baseUrl: httpOrigin(relay.url),
         metrics,
         clients: ['203.0.113.5'],
         ticketsPerSec: 4,

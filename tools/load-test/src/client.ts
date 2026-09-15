@@ -45,6 +45,12 @@ export function rawText(data: RawData): string {
   return Buffer.isBuffer(data) ? data.toString('utf8') : Buffer.from(data).toString('utf8');
 }
 
+/** A message's size on the wire, in bytes (not UTF-16 code units). */
+function rawBytes(data: RawData): number {
+  if (Array.isArray(data)) return data.reduce((n, b) => n + b.length, 0);
+  return data.byteLength;
+}
+
 interface Waiter {
   type: ServerType;
   resolve: (msg: ServerMessage) => void;
@@ -71,6 +77,12 @@ export class BotClient {
 
   get open(): boolean {
     return this.ws?.readyState === WebSocket.OPEN;
+  }
+
+  /** Its socket is closing or closed: done, and to be replaced. One still connecting isn't. */
+  get gone(): boolean {
+    const state = this.ws?.readyState;
+    return state === WebSocket.CLOSING || state === WebSocket.CLOSED;
   }
 
   /** Open a socket; resolves once it's open. */
@@ -125,7 +137,7 @@ export class BotClient {
     if (this.ws?.readyState !== WebSocket.OPEN) return;
     this.ws.send(text);
     this.env.metrics.counters.msgsOut++;
-    this.env.metrics.counters.bytesOut += text.length;
+    this.env.metrics.counters.bytesOut += Buffer.byteLength(text, 'utf8');
   }
 
   /** Send `msg` and wait for a `type` reply (registered first: a reply can't slip past). */
@@ -193,12 +205,13 @@ export class BotClient {
   private receive(data: RawData): void {
     this.receivedAt = absNow();
     const text = rawText(data);
+    const bytes = rawBytes(data);
     const counters = this.env.metrics.counters;
     counters.msgsIn++;
-    counters.bytesIn += text.length;
+    counters.bytesIn += bytes;
     if (peekType(text) === 'room_list') {
       counters.roomLists++;
-      counters.roomListBytes += text.length;
+      counters.roomListBytes += bytes;
       this.onRoomList(text);
       if (!this.waiters.some((w) => w.type === 'room_list')) return;
     }

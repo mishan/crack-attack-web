@@ -10,7 +10,13 @@
  * worker 0 only. Scenarios that centre on one game force a single worker.
  */
 
-import type { AbuseSpec, ChurnConfig, Populations, ScoreboardConfig } from './directives.js';
+import type {
+  AbuseSpec,
+  ArrivalRates,
+  ChurnConfig,
+  Populations,
+  ScoreboardConfig,
+} from './directives.js';
 
 /** A one-shot during a step, `atMs` into its hold. */
 export type ScenarioAction =
@@ -18,7 +24,8 @@ export type ScenarioAction =
   | { atMs: number; type: 'endStorm' }
   | { atMs: number; type: 'lateJoinBurst'; count: number }
   | { atMs: number; type: 'slowReaders'; count: number; ms: number }
-  | { atMs: number; type: 'reconnectSome'; fraction: number };
+  | { atMs: number; type: 'reconnectSome'; fraction: number }
+  | { atMs: number; type: 'scoreBurst' };
 
 export interface ScenarioStep {
   label: string;
@@ -27,9 +34,12 @@ export interface ScenarioStep {
   churn?: ChurnConfig | null;
   scoreboard?: ScoreboardConfig | null;
   abuse?: AbuseSpec[];
-  /** Wait for connections to establish before the reading hold. Default 15 s. */
+  /**
+   * Time before the reading hold. Default: until the step's new bots have
+   * arrived at the scenario's rates, plus the run's settle time.
+   */
   rampMs?: number;
-  /** Reading hold. Default the scenario's `holdMs`. */
+  /** Reading hold, as planned. Default {@link DEFAULT_HOLD_MS}; `--hold` overrides every step. */
   holdMs?: number;
   actions?: ScenarioAction[];
 }
@@ -41,18 +51,22 @@ export interface Scenario {
   singleWorker?: boolean;
   /** Marked in the plan to also be run behind nginx (informational). */
   nginx?: boolean;
+  /** Arrival rates, where the plan's defaults (`DEFAULT_ARRIVALS`) don't fit. */
+  arrivals?: Partial<ArrivalRates>;
+  /** Wire games report a result and rematch this often (the CLI's `--rotate` overrides). */
+  rotateMs?: number;
   steps: ScenarioStep[];
 }
 
 export interface ScenarioOptions {
-  /** Default reading hold per step, ms (plan: 120 s). */
-  holdMs: number;
-  /** Ramp before each hold, ms. */
-  rampMs: number;
   /** Keep only the first N steps (quick runs). */
   maxSteps?: number | undefined;
 }
 
+/** The plan's hold per step: two minutes. */
+export const DEFAULT_HOLD_MS = 120_000;
+
+const MINUTE = 60_000;
 const GAME_STEPS = [10, 50, 100, 250, 500, 1000, 2000];
 const SPECTATOR_STEPS = [10, 50, 100, 250, 500, 1000, 2000];
 
@@ -80,9 +94,9 @@ function build(options: ScenarioOptions): Record<string, Scenario> {
   const scenarios: Record<string, Scenario> = {
     l1: {
       name: 'l1',
-      description: 'Baseline: one wire-bot game, no spectators.',
+      description: 'Baseline: one wire-bot game, no spectators, 5 minutes.',
       singleWorker: true,
-      steps: [{ label: '1game', populations: { wireGames: 1 } }],
+      steps: [{ label: '1game', populations: { wireGames: 1 }, holdMs: 5 * MINUTE }],
     },
     l2: {
       name: 'l2',
@@ -143,8 +157,8 @@ function build(options: ScenarioOptions): Record<string, Scenario> {
         {
           label: '30min+100join',
           populations: { wireGames: 1 },
-          holdMs: 30 * 60_000,
-          actions: [{ atMs: 30 * 60_000 - 30_000, type: 'lateJoinBurst', count: 100 }],
+          holdMs: 30 * MINUTE,
+          actions: [{ atMs: 30 * MINUTE - 30_000, type: 'lateJoinBurst', count: 100 }],
         },
       ],
     },
@@ -156,8 +170,8 @@ function build(options: ScenarioOptions): Record<string, Scenario> {
         {
           label: '60min+100join',
           populations: { wireGames: 1 },
-          holdMs: 60 * 60_000,
-          actions: [{ atMs: 60 * 60_000 - 30_000, type: 'lateJoinBurst', count: 100 }],
+          holdMs: 60 * MINUTE,
+          actions: [{ atMs: 60 * MINUTE - 30_000, type: 'lateJoinBurst', count: 100 }],
         },
       ],
     },
@@ -204,10 +218,12 @@ function build(options: ScenarioOptions): Record<string, Scenario> {
           actions: [{ atMs: 30_000, type: 'reconnectStorm', fraction: 1, spreadMs: 5_000 }],
         },
         {
-          label: 'storm_25s',
+          // Spread past the 30 s grace, so about a quarter come back too late
+          // and forfeit.
+          label: 'storm_40s',
           populations: { wireGames: 200 },
           holdMs: 120_000,
-          actions: [{ atMs: 30_000, type: 'reconnectStorm', fraction: 1, spreadMs: 25_000 }],
+          actions: [{ atMs: 30_000, type: 'reconnectStorm', fraction: 1, spreadMs: 40_000 }],
         },
       ],
     },
@@ -234,7 +250,7 @@ function build(options: ScenarioOptions): Record<string, Scenario> {
             { kind: 'silent', count: 500 },
             { kind: 'churn', count: 500, rate: 100 },
             { kind: 'bigframes', count: 50 },
-            { kind: 'malformed', count: 50 },
+            { kind: 'malformed', count: 50, rate: 1000 },
             { kind: 'flood', count: 50 },
           ],
         },
@@ -246,31 +262,45 @@ function build(options: ScenarioOptions): Record<string, Scenario> {
       steps: [
         { label: 'ceiling', populations: { wireGames: 50 }, scoreboard: CEILING_SCOREBOARD },
         {
+          // 64 hard-AI runs submitted within one second. The ramp gathers them
+          // (tickets at the ceiling rate, each played into a replay) and outlasts
+          // the server's pacing floor — a run can't be submitted sooner than it
+          // could have been played, about 3 minutes here — then the burst fires.
           label: 'verifier_saturation',
           populations: { wireGames: 50 },
-          scoreboard: { ...CEILING_SCOREBOARD, submitsPerSec: 64, submitKinds: ['ai'] },
+          scoreboard: { ...CEILING_SCOREBOARD, submitsPerSec: 0, submitKinds: ['ai'], prefill: 64 },
+          rampMs: 4 * MINUTE,
+          actions: [{ atMs: 10_000, type: 'scoreBurst' }],
         },
         {
           label: 'padded_flood',
           populations: { wireGames: 50 },
           scoreboard: { ...CEILING_SCOREBOARD, submitsPerSec: 5, submitKinds: ['padded'] },
-          holdMs: Math.min(options.holdMs, 30 * 60_000),
+          holdMs: 30 * MINUTE,
         },
       ],
     },
     l12: {
       name: 'l12',
       description: 'Soak at the operating point for an hour.',
+      // Every game ends and re-readies every 10 minutes.
+      rotateMs: 10 * MINUTE,
       steps: [
         {
           label: 'soak',
-          populations: { wireGames: 250, simGames: 5, spectatorsPerGame: 2, idlers: 500 },
+          populations: {
+            wireGames: 250,
+            simGames: 5,
+            spectatorsPerGame: 2,
+            idlers: 500,
+            churners: 1,
+          },
           churn: { mode: 'rooms', ratePerSec: 1 },
           scoreboard: CEILING_SCOREBOARD,
-          holdMs: 60 * 60_000,
+          holdMs: 60 * MINUTE,
           actions: [
-            // Rotate 10% of players once, a third of the way in.
-            { atMs: 20 * 60_000, type: 'reconnectSome', fraction: 0.1 },
+            // 10% of players reconnect once, a third of the way in.
+            { atMs: 20 * MINUTE, type: 'reconnectSome', fraction: 0.1 },
           ],
         },
       ],
@@ -283,13 +313,13 @@ function build(options: ScenarioOptions): Record<string, Scenario> {
   return scenarios;
 }
 
-/** All scenarios with the given step timing. */
-export function scenarioTable(options: ScenarioOptions): Record<string, Scenario> {
+/** All scenarios. */
+export function scenarioTable(options: ScenarioOptions = {}): Record<string, Scenario> {
   return build(options);
 }
 
 /** A scenario by name, or undefined. */
-export function getScenario(name: string, options: ScenarioOptions): Scenario | undefined {
+export function getScenario(name: string, options: ScenarioOptions = {}): Scenario | undefined {
   return build(options)[name.toLowerCase()];
 }
 

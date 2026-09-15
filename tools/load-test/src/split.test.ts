@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { shares, splitPopulations } from './split.js';
+import { DEFAULT_ARRIVALS, NO_POPULATIONS } from './directives.js';
+import { arrivalMs, shares, splitPopulations } from './split.js';
 
 describe('shares', () => {
   it('divides evenly, remainder to the first workers', () => {
@@ -33,5 +34,46 @@ describe('splitPopulations', () => {
     // Single-game pile-on only on worker 0.
     expect(parts[0]!.spectatorsOnFirst).toBe(100);
     expect(parts.slice(1).every((p) => p.spectatorsOnFirst === 0)).toBe(true);
+  });
+
+  it('leaves out what the step leaves out, so the workers keep those targets', () => {
+    // L2's last step adds a room to the idlers already connected.
+    const parts = splitPopulations({ rooms: 1 }, 2);
+    expect(parts).toEqual([{ rooms: 1 }, { rooms: 0 }]);
+  });
+});
+
+describe('arrivalMs', () => {
+  it('times the slowest-growing population at its rate', () => {
+    // 500 more idlers at 50 a second.
+    expect(
+      arrivalMs(
+        { ...NO_POPULATIONS, idlers: 500 },
+        { ...NO_POPULATIONS, idlers: 1000 },
+        DEFAULT_ARRIVALS,
+      ),
+    ).toBe(10_000);
+    // 50 games at 5 a second outlast their 100 spectators at 20 a second.
+    expect(
+      arrivalMs(
+        NO_POPULATIONS,
+        { ...NO_POPULATIONS, wireGames: 50, spectatorsPerGame: 2 },
+        DEFAULT_ARRIVALS,
+      ),
+    ).toBe(10_000);
+    // L4a: spectators piled onto the one game.
+    expect(
+      arrivalMs(
+        { ...NO_POPULATIONS, wireGames: 1, spectatorsOnFirst: 10 },
+        { ...NO_POPULATIONS, wireGames: 1, spectatorsOnFirst: 50 },
+        DEFAULT_ARRIVALS,
+      ),
+    ).toBe(2_000);
+  });
+
+  it('takes no time for a population that shrinks', () => {
+    expect(arrivalMs({ ...NO_POPULATIONS, wireGames: 100 }, NO_POPULATIONS, DEFAULT_ARRIVALS)).toBe(
+      0,
+    );
   });
 });

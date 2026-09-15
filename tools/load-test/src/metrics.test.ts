@@ -19,6 +19,24 @@ describe('Metrics', () => {
     expect(second.http).toEqual({});
     expect(second.hist.forward.count).toBe(0);
   });
+
+  it('times a room-list push once per session per batch of unseen lobby events', () => {
+    const m = new Metrics();
+    m.lobbyEvent(1000);
+    m.lobbyEvent(1010);
+    // One push covers both events (timed from the older).
+    let seen = m.pushReceived(0, 1025);
+    expect(seen).toBe(2);
+    // A list with nothing new since isn't a push of anything.
+    seen = m.pushReceived(seen, 1030);
+    m.lobbyEvent(1040);
+    seen = m.pushReceived(seen, 1045);
+    expect(seen).toBe(3);
+
+    const taken = m.take();
+    expect(taken.hist.push.count).toBe(2);
+    expect(taken.counters.lobbyEvents).toBe(3);
+  });
 });
 
 describe('Aggregate', () => {

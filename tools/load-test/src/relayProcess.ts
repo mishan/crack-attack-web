@@ -105,7 +105,8 @@ export async function startRelayProcess(options: RelayProcessOptions): Promise<R
     port,
     url: `ws://127.0.0.1:${port}`,
     stop: async () => {
-      if (child.exitCode !== null) return;
+      // Already gone: exited, or killed by a signal (an OOM kill mid-run).
+      if (child.exitCode !== null || child.signalCode !== null) return;
       child.kill('SIGTERM');
       const timer = setTimeout(() => child.kill('SIGKILL'), 10_000);
       await once(child, 'exit');

@@ -1,19 +1,34 @@
 /**
  * coordinator.ts — plays a scenario. It starts (or targets) the relay, forks
  * the workers, and for each step: divides the target populations across the
- * workers, sends them, waits for connections to establish, then holds — every
- * interval it asks each worker for a sample, merges them with the latest relay
- * `STATS` line, writes a CSV row, and fires any timed actions. At the end it
- * prints one summary line per step (the knee table's raw material).
+ * workers, sends them, waits for the new bots to arrive and settle, then
+ * holds — every interval it asks each worker for a sample, merges them with
+ * the latest relay `STATS` line, writes a CSV row, and fires any timed
+ * actions. At the end it prints one summary line per step (the knee table's
+ * raw material).
  */
 
 import { CsvWriter } from './csv.js';
 import { COLUMNS, toRow } from './columns.js';
-import type { AbuseSpec, ChurnConfig, Directive, ScoreboardConfig } from './directives.js';
+import {
+  DEFAULT_ARRIVALS,
+  NO_POPULATIONS,
+  type AbuseSpec,
+  type ArrivalRates,
+  type ChurnConfig,
+  type Directive,
+  type Populations,
+  type ScoreboardConfig,
+} from './directives.js';
 import { Aggregate } from './metrics.js';
 import { startRelayProcess, type RelayProcess } from './relayProcess.js';
-import { splitPopulations } from './split.js';
-import type { Scenario, ScenarioAction, ScenarioStep } from './scenarios.js';
+import { arrivalMs, shares, splitPopulations } from './split.js';
+import {
+  DEFAULT_HOLD_MS,
+  type Scenario,
+  type ScenarioAction,
+  type ScenarioStep,
+} from './scenarios.js';
 import { sleep } from './time.js';
 import { ForkedWorker, LocalWorker, type WorkerHandle } from './workerHandle.js';
 import type { StatsSample } from '@crack-attack/server';
@@ -32,10 +47,14 @@ export interface CoordinatorOptions {
   bundle?: boolean | undefined;
   /** Reading interval, ms (plan: 10 s). */
   intervalMs?: number | undefined;
+  /** Settle time after a step's new bots have arrived, before its hold. */
   rampMs: number;
-  holdMs: number;
-  inputDelay?: number | undefined;
-  /** Wire games report a result this often and rematch (keeps games flowing). */
+  /**
+   * Hold every step this long instead of its planned hold (a quick run, or a
+   * longer soak); the step's timed actions scale with it.
+   */
+  holdMs?: number | undefined;
+  /** Wire games report a result and rematch this often; default the scenario's. */
   rotateMs?: number | undefined;
   log?: ((line: string) => void) | undefined;
 }
@@ -57,21 +76,32 @@ export class Coordinator {
   private latestStats: StatsSample | null = null;
   private csv!: CsvWriter;
   private readonly summaries: StepSummary[] = [];
+  private readonly arrivals: ArrivalRates;
+  /** The global target populations so far. */
+  private current: Required<Populations> = { ...NO_POPULATIONS };
+  private churn: ChurnConfig | null = null;
 
   constructor(private readonly options: CoordinatorOptions) {
     this.log = options.log ?? ((line) => console.log(line));
+    this.arrivals = { ...DEFAULT_ARRIVALS, ...options.scenario.arrivals };
   }
 
   async run(): Promise<StepSummary[]> {
     this.csv = new CsvWriter(this.options.csvPath, COLUMNS);
     await this.startRelay();
     await this.startWorkers();
+    const n = this.workers.length;
+    const rotateMs = this.options.rotateMs ?? this.options.scenario.rotateMs;
+    // Each worker starts its share of the bots, so at its share of the rate.
+    const arrivals = Object.fromEntries(
+      Object.entries(this.arrivals).map(([kind, rate]) => [kind, rate / n]),
+    ) as unknown as ArrivalRates;
     const config: Directive = {
       type: 'config',
       url: this.relayUrl,
       tag: '',
-      ...(this.options.rotateMs !== undefined ? { rotateMs: this.options.rotateMs } : {}),
-      ...(this.options.inputDelay !== undefined ? { inputDelay: this.options.inputDelay } : {}),
+      arrivals,
+      ...(rotateMs !== undefined ? { rotateMs } : {}),
     };
     this.workers.forEach((w, i) => w.send({ ...config, tag: `w${i}` }));
 
@@ -123,38 +153,51 @@ export class Coordinator {
 
   private async runStep(step: ScenarioStep): Promise<void> {
     const label = step.label;
+    let arrivingMs = 0;
     // Populations (divided across workers).
     if (step.populations) {
+      const next = { ...this.current, ...step.populations };
+      arrivingMs = arrivalMs(this.current, next, this.arrivals);
+      this.current = next;
       const parts = splitPopulations(step.populations, this.workers.length);
       this.workers.forEach((w, i) => w.send({ type: 'populations', populations: parts[i]! }));
     }
-    if (step.churn !== undefined) this.sendChurn(step.churn);
+    if (step.churn !== undefined) this.churn = step.churn;
+    // Re-split the churn rate when the churners it runs on may have moved.
+    if (step.churn !== undefined || step.populations?.churners !== undefined) this.sendChurn();
     if (step.scoreboard !== undefined) this.sendScoreboard(step.scoreboard);
     if (step.abuse !== undefined) this.sendAbuse(step.abuse);
 
-    const rampMs = step.rampMs ?? this.options.rampMs;
+    const rampMs = step.rampMs ?? arrivingMs + this.options.rampMs;
     this.log(`\n== step ${label}: ramping ${(rampMs / 1000).toFixed(0)}s ==`);
     await this.sampleWindow(label, 'ramp', rampMs);
 
-    const holdMs = step.holdMs ?? this.options.holdMs;
+    const plannedMs = step.holdMs ?? DEFAULT_HOLD_MS;
+    const holdMs = this.options.holdMs ?? plannedMs;
+    const scale = holdMs / plannedMs;
+    const actions = (step.actions ?? []).map((a) => ({ ...a, atMs: a.atMs * scale }));
     this.log(`== step ${label}: holding ${(holdMs / 1000).toFixed(0)}s ==`);
     const stepAgg = new Aggregate();
-    await this.sampleWindow(label, 'hold', holdMs, step.actions, stepAgg);
+    await this.sampleWindow(label, 'hold', holdMs, actions, stepAgg);
 
     this.recordSummary(label, stepAgg);
   }
 
-  private sendChurn(churn: ChurnConfig | null): void {
-    // Split the event rate across workers that hold churners.
-    const perWorker = churn ? churn.ratePerSec / this.workers.length : 0;
-    for (const w of this.workers) {
-      w.send({
-        type: 'churn',
-        churn: churn
-          ? { mode: churn.mode, ratePerSec: perWorker }
-          : { mode: 'rooms', ratePerSec: 0 },
-      });
+  private sendChurn(): void {
+    // Split the event rate across the workers in proportion to the churners
+    // each holds: a worker with none can't make events.
+    const churn = this.churn;
+    const held = shares(this.current.churners, this.workers.length);
+    if (churn && churn.ratePerSec > 0 && this.current.churners === 0) {
+      this.log(`load-test: churn at ${churn.ratePerSec}/s but no churners to make it`);
     }
+    this.workers.forEach((w, i) => {
+      const ratePerSec =
+        churn && this.current.churners > 0
+          ? (churn.ratePerSec * held[i]!) / this.current.churners
+          : 0;
+      w.send({ type: 'churn', churn: { mode: churn?.mode ?? 'rooms', ratePerSec } });
+    });
   }
 
   private sendScoreboard(config: ScoreboardConfig | null): void {
@@ -197,6 +240,10 @@ export class Coordinator {
       case 'slowReaders':
         this.workers[0]!.send({ type: 'slowReaders', count: action.count, ms: action.ms });
         return;
+      case 'scoreBurst':
+        // The scoreboard driver lives on worker 0.
+        this.workers[0]!.send({ type: 'scoreBurst' });
+        return;
     }
   }
 
@@ -224,9 +271,12 @@ export class Coordinator {
     try {
       while (elapsed < windowMs) {
         await sleep(Math.min(interval, windowMs - elapsed));
-        elapsed = Date.now() - start;
         const samples = await Promise.all(this.workers.map((w) => w.sample()));
-        const seconds = interval / 1000;
+        // Rates are over the time these samples actually cover: a window's last
+        // interval is short, and a busy coordinator samples late.
+        const before = elapsed;
+        elapsed = Date.now() - start;
+        const seconds = (elapsed - before) / 1000;
         const agg = new Aggregate();
         agg.addInterval(samples, seconds);
         this.csv.write(

@@ -75,6 +75,24 @@ and by running two workers at half load and checking the numbers match one at
 full load. For thousands of connections, run the generator on a second host and
 `--relay` at the relay on its own core.
 
+### Pacing and timing
+
+Bots arrive at the plan's rates: games are created and started at 5 a second,
+spectators join at 20, and idle sessions (and room sitters and churners)
+connect at 50, split across the workers. A step's ramp lasts until its new bots
+have arrived at those rates, plus `--ramp` (15 s) to settle, before the reading
+hold. Each step holds for its planned time: 2 minutes, or the plan's longer one
+(L1 5 minutes, L5 30 and 60, the L11 padded flood 30, L12 an hour). `--hold`
+replaces every step's hold, for a quick shake-out or a longer soak, and scales
+the step's timed actions (a late-join burst, a storm) to match. L12's games end
+and rematch every 10 minutes unless `--rotate` says otherwise.
+
+L11's verifier saturation gathers its 64 AI runs during a 4-minute ramp (the
+server won't take a run sooner than it could have been played) and submits them
+together 10 s into the hold. The scoreboard driver offers each rate whether or
+not earlier requests have come back, up to 32 in flight per loop; the
+`scoreboardSkipped` column counts the beats it had to drop.
+
 ## Output columns
 
 One row per sampling interval per step: the step and phase (`ramp`/`hold`),

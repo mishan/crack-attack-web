@@ -28,12 +28,13 @@ Options:
   --trust-proxy <n>   TRUST_PROXY for a relay the CLI starts (needed for the scoreboard driver's per-client keys; default 1).
   --workers <n>       Generator worker processes (default 1; forced to 1 for single-game scenarios).
   --out <path>        CSV path (default docs/load-test-results/<date>/<scenario>.csv).
-  --hold <sec>        Reading hold per step (default 120).
-  --ramp <sec>        Ramp before each hold (default 15).
+  --hold <sec>        Hold every step this long, its timed actions scaled to match
+                      (default each step's planned hold: 120, or the plan's longer one).
+  --ramp <sec>        Settle time after a step's new bots arrive, before its hold (default 15).
   --interval <sec>    Sampling interval (default 10).
   --steps <n>         Run only the first N steps (quick runs).
-  --input-delay <n>   Match input delay in ticks (default the relay's).
-  --rotate <sec>      Wire games report a result and rematch this often (default 0 = never).
+  --rotate <sec>      Wire games report a result and rematch this often
+                      (default the scenario's: 600 for L12, else never).
   -h, --help
 `;
 
@@ -57,7 +58,6 @@ async function main(): Promise<void> {
       ramp: { type: 'string' },
       interval: { type: 'string' },
       steps: { type: 'string' },
-      'input-delay': { type: 'string' },
       rotate: { type: 'string' },
       help: { type: 'boolean', short: 'h' },
     },
@@ -76,10 +76,11 @@ async function main(): Promise<void> {
     return n;
   };
 
-  const holdMs = num(values.hold, 120) * 1000;
+  const holdMs = values.hold === undefined ? undefined : num(values.hold, 0) * 1000;
   const rampMs = num(values.ramp, 15) * 1000;
+  const rotateMs = values.rotate === undefined ? undefined : num(values.rotate, 0) * 1000;
   const maxSteps = values.steps === undefined ? undefined : num(values.steps, 0);
-  const scenario = getScenario(name, { holdMs, rampMs, maxSteps });
+  const scenario = getScenario(name, { maxSteps });
   if (!scenario) fail(`unknown scenario: ${name}`);
 
   const date = new Date().toISOString().slice(0, 10);
@@ -102,8 +103,7 @@ async function main(): Promise<void> {
     intervalMs: num(values.interval, 10) * 1000,
     rampMs,
     holdMs,
-    ...(values['input-delay'] !== undefined ? { inputDelay: num(values['input-delay'], 3) } : {}),
-    rotateMs: num(values.rotate, 0) * 1000,
+    rotateMs,
   });
 
   stdout.write(`load-test: ${scenario.name} — ${scenario.description}\n`);
