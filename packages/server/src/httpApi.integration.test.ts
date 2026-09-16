@@ -102,7 +102,9 @@ describe('scoreboard HTTP API', () => {
     });
     expect(res.status).toBe(200);
     expect(res.headers.get('content-type')).toBe('text/html; charset=utf-8');
-    expect(res.headers.get('cache-control')).toBe('public, max-age=300');
+    // Host-derived, so the browser may keep it but no shared cache may: a
+    // forged Host on one request must not be handed to the next visitor.
+    expect(res.headers.get('cache-control')).toBe('private, max-age=300');
     expect(res.headers.get('content-security-policy')).toContain(
       `img-src https://127.0.0.1:${server.port};`,
     );
@@ -116,12 +118,34 @@ describe('scoreboard HTTP API', () => {
     expect((await fetch(`${base}/api/solo/share/1/x`)).status).toBe(404);
   });
 
+  it('lets shared caches keep a share page once PUBLIC_URL pins the game', async () => {
+    const configured = await startRelayWsServer({
+      port: 0,
+      host: '127.0.0.1',
+      http: createScoreboardApi(
+        new SoloScoreboard({ store: new MemoryScoreStore(), now: () => clock.now }),
+        { publicUrl: 'https://game.example/' },
+      ),
+    });
+    try {
+      const res = await fetch(`http://127.0.0.1:${configured.port}/api/solo/share/99`);
+      expect(res.status).toBe(404);
+      expect(res.headers.get('cache-control')).toBe('public, max-age=300');
+      expect(await res.text()).toContain('href="https://game.example/"');
+    } finally {
+      await configured.close();
+    }
+  });
+
   it("takes the game's address from the request when none is configured", () => {
     const req = (headers: Record<string, string>) => ({ headers }) as unknown as IncomingMessage;
     const https = { host: 'example.com', 'x-forwarded-proto': 'https' };
     expect(requestGameUrl(req(https), 1)).toBe('https://example.com/');
     // Only a trusted proxy's word counts.
     expect(requestGameUrl(req(https), 0)).toBe('http://example.com/');
+    // Behind a proxy that appends, the client's own leftmost entry doesn't count.
+    const forged = { host: 'example.com', 'x-forwarded-proto': 'https,http' };
+    expect(requestGameUrl(req(forged), 1)).toBe('http://example.com/');
     expect(requestGameUrl(req({ host: '[::1]:8080' }), 0)).toBe('http://[::1]:8080/');
     expect(requestGameUrl(req({ host: 'x.example/"><script>' }), 0)).toBe('http://localhost/');
     // Shaped like a host, but no URL can hold it.

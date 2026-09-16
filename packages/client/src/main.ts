@@ -76,8 +76,13 @@ import {
 import { createRankedServices, type RankedServices } from './score/rankedServices.js';
 import type { HeldTicket } from './score/ticketPool.js';
 import { namePromptOpen, promptScoreName } from './render/namePrompt.js';
-import { closeShareDialog, openShareDialog, shareDialogOpen } from './render/shareDialog.js';
-import { gameUrlFor, shareInfo } from './view/share.js';
+import {
+  closeShareDialog,
+  openShareDialog,
+  refreshShareDialog,
+  shareDialogOpen,
+} from './render/shareDialog.js';
+import { gameUrlFor, shareInfo, type ShareInfo } from './view/share.js';
 import {
   NOT_SUBMITTED_LINE,
   RETRY_LINE,
@@ -468,12 +473,24 @@ function bootSolo(
     );
   showRunTag();
 
+  // What Share offers right now: a verified ranked run's share page, whose link
+  // preview shows the score; any other run, the game.
+  const gameUrl = gameUrlFor(
+    import.meta.env['VITE_PUBLIC_URL'] as string | undefined,
+    globalThis.location,
+  );
+  const currentShare = (): ShareInfo =>
+    shareInfo(score.score, verified, gameUrl, ranked?.client.baseUrl ?? null);
+
   // A ranked run's result replaces the tag once the scoreboard answers.
   const stopListening = ranked?.outbox.listen((runId, outcome) => {
     if (runId !== awaitingRunId) return;
     if (outcome.ok) {
       verified = outcome.response;
       hud?.setRunLine(standingLine(outcome.response), 'good');
+      // Opened during the verify window, the dialog is still on the plain game
+      // link: swap in the share page now there is one.
+      refreshShareDialog(currentShare());
     } else if (outcome.kept) hud?.setRunLine(RETRY_LINE);
     else hud?.setRunLine(rejectionLine(outcome.error.code), 'bad');
   });
@@ -637,19 +654,14 @@ function bootSolo(
   saveBtn.onclick = saveReplay;
   document.body.appendChild(markChrome(saveBtn));
 
-  // Below it: share the score. A verified ranked run shares its share page,
-  // whose link preview shows the score; any other run shares the game.
-  const gameUrl = gameUrlFor(
-    import.meta.env['VITE_PUBLIC_URL'] as string | undefined,
-    globalThis.location,
-  );
+  // Below it: share the score (`currentShare`, above).
   const shareBtn = document.createElement('button');
   shareBtn.textContent = 'Share score';
   shareBtn.style.cssText =
     'position:fixed;top:252px;right:12px;z-index:5;padding:6px 12px;opacity:.85;display:none';
   shareBtn.onclick = () => {
     shareBtn.blur(); // so Space (swap) doesn't reopen it
-    openShareDialog(shareInfo(score.score, verified, gameUrl, ranked?.client.baseUrl ?? null));
+    openShareDialog(currentShare());
   };
   document.body.appendChild(markChrome(shareBtn));
 

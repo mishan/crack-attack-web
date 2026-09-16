@@ -33,7 +33,8 @@ export interface ScoreboardApiOptions {
    * The game's address, ending in `/`: where share pages send people, and
    * where their preview image is. Unset = the request's own host, over the
    * scheme a trusted proxy reports in `X-Forwarded-Proto` (else http), which
-   * fits a relay behind the game's own nginx.
+   * fits a relay behind the game's own nginx. Share pages are then cacheable
+   * only by the visitor's own browser, since they carry that request's Host.
    */
   publicUrl?: string | undefined;
 }
@@ -112,7 +113,11 @@ async function handle(
         const card = await scoreboard.shareCard(client, idText);
         const game = options.publicUrl ?? requestGameUrl(req, proxyHops);
         // A few minutes: a run's places move, and a hidden run should drop out.
-        sendHtml(res, card ? 200 : 404, renderSharePage(card, game), sharePageCsp(game));
+        // Without a configured PUBLIC_URL the page echoes this request's own
+        // Host, so it's the browser's to keep and never a shared cache's: one
+        // visitor's forged Host must not be served on to everyone else.
+        const cache = options.publicUrl ? 'public, max-age=300' : 'private, max-age=300';
+        sendHtml(res, card ? 200 : 404, renderSharePage(card, game), sharePageCsp(game), cache);
       }
     }
   } catch (err) {
@@ -148,9 +153,11 @@ function allow(req: IncomingMessage, method: 'GET' | 'POST'): void {
  * {@link ScoreboardApiOptions.publicUrl}. A malformed `Host` gets localhost.
  */
 export function requestGameUrl(req: IncomingMessage, proxyHops: number): string {
-  const forwarded = req.headers['x-forwarded-proto'];
-  const proto = proxyHops > 0 && typeof forwarded === 'string' ? forwarded.split(',')[0] : '';
-  const scheme = proto?.trim() === 'https' ? 'https' : 'http';
+  // The entry the outermost trusted proxy wrote, as with X-Forwarded-For: a
+  // proxy that appends rather than overwrites would otherwise leave the
+  // client's own leftmost entry to pick the scheme.
+  const proto = forwardedEntry(req.headers['x-forwarded-proto'], proxyHops);
+  const scheme = proto === 'https' ? 'https' : 'http';
   const host = req.headers.host ?? '';
   // The shape check keeps out a path or query; URL refuses the rest (a port past 65535).
   if (/^(?:[\w.-]+|\[[\da-fA-F:.]+\])(?::\d{1,5})?$/.test(host)) {
@@ -179,10 +186,22 @@ export function forwardedAddress(
   header: string | readonly string[] | undefined,
   hops: number,
 ): string | null {
+  const entry = forwardedEntry(header, hops);
+  return entry === null ? null : parseAddress(entry);
+}
+
+/**
+ * The entry a trusted proxy wrote in a comma-separated forwarding header,
+ * `hops` from the right; a shorter header yields its first entry. Null if
+ * `hops` is 0 or the header is absent.
+ */
+function forwardedEntry(
+  header: string | readonly string[] | undefined,
+  hops: number,
+): string | null {
   if (hops < 1 || header === undefined) return null;
   const entries = (typeof header === 'string' ? header : header.join(',')).split(',');
-  const entry = entries[Math.max(0, entries.length - hops)];
-  return entry === undefined ? null : parseAddress(entry);
+  return entries[Math.max(0, entries.length - hops)]?.trim() ?? null;
 }
 
 /**
@@ -273,12 +292,18 @@ function sendText(
   res.end(text);
 }
 
-/** A share page: HTML, locked down by its CSP, cached a few minutes. */
-function sendHtml(res: ServerResponse, status: number, html: string, csp: string): void {
+/** A share page: HTML, locked down by its CSP, cached as the caller says. */
+function sendHtml(
+  res: ServerResponse,
+  status: number,
+  html: string,
+  csp: string,
+  cache: string,
+): void {
   res.writeHead(status, {
     'Content-Type': 'text/html; charset=utf-8',
     'Content-Length': Buffer.byteLength(html),
-    'Cache-Control': 'public, max-age=300',
+    'Cache-Control': cache,
     'Content-Security-Policy': csp,
     'X-Content-Type-Options': 'nosniff',
   });

@@ -2,7 +2,9 @@
  * shareDialog.ts — the Share panel the solo screen opens after a game: the
  * message, the browser's own share sheet where it has one, Facebook, LinkedIn
  * and Bluesky links, and Copy. Esc, Close or a click on the backdrop closes
- * it. Wording and links are the pure `view/share.ts`. Only one is ever open.
+ * it. Wording and links are the pure `view/share.ts`. Only one is ever open,
+ * and it re-renders in place when the scoreboard verifies the run underneath
+ * it (see {@link refreshShareDialog}).
  */
 
 import { SOURCE_URL } from '@crack-attack/protocol';
@@ -12,8 +14,17 @@ const LINK_STYLE =
   'padding:6px 12px;border:1px solid #3a4356;border-radius:4px;background:#222838;' +
   'color:#d7dce5;text-decoration:none;font-size:14px';
 
+/** The networks whose links the panel shows, in order. */
+const NETWORKS = [
+  ['facebook', 'Facebook'],
+  ['linkedin', 'LinkedIn'],
+  ['bluesky', 'Bluesky'],
+] as const;
+
 /** Closes the open dialog, while one is open. */
 let close: (() => void) | null = null;
+/** Re-renders the open dialog for newer share wording, while one is open. */
+let render: ((info: ShareInfo) => void) | null = null;
 
 /** Whether the dialog is open (the game should leave keys alone). */
 export function shareDialogOpen(): boolean {
@@ -24,10 +35,20 @@ export function closeShareDialog(): void {
   close?.();
 }
 
+/**
+ * Show newer wording in the open dialog, if one is open: a run verified while
+ * the panel sits there on the plain game link becomes its share page, without
+ * the panel closing under the player or losing focus. No-op otherwise.
+ */
+export function refreshShareDialog(info: ShareInfo): void {
+  render?.(info);
+}
+
 export function openShareDialog(info: ShareInfo): void {
   closeShareDialog();
-  const links = shareLinks(info);
-  const message = shareMessage(info);
+  /** The wording as it stands: replaced by {@link refreshShareDialog}. */
+  let current = info;
+  let message = shareMessage(current);
 
   const overlay = document.createElement('div');
   overlay.style.cssText =
@@ -61,19 +82,18 @@ export function openShareDialog(info: ShareInfo): void {
   if (typeof navigator.share === 'function') {
     actions.append(
       button('Share…', () => {
-        navigator.share({ title: 'Crack Attack!', text: info.text, url: info.url }).catch(() => {
-          // Dismissed, or refused: the other options are still here.
-        });
+        navigator
+          .share({ title: 'Crack Attack!', text: current.text, url: current.url })
+          .catch(() => {
+            // Dismissed, or refused: the other options are still here.
+          });
       }),
     );
   }
-  for (const [label, href] of [
-    ['Facebook', links.facebook],
-    ['LinkedIn', links.linkedin],
-    ['Bluesky', links.bluesky],
-  ] as const) {
-    actions.append(link(label, href, LINK_STYLE));
-  }
+  const netLinks = NETWORKS.map(
+    ([net, label]) => [net, link(label, shareLinks(current)[net], LINK_STYLE)] as const,
+  );
+  for (const [, el] of netLinks) actions.append(el);
   actions.append(
     button('Copy message', () => {
       const copied = navigator.clipboard?.writeText(message);
@@ -96,7 +116,9 @@ export function openShareDialog(info: ShareInfo): void {
   panel.append(title, text, actions, status, footer);
   overlay.append(panel);
 
-  // Focus stays inside, as in the other modals; Esc closes.
+  // Focus management, as the other modals: remember the opener, keep Tab
+  // inside the dialog, and give focus back on close. Esc closes.
+  const opener = document.activeElement instanceof HTMLElement ? document.activeElement : null;
   const focusable = (): HTMLElement[] => Array.from(panel.querySelectorAll('a[href], button'));
   const onKeyDown = (e: KeyboardEvent): void => {
     if (e.key === 'Escape') {
@@ -107,10 +129,12 @@ export function openShareDialog(info: ShareInfo): void {
     if (e.key !== 'Tab') return;
     const items = focusable();
     const i = items.indexOf(document.activeElement as HTMLElement);
+    // Focus outside the panel (i === -1) is pulled back in rather than left to
+    // walk out to the game's chrome behind the backdrop.
     if (e.shiftKey && i <= 0) {
       e.preventDefault();
       items[items.length - 1]?.focus();
-    } else if (!e.shiftKey && i === items.length - 1) {
+    } else if (!e.shiftKey && (i === -1 || i === items.length - 1)) {
       e.preventDefault();
       items[0]?.focus();
     }
@@ -120,15 +144,30 @@ export function openShareDialog(info: ShareInfo): void {
     if (e.target === overlay) {
       e.preventDefault();
       finish();
+      return;
     }
+    // A click on the panel's own text or padding would otherwise drop focus to
+    // the page, where the next Tab lands on the game's chrome.
+    if (!focusable().some((el) => el.contains(e.target as Node))) e.preventDefault();
   });
 
   function finish(): void {
     document.removeEventListener('keydown', onKeyDown);
     overlay.remove();
     close = null;
+    render = null;
+    if (opener?.isConnected) opener.focus();
   }
   close = finish;
+  render = (next) => {
+    current = next;
+    message = shareMessage(next);
+    text.textContent = message;
+    const hrefs = shareLinks(next);
+    for (const [net, el] of netLinks) el.href = hrefs[net];
+    // Anything copied was the older message: don't leave "Copied!" claiming this one.
+    status.textContent = '';
+  };
 
   document.body.appendChild(overlay);
   focusable()[0]?.focus();
