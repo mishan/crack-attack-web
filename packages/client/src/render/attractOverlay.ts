@@ -10,6 +10,7 @@
  */
 
 import { GC_STEPS_PER_SECOND } from '@crack-attack/core';
+import { SOURCE_URL } from '@crack-attack/protocol';
 import { TITLE_FADE_TICKS } from '../view/attract.js';
 import { FONT0 } from '../view/bitmapFont.js';
 import { BitmapLabel } from './bitmapText.js';
@@ -43,7 +44,16 @@ export class AttractOverlay {
     this.scores.style.cssText =
       'display:none;flex-direction:column;align-items:center;gap:2px;color:#e7ebf3;' +
       'font:600 16px system-ui,sans-serif;font-variant-numeric:tabular-nums';
-    this.title.append(logo, this.scores, this.makePrompt(prompt, 28));
+    // The source code, in the corner, out of the prompt's way (a click on it
+    // opens it rather than starting play).
+    const source = document.createElement('a');
+    source.href = SOURCE_URL;
+    source.target = '_blank';
+    source.rel = 'noopener noreferrer';
+    source.textContent = 'Source on GitHub';
+    source.style.cssText =
+      'position:absolute;bottom:14px;right:16px;font:13px system-ui,sans-serif;color:#9ab8ff;opacity:.7';
+    this.title.append(logo, this.scores, this.makePrompt(prompt, 28), source);
     document.body.appendChild(this.title);
 
     this.banner = document.createElement('div');

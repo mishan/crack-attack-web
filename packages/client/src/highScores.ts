@@ -6,7 +6,7 @@
  * pure `view/highScores.ts`.
  */
 
-import type { ScoreBoard, SoloScoresResponse } from '@crack-attack/protocol';
+import { SOURCE_URL, type ScoreBoard, type SoloScoresResponse } from '@crack-attack/protocol';
 import { BitmapLabel } from './render/bitmapText.js';
 import type { ScoreboardClient } from './score/scoreboardApi.js';
 import { loadOwnRuns } from './score/scoreStore.js';
@@ -163,6 +163,7 @@ export function bootHighScores(
     ),
     status,
     table,
+    sourceLine(),
   );
   document.body.append(root);
 
@@ -183,6 +184,20 @@ export function bootHighScores(
       root.remove();
     },
   };
+}
+
+/** A footer line linking the source code. */
+function sourceLine(): HTMLElement {
+  const line = document.createElement('p');
+  line.style.cssText = 'margin:12px 0 0;font-size:13px;opacity:.7;text-align:center';
+  const a = document.createElement('a');
+  a.href = SOURCE_URL;
+  a.target = '_blank';
+  a.rel = 'noopener noreferrer';
+  a.textContent = 'GitHub';
+  a.style.color = '#9ab8ff';
+  line.append('Crack Attack! is open source: ', a);
+  return line;
 }
 
 function button(label: string, onClick: () => void): HTMLButtonElement {
