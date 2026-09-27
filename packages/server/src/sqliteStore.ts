@@ -1,5 +1,6 @@
 /**
- * sqliteStore.ts — SQLite-backed {@link LobbyStore} and {@link ScoreStore}, on
+ * sqliteStore.ts — SQLite-backed {@link LobbyStore}, {@link ScoreStore} and
+ * {@link AccountStore}, on
  * Node's built-in `node:sqlite`. No native add-on to install, so the relay
  * bundles into one file that runs with plain `node` (see `scripts/bundle.mjs`).
  *
@@ -12,6 +13,12 @@
 
 import type { ScoreBoard, SoloStanding } from '@crack-attack/protocol';
 import { DatabaseSync, type StatementSync } from 'node:sqlite';
+import {
+  START_RATING,
+  type AccountStore,
+  type NewAccount,
+  type StoredAccount,
+} from './accountStore.js';
 import type {
   NewSoloScore,
   ScoreStore,
@@ -44,6 +51,22 @@ interface ScoreRow {
   ticks: number;
   sim_version: number;
   created_at: number;
+  hidden: number;
+}
+
+interface AccountRow {
+  id: number;
+  handle: string;
+  handle_folded: string;
+  rating: number;
+  rd: number;
+  volatility: number;
+  rated_at: number | null;
+  wins: number;
+  losses: number;
+  draws: number;
+  created_at: number;
+  renamed_at: number | null;
   hidden: number;
 }
 
@@ -89,10 +112,45 @@ export const MIGRATIONS: readonly string[] = [
   CREATE INDEX solo_scores_replay_pending ON solo_scores (created_at)
     WHERE replay_settled = 0 AND hidden = 0;
   `,
+  // 2: accounts and their sessions. Keys and session tokens are stored only
+  // as SHA-256 hashes (hex). Ratings start at START_RATING (accountStore.ts),
+  // written out here since a shipped migration never changes.
+  `
+  CREATE TABLE accounts (
+    -- AUTOINCREMENT: a deleted account's id is never handed out again, so
+    -- nothing keyed by it (rated games, the relay's record keys) can pass to
+    -- a newer account.
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    handle        TEXT NOT NULL,
+    handle_folded TEXT NOT NULL UNIQUE,
+    key_hash      TEXT NOT NULL UNIQUE,
+    rating        REAL NOT NULL DEFAULT 1500,
+    rd            REAL NOT NULL DEFAULT 350,
+    volatility    REAL NOT NULL DEFAULT 0.06,
+    rated_at      INTEGER,
+    wins          INTEGER NOT NULL DEFAULT 0,
+    losses        INTEGER NOT NULL DEFAULT 0,
+    draws         INTEGER NOT NULL DEFAULT 0,
+    created_at    INTEGER NOT NULL,
+    renamed_at    INTEGER,
+    hidden        INTEGER NOT NULL DEFAULT 0
+  ) STRICT;
+  CREATE TABLE sessions (
+    token_hash   TEXT PRIMARY KEY,
+    account_id   INTEGER NOT NULL,
+    last_used_at INTEGER NOT NULL
+  ) STRICT;
+  CREATE INDEX sessions_account ON sessions (account_id);
+  CREATE INDEX sessions_last_used ON sessions (last_used_at);
+  `,
 ];
 
 /** The schema version this build writes. */
 export const SCHEMA_VERSION = MIGRATIONS.length;
+
+const ACCOUNT_COLUMNS =
+  'id, handle, handle_folded, rating, rd, volatility, rated_at, wins, losses, draws, ' +
+  'created_at, renamed_at, hidden';
 
 const SCORE_COLUMNS =
   'id, run_id, name, score, top_multiplier, ticks, sim_version, created_at, hidden';
@@ -136,7 +194,7 @@ export const SCORE_QUERIES = {
     ORDER BY s.created_at LIMIT :limit`,
 } as const;
 
-export class SqliteStore implements LobbyStore, ScoreStore {
+export class SqliteStore implements LobbyStore, ScoreStore, AccountStore {
   private readonly db: DatabaseSync;
   // Prepared once and reused for every call.
   private readonly selectPlayer: StatementSync;
@@ -161,6 +219,23 @@ export class SqliteStore implements LobbyStore, ScoreStore {
   private readonly dropReplay: StatementSync;
   private readonly updateHidden: StatementSync;
   private readonly selectRecent: StatementSync;
+  private readonly takeGuest: StatementSync;
+  private readonly insertAccount: StatementSync;
+  private readonly selectAccount: StatementSync;
+  private readonly selectAccountByKey: StatementSync;
+  private readonly selectAccountByHandle: StatementSync;
+  private readonly insertSession: StatementSync;
+  private readonly selectSession: StatementSync;
+  private readonly touchSession: StatementSync;
+  private readonly deleteSession: StatementSync;
+  private readonly deleteOldSessions: StatementSync;
+  private readonly deleteOtherSessions: StatementSync;
+  private readonly deleteAccountSessions: StatementSync;
+  private readonly updateKey: StatementSync;
+  private readonly updateHandle: StatementSync;
+  private readonly deleteAccountRow: StatementSync;
+  private readonly updateAccountHidden: StatementSync;
+  private readonly updateResetRating: StatementSync;
 
   /** @param path Database file path, or ':memory:' for an ephemeral store. */
   constructor(path: string) {
@@ -225,6 +300,44 @@ export class SqliteStore implements LobbyStore, ScoreStore {
     this.updateHidden = this.db.prepare('UPDATE solo_scores SET hidden = ? WHERE id = ?');
     this.selectRecent = this.db.prepare(
       `SELECT ${SCORE_COLUMNS} FROM solo_scores ORDER BY id DESC LIMIT ?`,
+    );
+
+    this.takeGuest = this.db.prepare('DELETE FROM players WHERE token = ? RETURNING wins, losses');
+    this.insertAccount = this.db.prepare(
+      `INSERT INTO accounts (handle, handle_folded, key_hash, wins, losses, created_at)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+    );
+    this.selectAccount = this.db.prepare(`SELECT ${ACCOUNT_COLUMNS} FROM accounts WHERE id = ?`);
+    this.selectAccountByKey = this.db.prepare(
+      `SELECT ${ACCOUNT_COLUMNS} FROM accounts WHERE key_hash = ?`,
+    );
+    this.selectAccountByHandle = this.db.prepare(
+      `SELECT ${ACCOUNT_COLUMNS} FROM accounts WHERE handle_folded = ?`,
+    );
+    this.insertSession = this.db.prepare(
+      'INSERT INTO sessions (token_hash, account_id, last_used_at) VALUES (?, ?, ?)',
+    );
+    this.selectSession = this.db.prepare(
+      'SELECT account_id, last_used_at FROM sessions WHERE token_hash = ?',
+    );
+    this.touchSession = this.db.prepare(
+      'UPDATE sessions SET last_used_at = ? WHERE token_hash = ?',
+    );
+    this.deleteSession = this.db.prepare('DELETE FROM sessions WHERE token_hash = ?');
+    this.deleteOldSessions = this.db.prepare('DELETE FROM sessions WHERE last_used_at < ?');
+    this.deleteOtherSessions = this.db.prepare(
+      'DELETE FROM sessions WHERE account_id = ? AND token_hash != ?',
+    );
+    this.deleteAccountSessions = this.db.prepare('DELETE FROM sessions WHERE account_id = ?');
+    this.updateKey = this.db.prepare('UPDATE accounts SET key_hash = ? WHERE id = ?');
+    this.updateHandle = this.db.prepare(
+      `UPDATE accounts SET handle = ?, handle_folded = ?, renamed_at = coalesce(?, renamed_at)
+       WHERE id = ?`,
+    );
+    this.deleteAccountRow = this.db.prepare('DELETE FROM accounts WHERE id = ?');
+    this.updateAccountHidden = this.db.prepare('UPDATE accounts SET hidden = ? WHERE id = ?');
+    this.updateResetRating = this.db.prepare(
+      'UPDATE accounts SET rating = ?, rd = ?, volatility = ?, rated_at = NULL WHERE id = ?',
     );
   }
 
@@ -391,10 +504,135 @@ export class SqliteStore implements LobbyStore, ScoreStore {
     return Promise.resolve(rows.map(scoreOf));
   }
 
+  createAccount(account: NewAccount): Promise<StoredAccount | null> {
+    const created = this.transaction(() => {
+      // Under the write lock, so no other writer can take the handle between
+      // this check and the insert.
+      if (this.selectAccountByHandle.get(account.handleFolded)) return null;
+      const guest =
+        account.guestToken === undefined
+          ? undefined
+          : (this.takeGuest.get(account.guestToken) as
+              { wins: number; losses: number } | undefined);
+      const { lastInsertRowid } = this.insertAccount.run(
+        account.handle,
+        account.handleFolded,
+        account.keyHash,
+        guest?.wins ?? 0,
+        guest?.losses ?? 0,
+        account.createdAt,
+      );
+      const id = Number(lastInsertRowid);
+      this.insertSession.run(account.sessionHash, id, account.createdAt);
+      return this.selectAccount.get(id) as unknown as AccountRow;
+    });
+    return Promise.resolve(created ? accountOf(created) : null);
+  }
+
+  accountByKey(keyHash: string): Promise<StoredAccount | null> {
+    const row = this.selectAccountByKey.get(keyHash) as AccountRow | undefined;
+    return Promise.resolve(row ? accountOf(row) : null);
+  }
+
+  accountByHandle(handleFolded: string): Promise<StoredAccount | null> {
+    const row = this.selectAccountByHandle.get(handleFolded) as AccountRow | undefined;
+    return Promise.resolve(row ? accountOf(row) : null);
+  }
+
+  addSession(sessionHash: string, accountId: number, now: number): Promise<void> {
+    this.insertSession.run(sessionHash, accountId, now);
+    return Promise.resolve();
+  }
+
+  useSession(sessionHash: string, now: number, staleBefore: number): Promise<StoredAccount | null> {
+    const session = this.selectSession.get(sessionHash) as
+      { account_id: number; last_used_at: number } | undefined;
+    if (!session) return Promise.resolve(null);
+    if (session.last_used_at < staleBefore) {
+      this.deleteSession.run(sessionHash);
+      return Promise.resolve(null);
+    }
+    const row = this.selectAccount.get(session.account_id) as AccountRow | undefined;
+    if (!row) return Promise.resolve(null);
+    this.touchSession.run(now, sessionHash);
+    return Promise.resolve(accountOf(row));
+  }
+
+  endSession(sessionHash: string): Promise<void> {
+    this.deleteSession.run(sessionHash);
+    return Promise.resolve();
+  }
+
+  pruneSessions(before: number): Promise<number> {
+    return Promise.resolve(Number(this.deleteOldSessions.run(before).changes));
+  }
+
+  replaceKey(accountId: number, keyHash: string, keepSessionHash: string): Promise<void> {
+    this.transaction(() => {
+      this.updateKey.run(keyHash, accountId);
+      this.deleteOtherSessions.run(accountId, keepSessionHash);
+    });
+    return Promise.resolve();
+  }
+
+  renameAccount(
+    accountId: number,
+    handle: string,
+    handleFolded: string,
+    renamedAt: number | null,
+  ): Promise<StoredAccount | null> {
+    const renamed = this.transaction(() => {
+      const holder = this.selectAccountByHandle.get(handleFolded) as AccountRow | undefined;
+      if (holder && holder.id !== accountId) return null;
+      if (Number(this.updateHandle.run(handle, handleFolded, renamedAt, accountId).changes) === 0) {
+        return null;
+      }
+      return this.selectAccount.get(accountId) as unknown as AccountRow;
+    });
+    return Promise.resolve(renamed ? accountOf(renamed) : null);
+  }
+
+  deleteAccount(accountId: number): Promise<boolean> {
+    const deleted = this.transaction(() => {
+      this.deleteAccountSessions.run(accountId);
+      return Number(this.deleteAccountRow.run(accountId).changes) > 0;
+    });
+    return Promise.resolve(deleted);
+  }
+
+  setAccountHidden(accountId: number, hidden: boolean): Promise<boolean> {
+    const { changes } = this.updateAccountHidden.run(hidden ? 1 : 0, accountId);
+    return Promise.resolve(Number(changes) > 0);
+  }
+
+  resetRating(accountId: number): Promise<boolean> {
+    const { rating, rd, volatility } = START_RATING;
+    const { changes } = this.updateResetRating.run(rating, rd, volatility, accountId);
+    return Promise.resolve(Number(changes) > 0);
+  }
+
   close(): Promise<void> {
     this.db.close();
     return Promise.resolve();
   }
+}
+
+function accountOf(row: AccountRow): StoredAccount {
+  return {
+    id: row.id,
+    handle: row.handle,
+    handleFolded: row.handle_folded,
+    rating: row.rating,
+    rd: row.rd,
+    volatility: row.volatility,
+    ratedAt: row.rated_at,
+    wins: row.wins,
+    losses: row.losses,
+    draws: row.draws,
+    createdAt: row.created_at,
+    renamedAt: row.renamed_at,
+    hidden: row.hidden !== 0,
+  };
 }
 
 function scoreOf(row: ScoreRow): StoredSoloScore {

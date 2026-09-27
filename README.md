@@ -240,6 +240,53 @@ to play ranked runs locally:
 CORS_ORIGIN=http://localhost:5173 pnpm --filter @crack-attack/server start
 ```
 
+### Accounts
+
+Accounts are the first step of a rated ladder (the plan is in
+[`docs/RATING_PLAN.md`](docs/RATING_PLAN.md)). An account is a handle, a key
+and a rating: no email, password or real name. Registering returns a key of
+eight random words the server picks, meant for a password manager. The relay
+keeps only the key's SHA-256, so the key _is_ the account: there's no way to
+recover a lost one. Logging in trades the key for a session, sent as
+`Authorization: Bearer <session>`; sessions are stored hashed too, and last a
+year from their last use. The client doesn't use accounts yet.
+
+| Route                        | What it does                                                                       |
+| ---------------------------- | ---------------------------------------------------------------------------------- |
+| `POST /api/account/register` | `{handle, guestToken?}` → `{key, session, account}`; a guest's W-L moves over.     |
+| `POST /api/account/login`    | `{key}` → `{session, account}`. Spaces or capitals in the key are fine.            |
+| `GET /api/account/me`        | Session → `{account}`: handle, rating, W-L-D, and when it may next be renamed.     |
+| `POST /api/account/handle`   | Session, `{handle}` → `{account}`. At most once every 30 days.                     |
+| `POST /api/account/key`      | Session, `{key}` (the current one) → `{key}`: a new key. Every other session ends. |
+| `POST /api/account/logout`   | Ends the session.                                                                  |
+| `POST /api/account/delete`   | `{key}` → deletes the account. With a session, the key must be its account's.      |
+
+Anything that could lose the owner the account takes the key itself, not just
+a logged-in browser: a new key needs the current one, and so does deleting.
+So a lost key can't be replaced either. A browser still logged in keeps
+playing, but nowhere new can log in.
+
+Handles are cleaned up like scoreboard names and unique regardless of case
+and of full-width or other compatibility forms. Lookalikes across scripts (a
+Cyrillic letter that looks Latin) aren't caught; rename those by hand.
+
+Limits: each client address gets 5 registrations (then one an hour), 10
+requests carrying a key (then one every 30 s) and 60 with a session (then one
+a second). Registrations and key requests are also limited per IPv6 /48 and
+across all clients, logged as for the scoreboard.
+
+Moderation, by handle (typed as a player would):
+
+```sh
+DB=/var/lib/crack-attack/lobby.db node relay.mjs admin account misha
+DB=/var/lib/crack-attack/lobby.db node relay.mjs admin rename misha "new handle"
+DB=/var/lib/crack-attack/lobby.db node relay.mjs admin hide-account misha   # off the leaderboard
+DB=/var/lib/crack-attack/lobby.db node relay.mjs admin unhide-account misha
+DB=/var/lib/crack-attack/lobby.db node relay.mjs admin reset-rating misha
+```
+
+A moderator's rename doesn't count against the player's 30 days.
+
 ## Wiring the client to the relay
 
 The client resolves the relay WebSocket URL in this priority order:
@@ -580,3 +627,6 @@ plan.
 GPL-2.0-or-later. The original Crack Attack! is GPL v2; this port and any
 converted assets are kept GPL-compatible. See `COPYING`, and
 `packages/client/public/AUDIO_COPYRIGHT.txt` for audio-asset provenance.
+Account keys are drawn from the EFF long wordlist
+(`packages/server/src/wordlist.ts`), by the Electronic Frontier Foundation,
+under CC BY 3.0 US.

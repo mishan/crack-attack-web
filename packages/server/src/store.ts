@@ -41,7 +41,7 @@ export interface LobbyStore {
 
 /** In-memory store: tests and zero-persistence deployments. */
 export class MemoryStore implements LobbyStore {
-  private readonly players = new Map<string, StoredPlayer>();
+  protected readonly players = new Map<string, StoredPlayer>();
 
   getPlayer(token: string, name: string): Promise<StoredPlayer | null> {
     const p = this.players.get(token);

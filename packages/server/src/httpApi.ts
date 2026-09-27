@@ -1,14 +1,23 @@
 /**
- * httpApi.ts — the scoreboard's HTTP routes (protocol `scoreboard.ts`): a thin
- * Node layer over the transport-free {@link SoloScoreboard}, served on the
- * relay's port beside the WebSocket upgrade (see `wsServer.ts`).
+ * httpApi.ts — the relay's HTTP routes: the scoreboard's (protocol
+ * `scoreboard.ts`) and the accounts' (protocol `account.ts`). A thin Node
+ * layer over the transport-free {@link SoloScoreboard} and
+ * {@link AccountService}, served on the relay's port beside the WebSocket
+ * upgrade (see `wsServer.ts`).
  */
 
 import type { IncomingMessage, RequestListener, ServerResponse } from 'node:http';
 import { isIP } from 'node:net';
-import { SOLO_API_PREFIX, SOLO_SUBMIT_MAX_BYTES } from '@crack-attack/protocol';
+import {
+  ACCOUNT_API_PREFIX,
+  ACCOUNT_MAX_BODY_BYTES,
+  SOLO_API_PREFIX,
+  SOLO_SUBMIT_MAX_BYTES,
+} from '@crack-attack/protocol';
+import type { AccountService } from './accounts.js';
 import { clientKey } from './rateLimit.js';
-import { ApiError, type SoloScoreboard } from './scoreboard.js';
+import { ApiError } from './apiError.js';
+import type { SoloScoreboard } from './scoreboard.js';
 import { renderSharePage, sharePageCsp } from './sharePage.js';
 
 /** A ticket request needs no body; anything past this much is refused unread. */
@@ -37,6 +46,8 @@ export interface ScoreboardApiOptions {
    * only by the visitor's own browser, since they carry that request's Host.
    */
   publicUrl?: string | undefined;
+  /** Serves the account routes too, when given. */
+  accounts?: AccountService | undefined;
 }
 
 /** The client went away mid-request: there's no one left to answer. */
@@ -68,21 +79,33 @@ async function handle(
   if (options.corsOrigin) res.setHeader('Access-Control-Allow-Origin', options.corsOrigin);
   try {
     const url = parseUrl(req.url ?? '/');
-    if (!url.pathname.startsWith(`${SOLO_API_PREFIX}/`)) {
+    const accounts = url.pathname.startsWith(`${ACCOUNT_API_PREFIX}/`) ? options.accounts : null;
+    if (!accounts && !url.pathname.startsWith(`${SOLO_API_PREFIX}/`)) {
       throw new ApiError(404, 'not_found', 'not found');
     }
-    const route = url.pathname.slice(SOLO_API_PREFIX.length);
     if (req.method === 'OPTIONS') {
-      // CORS preflight (a JSON POST from another origin needs one).
+      // CORS preflight (a JSON POST from another origin needs one, as does
+      // any request carrying a session).
       res.writeHead(204, {
         'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-        'Access-Control-Allow-Headers': 'Content-Type',
+        'Access-Control-Allow-Headers': 'Content-Type, Authorization',
         'Access-Control-Max-Age': '86400',
       });
       res.end();
       return;
     }
     const client = clientKey(clientAddress(req, proxyHops));
+    if (accounts) {
+      await handleAccount(
+        accounts,
+        url.pathname.slice(ACCOUNT_API_PREFIX.length),
+        client,
+        req,
+        res,
+      );
+      return;
+    }
+    const route = url.pathname.slice(SOLO_API_PREFIX.length);
 
     if (route === '/ticket') {
       allow(req, 'POST');
@@ -125,9 +148,54 @@ async function handle(
     if (err instanceof ApiError) {
       send(res, err.status, err.body(), 'no-store', err.headers);
     } else {
-      console.error('scoreboard: request failed:', err);
+      console.error('relay: HTTP request failed:', err);
       send(res, 500, { error: 'internal', message: 'internal error' });
     }
+  }
+}
+
+/** The account routes (see protocol `account.ts`). */
+async function handleAccount(
+  accounts: AccountService,
+  route: string,
+  client: string,
+  req: IncomingMessage,
+  res: ServerResponse,
+): Promise<void> {
+  const session = req.headers.authorization;
+  const body = (): Promise<unknown> => readJson(req, ACCOUNT_MAX_BODY_BYTES);
+  switch (route) {
+    case '/register':
+      allow(req, 'POST');
+      send(res, 200, await accounts.register(client, await body()));
+      return;
+    case '/login':
+      allow(req, 'POST');
+      send(res, 200, await accounts.login(client, await body()));
+      return;
+    case '/me':
+      allow(req, 'GET');
+      send(res, 200, await accounts.me(client, session));
+      return;
+    case '/handle':
+      allow(req, 'POST');
+      send(res, 200, await accounts.rename(client, session, await body()));
+      return;
+    case '/key':
+      allow(req, 'POST');
+      send(res, 200, await accounts.replaceKey(client, session, await body()));
+      return;
+    case '/logout':
+      allow(req, 'POST');
+      await readBody(req, ACCOUNT_MAX_BODY_BYTES);
+      send(res, 200, await accounts.logout(client, session));
+      return;
+    case '/delete':
+      allow(req, 'POST');
+      send(res, 200, await accounts.deleteAccount(client, session, await body()));
+      return;
+    default:
+      throw new ApiError(404, 'not_found', 'not found');
   }
 }
 
@@ -216,9 +284,9 @@ export function parseAddress(entry: string): string | null {
   return isIP(address) === 0 ? null : address;
 }
 
-/** Read a JSON body of at most SOLO_SUBMIT_MAX_BYTES. */
-async function readJson(req: IncomingMessage): Promise<unknown> {
-  const body = await readBody(req, SOLO_SUBMIT_MAX_BYTES);
+/** Read a JSON body of at most `maxBytes`. */
+async function readJson(req: IncomingMessage, maxBytes = SOLO_SUBMIT_MAX_BYTES): Promise<unknown> {
+  const body = await readBody(req, maxBytes);
   try {
     return JSON.parse(body.toString('utf8'));
   } catch {

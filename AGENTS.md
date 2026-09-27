@@ -695,7 +695,22 @@ A generator header that a real, non-AI tool always writes (e.g. a lockfile's own
   digests record the result if the game had ended by that tick, else a loss
   for the one seat whose digests were false. Anything else records nothing.
   Each verdict is logged. No protocol change: the records reach players
-  through the room list. Next: phase 3, accounts.
+  through the room list. **Phase 3 landed** (server only): accounts.
+  Protocol `account.ts` has the API shapes and the shared rules
+  (`normalizeHandle`, `foldHandle` for uniqueness, `normalizeAccountKey`).
+  `accounts.ts` is the transport-free `AccountService`: keys are eight words
+  from the EFF long wordlist (`wordlist.ts`, its four hyphenated words
+  dropped), keys and sessions stored as SHA-256 hex, sessions good for a year
+  from last use. `accountStore.ts` is the `AccountStore` interface and
+  `MemoryAccountStore` (a `MemoryStore` too, so a guest's W-L can move over
+  atomically, as in SQLite); `SqliteStore` implements it on migration 2
+  (`accounts`, `sessions`). `ApiError` and `TieredLimit` moved to
+  `apiError.ts` for both services. Routes under `/api/account/` in
+  `httpApi.ts`; admin gained `account`, `rename`, `hide-account`,
+  `unhide-account`, `reset-rating`. Beyond the plan's API table: `GET /me`
+  (the client needs it after a reload) and `POST /handle` (the plan's 30-day
+  rename). The relay doesn't read sessions yet: `hello` with one is an
+  unknown token until phase 4.
 - [ ] Phase 6 stretch (X-mode, replays, WebRTC, binary codec if
       measurements demand it)
 

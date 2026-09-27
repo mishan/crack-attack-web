@@ -10,10 +10,11 @@
  * share pages' links and preview image (default: each request's own host).
  * STATS=1 writes a `stats {json}` line to stderr every 10 s: event-loop
  * delay, traffic, rooms (see stats.ts).
- * `admin …` runs a scoreboard moderation command instead (see admin.ts).
+ * `admin …` runs a moderation command instead (see admin.ts).
  */
 
 import { existsSync } from 'node:fs';
+import { AccountService } from './accounts.js';
 import { ADMIN_USAGE, runAdmin } from './admin.js';
 import { createScoreboardApi } from './httpApi.js';
 import { SoloScoreboard } from './scoreboard.js';
@@ -88,7 +89,9 @@ if (process.argv[2] === 'admin') {
     process.exit(2);
   }
   const store = new SqliteStore(dbPath);
-  const code = await runAdmin(process.argv.slice(3), store, (line) => console.log(line));
+  const code = await runAdmin(process.argv.slice(3), { scores: store, accounts: store }, (line) =>
+    console.log(line),
+  );
   await store.close();
   process.exit(code);
 }
@@ -109,7 +112,12 @@ const server = await startRelayWsServer({
   host,
   store,
   verifier,
-  http: createScoreboardApi(scoreboard, { trustProxy, corsOrigin, publicUrl }),
+  http: createScoreboardApi(scoreboard, {
+    trustProxy,
+    corsOrigin,
+    publicUrl,
+    accounts: new AccountService({ store }),
+  }),
 });
 console.log(`crack-attack relay listening on :${server.port} (db: ${dbPath})`);
 const statsInterval = /^\d+$/.test(process.env['STATS_INTERVAL_MS'] ?? '')

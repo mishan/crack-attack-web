@@ -30,7 +30,6 @@ import {
   normalizeScoreName,
   type ScoreBoard,
   type ScorePeriod,
-  type ScoreboardErrorBody,
   type ScoreboardErrorCode,
   type SoloScoreEntry,
   type SoloScoresResponse,
@@ -40,7 +39,8 @@ import {
   type SoloTicketResponse,
 } from '@crack-attack/protocol';
 import { randomBytes } from 'node:crypto';
-import { RateLimiter, siteKey, type RateLimit } from './rateLimit.js';
+import { ApiError, TieredLimit, take } from './apiError.js';
+import { RateLimiter, type RateLimit } from './rateLimit.js';
 import {
   ALL_TIME,
   compareScores,
@@ -49,29 +49,6 @@ import {
   type TimeRange,
 } from './scoreStore.js';
 import { Verifier, VerifierBusyError } from './verifier.js';
-
-/** A request the scoreboard refuses, with its HTTP status. */
-export class ApiError extends Error {
-  constructor(
-    readonly status: number,
-    readonly code: ScoreboardErrorCode,
-    message: string,
-    /** Extra response headers, e.g. `Retry-After` or `Allow`. */
-    readonly headers: Readonly<Record<string, string>> = {},
-  ) {
-    super(message);
-    this.name = 'ApiError';
-  }
-
-  body(): ScoreboardErrorBody {
-    return { error: this.code, message: this.message };
-  }
-
-  /** This refusal with more response headers. */
-  withHeaders(extra: Readonly<Record<string, string>>): ApiError {
-    return new ApiError(this.status, this.code, this.message, { ...this.headers, ...extra });
-  }
-}
 
 /** Tickets per client: a burst of 30 (quick restarts), then one per 10 s. */
 export const DEFAULT_TICKET_LIMIT: RateLimit = { capacity: 30, refillMs: 10_000 };
@@ -147,8 +124,6 @@ export interface ScoreboardStats {
 
 /** Board responses cached at most (each board, period and month is one). */
 const SCORES_CACHE_MAX_ENTRIES = 256;
-/** The key of a bucket shared by all clients. */
-const EVERYONE = '*';
 /** Expired tickets are swept at most this often (when the next ticket is issued). */
 const PRUNE_EVERY_MS = 10 * 60 * 1000;
 /** Replays are swept at most this often (after a run is recorded). */
@@ -205,56 +180,6 @@ interface CachedScores {
   at: number;
   /** The board's first {@link SCORE_LIST_MAX_LIMIT} entries; a request takes as many as it asked for. */
   response: Promise<SoloScoresResponse>;
-}
-
-/**
- * A request's rate limits, narrowest first: per client, per IPv6 /48 (none
- * for IPv4), and across all clients.
- */
-class TieredLimit {
-  private readonly own: RateLimiter;
-  private readonly site: RateLimiter;
-  private readonly everyone: RateLimiter;
-
-  constructor(
-    limits: [own: RateLimit, site: RateLimit, everyone: RateLimit],
-    now: () => number,
-    /** Called when the bucket shared by all clients turns a request away. */
-    private readonly onSharedRefusal: () => void,
-  ) {
-    this.own = new RateLimiter(limits[0], now);
-    this.site = new RateLimiter(limits[1], now);
-    this.everyone = new RateLimiter(limits[2], now, 1);
-  }
-
-  /**
-   * Spend one request for `client`, or refuse with a 429. Narrowest first, so
-   * a client already over its own limit spends nothing from the shared buckets.
-   */
-  take(client: string): void {
-    for (const [limiter, key] of this.buckets(client)) {
-      if (!limiter.take(key)) throw this.refusal(limiter, key);
-    }
-  }
-
-  /** Clients tracked by the per-client bucket. */
-  get clients(): number {
-    return this.own.size;
-  }
-
-  private buckets(client: string): [RateLimiter, string][] {
-    const site = siteKey(client);
-    return [
-      [this.own, client],
-      ...(site === null ? [] : [[this.site, site] as [RateLimiter, string]]),
-      [this.everyone, EVERYONE],
-    ];
-  }
-
-  private refusal(limiter: RateLimiter, key: string): ApiError {
-    if (key === EVERYONE) this.onSharedRefusal();
-    return rateLimited(limiter, key);
-  }
 }
 
 export class SoloScoreboard {
@@ -664,19 +589,6 @@ export class SoloScoreboard {
       standing: { all, month },
     };
   }
-}
-
-/** The 429 for a request `key`'s bucket can't afford, saying when to try again. */
-function rateLimited(limiter: RateLimiter, key: string): ApiError {
-  const seconds = Math.max(1, Math.ceil(limiter.waitMs(key) / 1000));
-  return new ApiError(429, 'rate_limited', 'too many requests; slow down', {
-    'Retry-After': String(seconds),
-  });
-}
-
-/** Spend a request from `key`'s bucket, or refuse with a 429. */
-function take(limiter: RateLimiter, key: string): void {
-  if (!limiter.take(key)) throw rateLimited(limiter, key);
 }
 
 function oneOf<T extends string>(value: string, allowed: readonly T[], field: string): T {

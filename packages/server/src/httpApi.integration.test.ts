@@ -1,6 +1,6 @@
 /**
- * Integration: the scoreboard's HTTP routes on the relay's real HTTP server,
- * beside its WebSocket, on an ephemeral port.
+ * Integration: the scoreboard's and accounts' HTTP routes on the relay's real
+ * HTTP server, beside its WebSocket, on an ephemeral port.
  */
 
 import { readFileSync } from 'node:fs';
@@ -10,6 +10,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import WebSocket from 'ws';
 import type { SoloReplay } from '@crack-attack/core';
 import { PROTOCOL_VERSION, SOLO_SUBMIT_MAX_BYTES, encodeMessage } from '@crack-attack/protocol';
+import { MemoryAccountStore } from './accountStore.js';
+import { AccountService } from './accounts.js';
 import { createScoreboardApi, forwardedAddress, parseAddress, requestGameUrl } from './httpApi.js';
 import { SoloScoreboard } from './scoreboard.js';
 import { MemoryScoreStore } from './scoreStore.js';
@@ -40,7 +42,11 @@ beforeEach(async () => {
   server = await startRelayWsServer({
     port: 0,
     host: '127.0.0.1',
-    http: createScoreboardApi(scoreboard, { trustProxy: true, corsOrigin: ORIGIN }),
+    http: createScoreboardApi(scoreboard, {
+      trustProxy: true,
+      corsOrigin: ORIGIN,
+      accounts: new AccountService({ store: new MemoryAccountStore(), now: () => clock.now }),
+    }),
   });
   base = `http://127.0.0.1:${server.port}`;
 });
@@ -55,6 +61,74 @@ const post = (path: string, body?: unknown, headers: Record<string, string> = {}
     headers: { 'content-type': 'application/json', ...headers },
     ...(body === undefined ? {} : { body: typeof body === 'string' ? body : JSON.stringify(body) }),
   });
+
+describe('account HTTP API', () => {
+  const auth = (session: string) => ({ authorization: `Bearer ${session}` });
+
+  it('registers, logs in, renames, replaces the key, logs out and deletes', async () => {
+    const registered = await post('/api/account/register', { handle: 'misha' });
+    expect(registered.status).toBe(200);
+    expect(registered.headers.get('cache-control')).toBe('no-store');
+    const { key, session } = (await registered.json()) as { key: string; session: string };
+
+    const me = await fetch(`${base}/api/account/me`, { headers: auth(session) });
+    expect(await me.json()).toMatchObject({ account: { handle: 'misha', rating: 1500 } });
+
+    const login = await post('/api/account/login', { key: key.replaceAll('-', ' ') });
+    const other = ((await login.json()) as { session: string }).session;
+
+    const renamed = await post('/api/account/handle', { handle: 'Misha' }, auth(session));
+    expect(await renamed.json()).toMatchObject({ account: { handle: 'Misha' } });
+
+    expect((await post('/api/account/key', {}, auth(session))).status).toBe(400);
+    const replaced = await post('/api/account/key', { key }, auth(session));
+    const newKey = ((await replaced.json()) as { key: string }).key;
+    expect((await fetch(`${base}/api/account/me`, { headers: auth(other) })).status).toBe(401);
+    expect((await post('/api/account/login', { key })).status).toBe(401);
+
+    expect((await post('/api/account/logout', undefined, auth(session))).status).toBe(200);
+    expect((await fetch(`${base}/api/account/me`, { headers: auth(session) })).status).toBe(401);
+
+    expect((await post('/api/account/delete', { key: newKey })).status).toBe(200);
+    expect((await post('/api/account/login', { key: newKey })).status).toBe(401);
+  });
+
+  it('answers errors as JSON, and allows sessions across origins', async () => {
+    await post('/api/account/register', { handle: 'misha' });
+    const taken = await post('/api/account/register', { handle: 'MISHA' });
+    expect(taken.status).toBe(409);
+    expect(await taken.json()).toEqual({ error: 'handle_taken', message: '"MISHA" is taken' });
+    const noSession = await fetch(`${base}/api/account/me`);
+    expect(noSession.status).toBe(401);
+    expect(noSession.headers.get('www-authenticate')).toBe('Bearer');
+    expect((await fetch(`${base}/api/account/login`)).status).toBe(405);
+    expect((await post('/api/account/nope')).status).toBe(404);
+    expect((await post('/api/account/login', 'x'.repeat(2048))).status).toBe(413);
+
+    const preflight = await fetch(`${base}/api/account/me`, { method: 'OPTIONS' });
+    expect(preflight.status).toBe(204);
+    expect(preflight.headers.get('access-control-allow-headers')).toBe(
+      'Content-Type, Authorization',
+    );
+  });
+
+  it('is not served without an account service', async () => {
+    const bare = await startRelayWsServer({
+      port: 0,
+      host: '127.0.0.1',
+      http: createScoreboardApi(new SoloScoreboard({ store: new MemoryScoreStore() })),
+    });
+    try {
+      const res = await fetch(`http://127.0.0.1:${bare.port}/api/account/register`, {
+        method: 'POST',
+        body: '{"handle":"misha"}',
+      });
+      expect(res.status).toBe(404);
+    } finally {
+      await bare.close();
+    }
+  });
+});
 
 describe('scoreboard HTTP API', () => {
   it('runs the whole flow: ticket, submission, board, replay', async () => {
