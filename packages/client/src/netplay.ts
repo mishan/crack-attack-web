@@ -10,6 +10,11 @@
  * `match_resume`, rebuilds the session from the input ledgers, and fast-
  * forwards to the live frontier.
  *
+ * Logged in to an account (see `account.ts`), the token is the account's
+ * session: the player plays under its handle with a rating, may create rated
+ * rooms (a Rated box, on by default), and gets a `rating_update` a moment after
+ * each rated game. Guests can watch rated rooms but not sit in them.
+ *
  * Everything deterministic lives in the session; this file is DOM/WebGL glue.
  */
 
@@ -20,6 +25,8 @@ import {
   type AiOpponentInfo,
   type MatchResumeMessage,
   type MatchStartMessage,
+  type PlayerRating,
+  type RatingUpdateMessage,
   type RoomSummary,
   type ServerMessage,
   type SpectateStartMessage,
@@ -60,6 +67,9 @@ import { NetClient } from './net/session.js';
 import { SpectatorSession } from './net/spectator.js';
 import { pickAiDifficulty } from './render/aiDifficultyPicker.js';
 import type { AudioManager } from './audio/audioManager.js';
+import { AccountClient, AccountError, apiOriginFor } from './account/accountApi.js';
+import { AccountState, browserStorage } from './account/accountState.js';
+import { lobbyPlayerText, ratingChangeText, ratingText } from './view/rating.js';
 
 /** Build the local bot seat from a match's {@link AiOpponentInfo} descriptor. */
 function makeAiSeat(info: AiOpponentInfo | undefined, matchSeed: number): AiSeat | undefined {
@@ -80,8 +90,10 @@ const RECONNECT_INTERVAL_MS = 2000;
 /** The Concede button needs a second tap within this window, so a stray touch can't forfeit. */
 const CONCEDE_CONFIRM_MS = 3000;
 
-const STORAGE_TOKEN = 'crack-attack.token';
 const STORAGE_NAME = 'crack-attack.name';
+/** Banners over a rated room's countdown, cleared at GO. */
+const RATED_NOTE = 'Rated game';
+const CASUAL_NOTE = "Casual: you've played your rated games together today";
 
 /** Everything one rendered board needs, bundled per player. */
 interface BoardBundle {
@@ -106,13 +118,21 @@ export interface NetplayHandle {
   dispose(): void;
 }
 
+/** The screens the lobby links to. */
+export interface NetplayNav {
+  account(): void;
+  leaderboard(): void;
+}
+
 export function bootNetplay(
   app: HTMLElement,
   hudEl: HTMLElement | null,
   relayUrl: string,
   onExit: () => void,
   audio: AudioManager,
+  nav: NetplayNav,
 ): NetplayHandle {
+  const accountState = new AccountState(browserStorage());
   // --- overlay UI ------------------------------------------------------------
   const overlay = document.createElement('div');
   overlay.style.cssText =
@@ -124,10 +144,17 @@ export function bootNetplay(
     'background:#161a22;border:1px solid #2a3140;border-radius:8px;overflow-y:auto';
   panel.innerHTML = `
     <strong style="font-size:16px">Crack Attack! lobby</strong>
-    <div id="net-self" style="opacity:.8"></div>
-    <label>Name <input id="net-name" maxlength="32" style="width:100%"></label>
+    <div id="net-self" style="opacity:.8" dir="auto"></div>
     <div style="display:flex;gap:6px">
+      <button id="net-account" style="flex:1">Account</button>
+      <button id="net-ladder" style="flex:1">Leaderboard</button>
+    </div>
+    <label id="net-name-row">Name <input id="net-name" maxlength="32" style="width:100%"></label>
+    <div style="display:flex;gap:6px;align-items:center">
       <button id="net-create" style="flex:1">Create room</button>
+      <label id="net-rated-row" hidden style="white-space:nowrap">
+        <input id="net-rated" type="checkbox" checked> Rated
+      </label>
       <button id="net-create-ai" style="flex:1">vs AI</button>
     </div>
     <div style="display:flex;gap:6px">
@@ -156,6 +183,11 @@ export function bootNetplay(
   const roomsEl = $<HTMLDivElement>('net-rooms');
   const readyBtn = $<HTMLButtonElement>('net-ready');
   const statusEl = $<HTMLDivElement>('net-status');
+  const nameRow = $<HTMLLabelElement>('net-name-row');
+  const ratedRow = $<HTMLLabelElement>('net-rated-row');
+  const ratedBox = $<HTMLInputElement>('net-rated');
+  $<HTMLButtonElement>('net-account').onclick = (): void => nav.account();
+  $<HTMLButtonElement>('net-ladder').onclick = (): void => nav.leaderboard();
 
   const banner = document.createElement('div');
   banner.style.cssText =
@@ -174,8 +206,18 @@ export function bootNetplay(
   // --- persistent identity ------------------------------------------------------
   nameInput.value = localStorage.getItem(STORAGE_NAME) ?? 'player';
   let record = { wins: 0, losses: 0 };
+  /** Our account's rating; null while a guest. */
+  let rating: PlayerRating | null = null;
+  let selfName = '';
   const showSelf = (name: string): void => {
-    selfEl.textContent = `${name} — ${record.wins}W / ${record.losses}L`;
+    selfName = name;
+    const shown = rating ? ` ${ratingText(rating)}` : '';
+    selfEl.textContent = `${name}${shown} — ${record.wins}W / ${record.losses}L`;
+  };
+  /** Accounts play under their handle and may create rated rooms; guests pick a name. */
+  const showIdentityControls = (): void => {
+    nameRow.hidden = rating !== null;
+    ratedRow.hidden = rating === null;
   };
   nameInput.onchange = (): void => {
     const name = nameInput.value.trim() || 'player';
@@ -214,6 +256,10 @@ export function bootNetplay(
   let roomCode = '';
   /** True when the room we just created seats a bot (so a single Ready starts it). */
   let createdVsAi = false;
+  /** Whether the room we're in (or watching) is rated, from the room list. */
+  let roomRated = false;
+  /** The banner holds a countdown-time message (whether it counts, a rating change): clear it at GO. */
+  let clearBannerAtGo = false;
   let resultSent = false;
   /** We've asked for a rematch this game and are waiting on the opponent. */
   let rematchSent = false;
@@ -284,7 +330,7 @@ export function bootNetplay(
     setStatus(`connecting to ${relayUrl}…`);
     client.connect(relayUrl).then(
       () => {
-        const token = localStorage.getItem(STORAGE_TOKEN);
+        const token = accountState.token;
         client.send({
           type: 'hello',
           protocolVersion: PROTOCOL_VERSION,
@@ -334,9 +380,11 @@ export function bootNetplay(
   function handleMessage(msg: ServerMessage): void {
     switch (msg.type) {
       case 'welcome':
-        localStorage.setItem(STORAGE_TOKEN, msg.token);
+        if (accountState.welcomed(msg.token, msg.rating !== null)) checkSession();
         record = msg.record;
+        rating = msg.rating;
         showSelf(msg.name);
+        showIdentityControls();
         if (phase === 'connecting') {
           phase = 'lobby';
           setStatus('connected');
@@ -348,6 +396,7 @@ export function bootNetplay(
       case 'room_created':
         phase = 'room';
         roomCode = msg.code;
+        roomRated = false; // until the room list says otherwise
         if (createdVsAi) {
           // A vs-AI room is already full (human + bot): Ready starts it now.
           readyBtn.hidden = false;
@@ -387,6 +436,11 @@ export function bootNetplay(
         break;
       case 'match_start':
         startMatch(msg);
+        // Until GO: whether this game counts.
+        if (msg.rated || roomRated) {
+          showBanner(msg.rated ? RATED_NOTE : CASUAL_NOTE);
+          clearBannerAtGo = true;
+        }
         break;
       case 'match_resume':
         resumeMatch(msg);
@@ -440,9 +494,62 @@ export function bootNetplay(
         }
         onMatchEnd(msg.reason, msg.winner);
         break;
-      case 'error':
-        setStatus(`${msg.code}: ${msg.message}`);
+      case 'rating_update':
+        onRatingUpdate(msg);
         break;
+      case 'error':
+        setStatus(
+          msg.code === 'account_required'
+            ? 'Rated rooms are for accounts: open Account to create one or log in.'
+            : `${msg.code}: ${msg.message}`,
+        );
+        break;
+    }
+  }
+
+  /**
+   * The relay met our session as a guest. Ask the account API whether it has
+   * ended; only then is this browser a guest again (the relay may just not
+   * know accounts: a dev relay, say).
+   */
+  function checkSession(): void {
+    const session = accountState.session;
+    const origin = apiOriginFor(relayUrl);
+    if (session === null || origin === null) return;
+    new AccountClient(origin).me(session).then(
+      () => setStatus("This relay doesn't know your account: you're playing as a guest here."),
+      (err: unknown) => {
+        if (!(err instanceof AccountError) || err.code !== 'unauthorized') return;
+        accountState.loggedOut();
+        setStatus("Your session has ended: you're playing as a guest. Log in from Account.");
+      },
+    );
+  }
+
+  /**
+   * A rated game's rating changes: ours, or both for a watcher. In the banner
+   * over the boards, or the lobby's status line when the lobby is up (the
+   * update may land after we've left the room).
+   */
+  function onRatingUpdate(msg: RatingUpdateMessage): void {
+    // Handles are unique, so our handle finds our side.
+    const mine = rating === null ? -1 : msg.players.indexOf(selfName);
+    let text: string;
+    if (mine >= 0) {
+      rating = msg.ratings[mine]!.after;
+      showSelf(selfName);
+      text = `Rating ${ratingChangeText(msg.ratings[mine]!)}`;
+    } else {
+      text = msg.players
+        .map((name, i) => `${name} ${ratingChangeText(msg.ratings[i]!)}`)
+        .join(' · ');
+    }
+    if (overlay.style.display !== 'none') {
+      setStatus(text);
+    } else {
+      showBanner(text);
+      // Landed over a rematch's countdown: gone at GO with the rest.
+      if (metaTicks < COUNTDOWN_GATE_TICKS) clearBannerAtGo = true;
     }
   }
 
@@ -456,19 +563,29 @@ export function bootNetplay(
       return;
     }
     for (const room of rooms) {
+      if (room.code === roomCode) roomRated = room.rated;
       const row = document.createElement('button');
       row.style.cssText =
         'display:flex;justify-content:space-between;gap:8px;padding:6px 10px;text-align:left';
-      const who = room.players
-        .map((p) => `${p.name} (${p.record.wins}W/${p.record.losses}L)`)
-        .join(' vs ');
+      const who = room.players.map((p) => lobbyPlayerText(p.name, p.record, p.rating)).join(' vs ');
       const label = document.createElement('span');
+      label.dir = 'auto';
       const watchers = room.spectators.length ? ` · 👁${room.spectators.length}` : '';
-      label.textContent = `${room.code} · ${who || 'empty'}${watchers}`;
+      const rated = room.rated ? ' · rated' : '';
+      label.textContent = `${room.code}${rated} · ${who || 'empty'}${watchers}`;
       const state = document.createElement('span');
       state.style.opacity = '.6';
-      const joinable = room.state === 'waiting' && room.players.length < 2;
-      state.textContent = room.state === 'playing' ? 'playing' : joinable ? 'join' : 'full';
+      // A guest can watch a rated room but not sit in it.
+      const seatable = !room.rated || rating !== null;
+      const joinable = room.state === 'waiting' && room.players.length < 2 && seatable;
+      state.textContent =
+        room.state === 'playing'
+          ? 'playing'
+          : joinable
+            ? 'join'
+            : room.players.length < 2
+              ? 'accounts only'
+              : 'full';
       row.append(label, state);
       row.disabled = !joinable || phase !== 'lobby';
       row.onclick = (): void => net?.send({ type: 'join_room', code: room.code });
@@ -502,7 +619,8 @@ export function bootNetplay(
   readyBtn.onclick = sendReady;
   createBtn.onclick = (): void => {
     createdVsAi = false;
-    net?.send({ type: 'create_room' });
+    const rated = rating !== null && ratedBox.checked;
+    net?.send({ type: 'create_room', ...(rated ? { rated } : {}) });
   };
   createAiBtn.onclick = (): void => {
     void pickAiDifficulty().then((difficulty) => {
@@ -976,6 +1094,10 @@ export function bootNetplay(
         if (!gameMusicOn && metaTicks >= COUNTDOWN_GATE_TICKS) {
           gameMusicOn = true;
           audio.playGame();
+          if (clearBannerAtGo) {
+            clearBannerAtGo = false;
+            showBanner('');
+          }
         }
 
         if (!gateActive) {

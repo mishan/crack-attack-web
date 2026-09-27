@@ -734,6 +734,27 @@ A generator header that a real, non-AI tool always writes (e.g. a lockfile's own
   connected; `sessionsEnded` closes connections whose account sessions the
   `AccountService` ended. Not yet: keeping
   notable games' inputs past a week (the plan's "notable" is undefined).
+  **Phase 5 landed** (client): `account/accountApi.ts` (account and ladder
+  API, shape-checked; `apiOriginFor` now also backs `scoreboardUrlFor`),
+  `account/accountState.ts` (the lobby token is a guest's or the session;
+  the handle beside it while logged in; a guest's token kept aside through a
+  log in and restored on log out; a guest `welcome` means the session ended),
+  and the pure `view/rating.ts`. `account.ts` is the account screen (lazy,
+  `?account`): register, the Save key form (`autocomplete` username +
+  `new-password`, key restored if the browser's suggestion replaced it),
+  log in (`current-password`), rename, replace key, log out, delete (needs the
+  key). `leaderboard.ts` (lazy, `?ladder[=handle]`): the ladder and player
+  pages. The lobby shows ratings, has Account and Leaderboard buttons, a
+  Rated box for accounts (on by default), marks rated rooms (guests may watch
+  only), notes whether a game counts over the countdown, and shows the
+  `rating_update` change in the banner. Checked end to end in Chrome;
+  the password-manager matrix (Safari, Firefox, 1Password, Bitwarden, iOS and
+  Android autofill) is still to run by hand. Review fixes: Replace key is a
+  form taking the current key; Delete sends the session; a guest `welcome`
+  for a logged-in browser asks `/me` before dropping the session (and then
+  restores the guest set aside); rating changes go to the lobby's status line
+  when the lobby is up, and countdown-time banners clear at GO; Back and Esc
+  hold while registering and ask twice before leaving an unsaved key.
 - [ ] Phase 6 stretch (X-mode, replays, WebRTC, binary codec if
       measurements demand it)
 

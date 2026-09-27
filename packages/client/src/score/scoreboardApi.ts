@@ -20,6 +20,7 @@ import {
   type SoloSubmitResponse,
   type SoloTicketResponse,
 } from '@crack-attack/protocol';
+import { apiOriginFor } from '../account/accountApi.js';
 
 /** A request slower than this counts as a network failure. */
 const REQUEST_TIMEOUT_MS = 10_000;
@@ -30,16 +31,8 @@ const REQUEST_TIMEOUT_MS = 10_000;
  * `https://example.com/api/solo`. Null if the relay URL is unusable.
  */
 export function scoreboardUrlFor(relayUrl: string): string | null {
-  let url: URL;
-  try {
-    url = new URL(relayUrl);
-  } catch {
-    return null;
-  }
-  if (url.protocol === 'wss:') url.protocol = 'https:';
-  else if (url.protocol === 'ws:') url.protocol = 'http:';
-  else if (url.protocol !== 'https:' && url.protocol !== 'http:') return null;
-  return `${url.origin}${SOLO_API_PREFIX}`;
+  const origin = apiOriginFor(relayUrl);
+  return origin === null ? null : `${origin}${SOLO_API_PREFIX}`;
 }
 
 /** Why a request failed: the server's error code, or a client-side failure. */

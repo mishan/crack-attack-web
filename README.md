@@ -119,6 +119,9 @@ Append these to the client URL (e.g. `http://localhost:5173/?net`):
 - `?solo` — skip attract mode and boot straight into solo play.
 - `?net` — boot straight into netplay instead.
 - `?scores` — open the online high-score boards.
+- `?account` — open the account screen (create an account, log in, and so on).
+- `?ladder` — open the rated leaderboard; `?ladder=<handle>` opens a player's
+  page.
 - `?demo` — boot straight into the AI-vs-AI demo with its viewer controls
   (hard vs hard); `?demo=easy,hard` picks the left and right bots. Handy as a
   showcase link.
@@ -251,7 +254,17 @@ recover a lost one. Logging in trades the key for a session, sent as
 `Authorization: Bearer <session>`; sessions are stored hashed too, and last a
 year from their last use. The same session logs into the lobby: `hello`
 takes it in place of a guest token, and the account plays under its handle.
-The client doesn't use accounts yet.
+
+In the client, **Account** in the lobby opens the account screen. The key is
+shown in a real login form (the handle as the username, the key as the
+password), so a password manager offers to save it when **Save key** is
+pressed, and fills both fields back in to log in; Copy, Download and Show
+cover players without one. If the browser's own suggested password replaces
+the key in that field, the form puts the key back and asks again. Logging in
+from a guest session keeps the guest's token aside, and logging out returns to
+it. If a relay meets the session as a guest, the client asks the account API
+whether it has ended before dropping it: a relay without accounts (a dev
+relay, say) doesn't log anyone out.
 
 | Route                        | What it does                                                                       |
 | ---------------------------- | ---------------------------------------------------------------------------------- |
