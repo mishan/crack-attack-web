@@ -30,6 +30,7 @@ import {
   type AccountRegisterResponse,
   type AccountResponse,
   type AccountSessionResponse,
+  type PlayerRating,
 } from '@crack-attack/protocol';
 import { createHash, randomBytes, randomInt } from 'node:crypto';
 import type { AccountStore, StoredAccount } from './accountStore.js';
@@ -62,8 +63,18 @@ const PRUNE_EVERY_MS = 60 * 60 * 1000;
 /** A shared limit turning requests away is logged at most this often. */
 const SHARED_LIMIT_LOG_EVERY_MS = 10 * 60 * 1000;
 
+/**
+ * Sessions the service has ended: one (a log out), or all of an account's
+ * but `except` (a new key: every other session; a deleted account: null).
+ */
+export type SessionsEnded =
+  | { kind: 'session'; sessionHash: string }
+  | { kind: 'account'; accountId: number; except: string | null };
+
 export interface AccountServiceOptions {
   store: AccountStore;
+  /** Told when sessions end, so live connections made with them can go too (the relay's). */
+  onSessionsEnded?: ((ended: SessionsEnded) => void) | undefined;
   /** Wall clock in epoch ms. Inject for tests. */
   now?: (() => number) | undefined;
   /** Key source; defaults to eight CSPRNG-picked words. Inject for tests. */
@@ -92,12 +103,16 @@ export function secretHash(secret: string): string {
   return createHash('sha256').update(secret, 'utf8').digest('hex');
 }
 
+/** A rating as shown: rounded, and provisional while its deviation is above {@link PROVISIONAL_RD}. */
+export function shownRating(r: { rating: number; rd: number }): PlayerRating {
+  return { rating: Math.round(r.rating), provisional: r.rd > PROVISIONAL_RD };
+}
+
 /** An account as its owner sees it. */
 export function accountInfo(account: StoredAccount): AccountInfo {
   return {
     handle: account.handle,
-    rating: Math.round(account.rating),
-    provisional: account.rd > PROVISIONAL_RD,
+    ...shownRating(account),
     wins: account.wins,
     losses: account.losses,
     draws: account.draws,
@@ -121,6 +136,7 @@ export class AccountService {
   /** Requests each shared limit has refused since it was last logged. */
   private readonly sharedRefusals = new Map<string, { count: number; loggedAt: number }>();
   private lastPrune = -Infinity;
+  private readonly onSessionsEnded: (ended: SessionsEnded) => void;
 
   constructor(options: AccountServiceOptions) {
     this.store = options.store;
@@ -129,6 +145,7 @@ export class AccountService {
     this.newSession =
       options.newSession ?? (() => randomBytes(SESSION_TOKEN_LENGTH / 2).toString('hex'));
     this.log = options.log ?? ((line) => console.warn(line));
+    this.onSessionsEnded = options.onSessionsEnded ?? (() => undefined);
     this.registerLimit = new TieredLimit(
       [
         options.registerLimit ?? DEFAULT_REGISTER_LIMIT,
@@ -226,13 +243,16 @@ export class AccountService {
     if (current.id !== account.id) throw otherAccountsKey();
     const key = this.newKey();
     await this.store.replaceKey(account.id, secretHash(key), sessionHash);
+    this.onSessionsEnded({ kind: 'account', accountId: account.id, except: sessionHash });
     return { key };
   }
 
   /** End the session, if it exists. */
   async logout(client: string, authorization: string | undefined): Promise<Record<string, never>> {
     take(this.sessionLimiter, client);
-    await this.store.endSession(secretHash(bearer(authorization)));
+    const sessionHash = secretHash(bearer(authorization));
+    await this.store.endSession(sessionHash);
+    this.onSessionsEnded({ kind: 'session', sessionHash });
     return {};
   }
 
@@ -253,6 +273,7 @@ export class AccountService {
     const account = await this.byKey(decode(() => decodeAccountKeyRequest(body)).key);
     if (own && own.id !== account.id) throw otherAccountsKey();
     await this.store.deleteAccount(account.id);
+    this.onSessionsEnded({ kind: 'account', accountId: account.id, except: null });
     return {};
   }
 

@@ -709,8 +709,31 @@ A generator header that a real, non-AI tool always writes (e.g. a lockfile's own
   `httpApi.ts`; admin gained `account`, `rename`, `hide-account`,
   `unhide-account`, `reset-rating`. Beyond the plan's API table: `GET /me`
   (the client needs it after a reload) and `POST /handle` (the plan's 30-day
-  rename). The relay doesn't read sessions yet: `hello` with one is an
-  unknown token until phase 4.
+  rename). **Phase 4 landed** (server, protocol v5): rated rooms. `hello`
+  resolves a guest token, then an account session (`AccountStore.useSession`);
+  the relay's `Identity` keys records by guest token or `accountKey(id)`, so
+  `LobbyStore.recordResult` counts casual games for accounts too. Rated rooms
+  are accounts-only; `match_start`/`match_resume`/`spectate_start` say whether
+  a game counts (under `RATED_GAMES_PER_PAIR_PER_DAY`, checked at start).
+  Every played-out rated game is re-simulated (phase 2's machinery, now
+  `settle`), agreeing reports or not; concessions and forfeits are rated at
+  once (`rateNow`); a rematch that cuts a rated game short settles it as far
+  as it went. `glicko.ts` is Glicko-2 (one period per game, RD grown per day
+  idle; pinned to the paper's worked example). Rated games apply one at a
+  time (`ratingChain`), log to `rated_games` (migration 3, with both seats'
+  inputs change-encoded, dropped after a week), and send `rating_update` to
+  both accounts' sessions and the room's spectators. `ratings.ts` serves
+  `/api/rating/leaderboard` and `/api/rating/player/:handle`. Handles are
+  capped at 32 UTF-16 units so they fit a lobby name. Review fixes: a leave
+  or grace expiry is a forfeit settled by replay (`claim.kind: 'forfeit'`),
+  so a finished game keeps its result; a per-room watchdog settles a game
+  with one result unanswered, or forfeits whoever stalled lockstep, after
+  `stallMs`; one seat per account (`busyElsewhere`); rated games in progress
+  count toward the cap (`ratedInFlight`, released once per settlement);
+  concession only once play has begun; a rematch needs every human seat
+  connected; `sessionsEnded` closes connections whose account sessions the
+  `AccountService` ended. Not yet: keeping
+  notable games' inputs past a week (the plan's "notable" is undefined).
 - [ ] Phase 6 stretch (X-mode, replays, WebRTC, binary codec if
       measurements demand it)
 

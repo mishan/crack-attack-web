@@ -16,6 +16,8 @@
 import { existsSync } from 'node:fs';
 import { AccountService } from './accounts.js';
 import { ADMIN_USAGE, runAdmin } from './admin.js';
+import { RatingService } from './ratings.js';
+import type { RelayServer } from './relay.js';
 import { createScoreboardApi } from './httpApi.js';
 import { SoloScoreboard } from './scoreboard.js';
 import { SqliteStore } from './sqliteStore.js';
@@ -107,18 +109,28 @@ const store = new SqliteStore(dbPath);
 // re-simulate one game at a time.
 const verifier = new Verifier();
 const scoreboard = new SoloScoreboard({ store, verifier });
+// Ending a session (log out, a new key, a deleted account) closes the lobby
+// connections made with it; the relay exists only once the server starts.
+let relay: RelayServer | null = null;
+const accounts = new AccountService({
+  store,
+  onSessionsEnded: (ended) => relay?.sessionsEnded(ended),
+});
 const server = await startRelayWsServer({
   port,
   host,
   store,
+  accounts: store,
   verifier,
   http: createScoreboardApi(scoreboard, {
     trustProxy,
     corsOrigin,
     publicUrl,
-    accounts: new AccountService({ store }),
+    accounts,
+    ratings: new RatingService({ store }),
   }),
 });
+relay = server.relay;
 console.log(`crack-attack relay listening on :${server.port} (db: ${dbPath})`);
 const statsInterval = /^\d+$/.test(process.env['STATS_INTERVAL_MS'] ?? '')
   ? Number(process.env['STATS_INTERVAL_MS'])

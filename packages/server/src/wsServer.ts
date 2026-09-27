@@ -91,6 +91,8 @@ export function startRelayWsServer(options: RelayWsServerOptions = {}): Promise<
     now: options.now,
     verifier: options.verifier,
     log: options.log,
+    accounts: options.accounts,
+    wallClock: options.wallClock,
   });
   const server = createServer(options.http ?? notFound);
   const wss = new WebSocketServer({ server, maxPayload: MAX_CLIENT_MESSAGE_BYTES });

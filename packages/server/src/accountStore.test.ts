@@ -7,8 +7,11 @@ import { describe, expect, it } from 'vitest';
 import {
   MemoryAccountStore,
   START_RATING,
+  accountIdOf,
+  accountKey,
   type AccountStore,
   type NewAccount,
+  type NewRatedGame,
 } from './accountStore.js';
 import { SqliteStore } from './sqliteStore.js';
 import type { LobbyStore } from './store.js';
@@ -23,6 +26,24 @@ const newAccount = (n: number, over: Partial<NewAccount> = {}): NewAccount => ({
   keyHash: hash(`k${n}`),
   sessionHash: hash(`s${n}`),
   createdAt: T0,
+  ...over,
+});
+
+/** A rated game between accounts 1 and 2 (seat 0 winning), at `createdAt`. */
+const game = (over: Partial<NewRatedGame> = {}): NewRatedGame => ({
+  accountA: 1,
+  accountB: 2,
+  result: 'a',
+  end: 'result',
+  ticks: 2409,
+  seed: 42,
+  simVersion: 1,
+  aBefore: { rating: 1500, rd: 350 },
+  bBefore: { rating: 1500, rd: 350 },
+  aAfter: { rating: 1662, rd: 290, volatility: 0.06 },
+  bAfter: { rating: 1338, rd: 290, volatility: 0.06 },
+  createdAt: T0,
+  inputs: '{}',
   ...over,
 });
 
@@ -150,6 +171,107 @@ function conformance(name: string, make: () => AccountStore & LobbyStore): void 
       expect(await store.accountByKey(hash('k1'))).toBeNull();
       expect(await store.useSession(hash('s1'), T0, 0)).toBeNull();
       expect(await store.createAccount(newAccount(1))).not.toBeNull();
+      await store.close();
+    });
+
+    it('records casual games for accounts by their key, beside guests', async () => {
+      const store = make();
+      const { id } = (await store.createAccount(newAccount(1)))!;
+      const guest = await store.createPlayer('a'.repeat(32), 'guest');
+      await store.recordResult(accountKey(id), guest.token);
+      await store.recordResult(guest.token, accountKey(id));
+      await store.recordResult(accountKey(id), accountKey(999)); // unknown: ignored
+      expect(await store.accountById(id)).toMatchObject({ wins: 2, losses: 1, draws: 0 });
+      expect((await store.getPlayer(guest.token, 'guest'))?.record).toEqual({ wins: 1, losses: 1 });
+      expect(accountIdOf(accountKey(id))).toBe(id);
+      expect(accountIdOf(guest.token)).toBeNull();
+      await store.close();
+    });
+
+    it('logs a rated game and applies it to both accounts', async () => {
+      const store = make();
+      await store.createAccount(newAccount(1));
+      await store.createAccount(newAccount(2));
+      const id = await store.recordRatedGame(game());
+      expect(await store.accountById(1)).toMatchObject({
+        rating: 1662,
+        rd: 290,
+        ratedAt: T0,
+        wins: 1,
+        losses: 0,
+      });
+      expect(await store.accountById(2)).toMatchObject({ rating: 1338, wins: 0, losses: 1 });
+      await store.recordRatedGame(game({ result: 'draw', createdAt: T0 + 1 }));
+      expect(await store.accountById(2)).toMatchObject({ draws: 1, ratedAt: T0 + 1 });
+
+      const games = await store.ratedGames(2, 10);
+      expect(games.map((g) => g.id)).toEqual([id + 1, id]);
+      expect(games[1]).toEqual({
+        id,
+        accountA: 1,
+        accountB: 2,
+        handleA: 'Player1',
+        handleB: 'Player2',
+        result: 'a',
+        end: 'result',
+        ticks: 2409,
+        aBefore: { rating: 1500, rd: 350 },
+        aAfter: { rating: 1662, rd: 290 },
+        bBefore: { rating: 1500, rd: 350 },
+        bAfter: { rating: 1338, rd: 290 },
+        createdAt: T0,
+      });
+      expect(await store.ratedGames(2, 1)).toHaveLength(1);
+      // A deleted opponent shows as null; the game stays.
+      await store.deleteAccount(1);
+      expect((await store.ratedGames(2, 10))[0]?.handleA).toBeNull();
+      await store.close();
+    });
+
+    it("counts a pair's rated games in either seat order since a time", async () => {
+      const store = make();
+      await store.recordRatedGame(game({ createdAt: T0 - 1 }));
+      await store.recordRatedGame(game());
+      await store.recordRatedGame(game({ accountA: 2, accountB: 1, createdAt: T0 + 5 }));
+      await store.recordRatedGame(game({ accountB: 3 }));
+      expect(await store.countRatedGames(1, 2, T0)).toBe(2);
+      expect(await store.countRatedGames(2, 1, T0)).toBe(2);
+      expect(await store.countRatedGames(1, 2, 0)).toBe(3);
+      expect(await store.countRatedGames(2, 3, 0)).toBe(0);
+      await store.close();
+    });
+
+    it('lists settled, active, visible accounts on the leaderboard, best first', async () => {
+      const store = make();
+      for (let n = 1; n <= 5; n++) await store.createAccount(newAccount(n));
+      const settle = (id: number, rating: number, rd: number, at: number) =>
+        store.recordRatedGame(
+          game({
+            accountA: id,
+            accountB: 99,
+            aAfter: { rating, rd, volatility: 0.06 },
+            createdAt: at,
+          }),
+        );
+      await settle(1, 1600, 80, T0);
+      await settle(2, 1700, 80, T0);
+      await settle(3, 1800, 200, T0); // provisional
+      await settle(4, 1900, 80, T0 - 40 * DAY); // inactive
+      await settle(5, 2000, 80, T0);
+      await store.setAccountHidden(5, true);
+      const board = await store.leaderboard(T0 - 30 * DAY, 110, 10);
+      expect(board.map((a) => a.handle)).toEqual(['Player2', 'Player1']);
+      expect(await store.leaderboard(T0 - 30 * DAY, 110, 1)).toHaveLength(1);
+      await store.close();
+    });
+
+    it('drops old rated games inputs', async () => {
+      const store = make();
+      await store.recordRatedGame(game({ createdAt: T0 }));
+      await store.recordRatedGame(game({ createdAt: T0 + DAY }));
+      await store.recordRatedGame(game({ createdAt: T0, inputs: null }));
+      expect(await store.dropGameInputs(T0 + 1)).toBe(1);
+      expect(await store.dropGameInputs(T0 + 1)).toBe(0);
       await store.close();
     });
 

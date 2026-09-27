@@ -18,17 +18,25 @@
  * players' results disagree, or their digests do, it re-simulates the match
  * from the seed and both ledgers on the {@link Verifier}'s queue and records
  * what actually happened, so a loser can't erase a loss by reporting a win or
- * forging a digest (see {@link RelayServer.settleDispute}).
+ * forging a digest (see {@link RelayServer.settle}).
+ *
+ * Rated rooms (protocol v5) are for accounts: a `hello` may carry an
+ * account's session. A rated game is rated only once the relay has decided
+ * it: by re-simulating it when it's played out (whatever the reports say), or
+ * directly for a concession or a forfeit. Ratings are Glicko-2
+ * (`glicko.ts`), and every rated game is logged with both players' inputs.
  *
  * Original work Copyright (C) 2000 Daniel Nelson. GPL-2.0-or-later.
  */
 
-import { GC_STEPS_PER_SECOND } from '@crack-attack/core';
+import { GC_STEPS_PER_SECOND, SIM_VERSION } from '@crack-attack/core';
 import {
   DEFAULT_INPUT_DELAY_TICKS,
   DEFAULT_RECONNECT_GRACE_MS,
   MAX_MATCH_FRAMES,
   PROTOCOL_VERSION,
+  RATED_GAMES_PER_PAIR_PER_DAY,
+  SESSION_TTL_MS,
   ROOM_CODE_ALPHABET,
   ROOM_CODE_LENGTH,
   SESSION_TOKEN_LENGTH,
@@ -41,11 +49,18 @@ import {
   type ErrorCode,
   type HelloMessage,
   type MatchEndReason,
+  type PlayerRating,
+  type PlayerRecord,
+  type RatedGameEnd,
+  type RatingChange,
   type RoomSummary,
   type ServerMessage,
 } from '@crack-attack/protocol';
 import { randomBytes } from 'node:crypto';
-import { MemoryStore, type LobbyStore, type StoredPlayer } from './store.js';
+import { accountKey, type AccountStore, type StoredAccount } from './accountStore.js';
+import { secretHash, shownRating, type SessionsEnded } from './accounts.js';
+import { rateGame } from './glicko.js';
+import { MemoryStore, type LobbyStore } from './store.js';
 import { Verifier } from './verifier.js';
 
 /** Transport surface the relay needs from a connection. */
@@ -76,6 +91,29 @@ const MAX_PENDING_DIGESTS = 128;
  */
 export const MAX_INPUT_LEAD_TICKS = 2 * GC_STEPS_PER_SECOND;
 
+/** How often a playing room is checked for a stalled game or a withheld result. */
+const WATCHDOG_EVERY_MS = 5000;
+
+/** How long a rated game keeps its inputs in the log. */
+export const RATED_INPUTS_KEPT_MS = 7 * 24 * 60 * 60 * 1000;
+/** Old rated games' inputs are dropped at most this often (after a rated game). */
+const INPUT_SWEEP_EVERY_MS = 60 * 60 * 1000;
+const MS_PER_DAY = 24 * 60 * 60 * 1000;
+
+/**
+ * Who a connection plays as: a guest (keyed by its token) or an account
+ * (keyed by {@link accountKey}, whatever session it logged in with).
+ */
+interface Identity {
+  /** The token `hello` carried (or was given): a guest's, or an account's session. */
+  token: string;
+  /** Whose record a game counts for. */
+  key: string;
+  name: string;
+  record: PlayerRecord;
+  account: { id: number; rating: PlayerRating } | null;
+}
+
 /**
  * A player's place in a room. Unlike a connection, a seat survives a
  * mid-match disconnect (reconnect grace): it keeps the identity, the full
@@ -85,8 +123,13 @@ interface Seat {
   /** Live connection, or null while the player is dropped (grace running). */
   conn: ClientConnection | null;
   token: string;
+  /** The identity's record key (see {@link Identity}). */
+  key: string;
   name: string;
   record: { wins: number; losses: number };
+  /** The account's rating, shown in the room list; null for a guest or bot. */
+  rating: PlayerRating | null;
+  account_id: number | null;
   ready: boolean;
   /** Index in the current match (0/1), pinned at match_start. */
   match_index: number;
@@ -100,6 +143,9 @@ interface Seat {
   digests: Map<number, [number, number]>;
   /** Reported game result (player index or null = draw), awaiting the peer's. */
   reported_result: number | null | undefined;
+  /** `now()` when the result was reported, or when the seat last sent inputs. */
+  reported_at: number;
+  progress_at: number;
   /**
    * Set iff this is a bot seat (no connection, no token). The bot plays a
    * deterministic sim every client computes locally, so the relay only records
@@ -118,6 +164,12 @@ interface Room {
    */
   spectators: Session[];
   state: 'waiting' | 'playing';
+  /** Created rated: only accounts may sit. */
+  rated: boolean;
+  /** Whether the current (or last) match counts: a rated room, under the pair's daily cap. */
+  match_rated: boolean;
+  /** A rated start is checking the pair's cap: don't start twice. */
+  starting: boolean;
   /** Seed of the current match (kept for `match_resume`). */
   seed: number;
   /** `now()` at the current match's start: the input-pacing baseline. */
@@ -130,31 +182,43 @@ interface Room {
   digest_floor: number;
   /** Pending grace expiry, when a seat is dropped. */
   grace_timer: ReturnType<typeof setTimeout> | null;
+  /** While playing: the check for a stalled game or a withheld result. */
+  watchdog: ReturnType<typeof setTimeout> | null;
 }
 
 /**
- * A disputed game, copied out of its room before the match ends: enough to
+ * A game to settle, copied out of its room before the match ends: enough to
  * re-simulate it and to credit the result to the players, wherever they are by
  * the time the verdict lands. Arrays are by match index.
  */
-interface Dispute {
+interface Settlement {
   code: string;
   seed: number;
   ledgers: [number[], number[]];
-  tokens: [string, string];
+  keys: [string, string];
+  names: [string, string];
+  /** Set iff the game is rated: both seats' accounts. */
+  accounts: [number, number] | null;
   /**
-   * What each seat claimed: the winner each reported, or the digests each
-   * submitted for `tick`.
+   * What each seat claimed: the winner each reported (undefined if it
+   * reported none), or the digests each submitted for `tick`.
    */
   claim:
-    | { kind: 'result'; winners: [number | null, number | null] }
-    | { kind: 'digest'; tick: number; digests: [[number, number], [number, number]] };
+    | { kind: 'result'; winners: [number | null | undefined, number | null | undefined] }
+    | { kind: 'digest'; tick: number; digests: [[number, number], [number, number]] }
+    /** A seat left, ran out its grace, or stalled: it loses unless the game had ended. */
+    | { kind: 'forfeit'; leaver: number };
+  /**
+   * For a rated game: frees its place in the pair's count of rated games in
+   * progress, once it's been rated or found unratable. Called once.
+   */
+  release: (() => void) | null;
 }
 
 /** A live, helloed connection: identity plus (optionally) a seat or a watch. */
 interface Session {
   conn: ClientConnection;
-  identity: StoredPlayer;
+  identity: Identity;
   room: Room | null;
   seat: Seat | null;
   /** Room this session is spectating (mutually exclusive with a seat). */
@@ -205,6 +269,16 @@ export interface RelayServerOptions {
   verifier?: Verifier | undefined;
   /** Where dispute verdicts are logged; defaults to `console.warn`. */
   log?: ((line: string) => void) | undefined;
+  /** Accounts and the rated-game log; without it, `hello` knows guests only and nothing is rated. */
+  accounts?: AccountStore | undefined;
+  /** Wall clock in epoch ms (sessions, ratings, the pair cap's day). Inject for tests. */
+  wallClock?: (() => number) | undefined;
+  /**
+   * How long a game may go without progress (no inputs from either seat) or
+   * with one seat's result unanswered before the relay settles it itself.
+   * Defaults to the reconnect grace.
+   */
+  stallMs?: number | undefined;
 }
 
 /** Point-in-time counts for the relay's STATS probe (`stats.ts`). */
@@ -236,6 +310,16 @@ export class RelayServer {
   private readonly now: () => number;
   private readonly verifier: Verifier;
   private readonly log: (line: string) => void;
+  private readonly accounts: AccountStore | null;
+  private readonly wallClock: () => number;
+  private readonly stallMs: number;
+  /** Rated matches started but not yet written, by account pair: they count toward the cap. */
+  private readonly ratedInFlight = new Map<string, number>();
+  /** Rated games apply one at a time: each reads both ratings, then writes them. */
+  private ratingChain: Promise<void> = Promise.resolve();
+  /** Settlements waiting on a replay. */
+  private readonly settling = new Set<Promise<void>>();
+  private lastInputSweep = -Infinity;
 
   constructor(options: RelayServerOptions = {}) {
     this.entropy = options.entropy ?? cryptoEntropy;
@@ -245,6 +329,18 @@ export class RelayServer {
     this.now = options.now ?? (() => performance.now());
     this.verifier = options.verifier ?? new Verifier();
     this.log = options.log ?? ((line) => console.warn(line));
+    this.accounts = options.accounts ?? null;
+    this.wallClock = options.wallClock ?? Date.now;
+    this.stallMs = options.stallMs ?? this.graceMs;
+  }
+
+  /** Resolves once every game settled so far has been recorded (for tests). */
+  async idle(): Promise<void> {
+    for (;;) {
+      const chain = this.ratingChain;
+      await Promise.all([...this.settling, chain]);
+      if (this.settling.size === 0 && chain === this.ratingChain) return;
+    }
   }
 
   /** Number of open rooms (inspection/test helper). */
@@ -280,6 +376,27 @@ export class RelayServer {
     for (const room of this.rooms.values()) {
       if (room.grace_timer !== null) clearTimeout(room.grace_timer);
       room.grace_timer = null;
+      this.stopWatchdog(room);
+    }
+  }
+
+  /**
+   * Account sessions have ended (a log out, a new key, a deleted account):
+   * close their lobby connections, which were let in on them. A reconnect
+   * then comes back as a guest, or not at all.
+   */
+  sessionsEnded(ended: SessionsEnded): void {
+    for (const session of this.sessions.values()) {
+      const account = session?.identity.account;
+      if (!session || !account) continue;
+      const hash = secretHash(session.identity.token);
+      const gone =
+        ended.kind === 'session'
+          ? hash === ended.sessionHash
+          : account.id === ended.accountId && hash !== ended.except;
+      if (!gone) continue;
+      this.error(session.conn, 'bad_message', 'your session has ended; log in again');
+      session.conn.close();
     }
   }
 
@@ -338,7 +455,7 @@ export class RelayServer {
         this.error(conn, 'bad_message', 'already helloed');
         return;
       case 'create_room':
-        this.handleCreateRoom(session, msg.aiOpponent);
+        this.handleCreateRoom(session, msg.aiOpponent, msg.rated === true);
         return;
       case 'join_room':
         this.handleJoinRoom(session, msg.code);
@@ -347,7 +464,7 @@ export class RelayServer {
         this.handleSpectate(session, msg.code);
         return;
       case 'ready':
-        this.handleReady(session);
+        await this.handleReady(session);
         return;
       case 'inputs':
         this.handleInputs(session, msg.startTick, msg.frames);
@@ -394,6 +511,7 @@ export class RelayServer {
       token: identity.token,
       name: identity.name,
       record: identity.record,
+      rating: identity.account?.rating ?? null,
     });
     this.send(conn, { type: 'room_list', rooms: this.roomSummaries() });
 
@@ -402,14 +520,27 @@ export class RelayServer {
     if (room) this.resumeSeat(session, room);
   }
 
-  /** Token lookup with fallback to a freshly minted identity. */
-  private async resolveIdentity(msg: HelloMessage): Promise<StoredPlayer> {
+  /**
+   * Token lookup: a guest's token, then an account's session, with fallback to
+   * a freshly minted guest.
+   */
+  private async resolveIdentity(msg: HelloMessage): Promise<Identity> {
     if (msg.token !== undefined) {
-      const existing = await this.store.getPlayer(msg.token, msg.name);
-      if (existing) return existing;
+      const guest = await this.store.getPlayer(msg.token, msg.name);
+      if (guest) return { ...guest, key: guest.token, account: null };
+      if (this.accounts) {
+        const now = this.wallClock();
+        const account = await this.accounts.useSession(
+          secretHash(msg.token),
+          now,
+          now - SESSION_TTL_MS,
+        );
+        if (account) return accountIdentity(msg.token, account);
+      }
       // Unknown token (expired store, other server): mint fresh below.
     }
-    return this.store.createPlayer(this.generateToken(), msg.name);
+    const guest = await this.store.createPlayer(this.generateToken(), msg.name);
+    return { ...guest, key: guest.token, account: null };
   }
 
   // --- Reconnect grace -----------------------------------------------------------
@@ -429,16 +560,12 @@ export class RelayServer {
     if (room.grace_timer !== null) clearTimeout(room.grace_timer);
     room.grace_timer = setTimeout(() => {
       room.grace_timer = null;
-      // Nothing awaits a timer callback: an escaping rejection would be
-      // unhandled, which by default exits the whole relay.
-      this.expireGrace(room, seat).catch((err: unknown) => {
-        console.error(`relay: grace expiry failed (room ${room.code}):`, err);
-      });
+      this.expireGrace(room, seat);
     }, this.graceMs);
   }
 
   /** Grace ran out: the dropped seat forfeits and leaves the room. */
-  private async expireGrace(room: Room, seat: Seat): Promise<void> {
+  private expireGrace(room: Room, seat: Seat): void {
     this.dropped.delete(seat.token);
     removeItem(room.seats, seat);
 
@@ -448,13 +575,13 @@ export class RelayServer {
       this.broadcastRoomList();
       return;
     }
-    try {
-      await this.recordDecisive(peer.token, seat.token);
-    } catch (err) {
-      // A failed store write (e.g. SQLITE_BUSY) only costs the stats update;
-      // the survivor must still get the forfeit, or the room sticks in play.
-      console.error(`relay: failed to record grace-expiry forfeit (room ${room.code}):`, err);
-    }
+    // The dropped seat forfeits, unless the replay shows the game had already
+    // ended: then that result stands (a loser can't win by leaving the winner
+    // waiting for a result that never comes).
+    this.settle(
+      this.settlement(room, [seat, peer], { kind: 'forfeit', leaver: seat.match_index }),
+      'disconnect',
+    );
     this.endMatch(room, 'disconnect', peer.match_index);
     if (peer.conn) this.send(peer.conn, { type: 'peer_left', name: seat.name });
     for (const w of room.spectators) this.send(w.conn, { type: 'peer_left', name: seat.name });
@@ -492,6 +619,7 @@ export class RelayServer {
       inputDelay: this.inputDelay,
       players: this.matchNames(room),
       frames: histories,
+      rated: room.match_rated,
     });
     const peer = room.seats.find((s) => s !== seat);
     if (peer?.conn) this.send(peer.conn, { type: 'peer_rejoined', name: seat.name });
@@ -501,16 +629,22 @@ export class RelayServer {
   // --- Room flow ---------------------------------------------------------------
 
   private newSeat(session: Session): Seat {
+    const { identity } = session;
     return {
       conn: session.conn,
-      token: session.identity.token,
-      name: session.identity.name,
-      record: { ...session.identity.record },
+      token: identity.token,
+      key: identity.key,
+      name: identity.name,
+      record: { ...identity.record },
+      rating: identity.account ? { ...identity.account.rating } : null,
+      account_id: identity.account?.id ?? null,
       ready: false,
       match_index: 0,
       frames: [],
       digests: new Map(),
       reported_result: undefined,
+      reported_at: 0,
+      progress_at: 0,
     };
   }
 
@@ -519,13 +653,18 @@ export class RelayServer {
     return {
       conn: null,
       token: '',
+      key: '',
       name: `CPU (${difficulty})`,
       record: { wins: 0, losses: 0 },
+      rating: null,
+      account_id: null,
       ready: false,
       match_index: 1,
       frames: [],
       digests: new Map(),
       reported_result: undefined,
+      reported_at: 0,
+      progress_at: 0,
       ai: difficulty,
     };
   }
@@ -535,11 +674,24 @@ export class RelayServer {
     return room.seats.find((s) => s.ai !== undefined);
   }
 
-  private handleCreateRoom(session: Session, aiOpponent?: { difficulty: AiDifficulty }): void {
+  private handleCreateRoom(
+    session: Session,
+    aiOpponent: { difficulty: AiDifficulty } | undefined,
+    rated: boolean,
+  ): void {
     if (session.room || session.watching) {
       this.error(session.conn, 'bad_message', 'already in a room');
       return;
     }
+    if (rated && !session.identity.account) {
+      this.error(session.conn, 'account_required', 'log in to an account to play rated');
+      return;
+    }
+    if (rated && aiOpponent) {
+      this.error(session.conn, 'bad_message', 'a game against a bot is never rated');
+      return;
+    }
+    if (this.busyElsewhere(session)) return;
     const code = this.generateRoomCode();
     const seat = this.newSeat(session);
     // A vs-AI room is created full: the human plus a bot seat, so a single
@@ -550,10 +702,14 @@ export class RelayServer {
       seats,
       spectators: [],
       state: 'waiting',
+      rated,
+      match_rated: false,
+      starting: false,
       seed: 0,
       started_at: 0,
       digest_floor: -1,
       grace_timer: null,
+      watchdog: null,
     };
     this.rooms.set(code, room);
     session.room = room;
@@ -576,6 +732,15 @@ export class RelayServer {
       this.error(session.conn, 'room_full', `room ${code} is full`);
       return;
     }
+    if (room.rated && !session.identity.account) {
+      this.error(session.conn, 'account_required', 'log in to an account to play rated');
+      return;
+    }
+    if (room.rated && room.seats.some((s) => s.key === session.identity.key)) {
+      this.error(session.conn, 'bad_message', "a rated game can't be against yourself");
+      return;
+    }
+    if (this.busyElsewhere(session)) return;
     const seat = this.newSeat(session);
     room.seats.push(seat);
     session.room = room;
@@ -619,6 +784,7 @@ export class RelayServer {
         players: this.matchNames(room),
         frames: this.ledgers(room),
         ...(ai ? { aiOpponent: { difficulty: ai.ai!, index: ai.match_index } } : {}),
+        rated: room.match_rated,
       });
     }
     this.broadcastSpectators(room);
@@ -647,7 +813,25 @@ export class RelayServer {
   }
 
   /** Delete a room, telling any watchers it evaporated. */
+  /**
+   * An account may hold one seat at a time, whichever browsers it's logged in
+   * on: otherwise two accounts could play any number of rated games at once,
+   * each started under the day's cap. Says so, and true, if it already has one.
+   */
+  private busyElsewhere(session: Session): boolean {
+    if (!session.identity.account) return false;
+    const key = session.identity.key;
+    for (const room of this.rooms.values()) {
+      if (room.seats.some((s) => s.key === key)) {
+        this.error(session.conn, 'bad_message', "you're already in a room on another connection");
+        return true;
+      }
+    }
+    return false;
+  }
+
   private closeRoom(room: Room): void {
+    this.stopWatchdog(room);
     for (const w of room.spectators) {
       w.watching = null;
       this.send(w.conn, { type: 'room_closed' });
@@ -661,7 +845,7 @@ export class RelayServer {
    * is `playing` it means "this game is over on my screen, ready for a rematch".
    * When both players are ready, a fresh seed starts the next game.
    */
-  private handleReady(session: Session): void {
+  private async handleReady(session: Session): Promise<void> {
     const room = session.room;
     const seat = session.seat;
     if (!room || !seat) {
@@ -670,13 +854,63 @@ export class RelayServer {
     }
     seat.ready = true;
     // A bot seat is always ready; the match starts once every human is.
-    if (room.seats.length === 2 && room.seats.every((s) => s.ai !== undefined || s.ready)) {
-      this.startMatch(room);
+    // A dropped seat (its grace running) isn't ready for anything: a game
+    // started without it would be forfeited by its old grace timer.
+    const allReady = (): boolean =>
+      room.seats.length === 2 &&
+      room.seats.every((s) => s.ai !== undefined || (s.ready && s.conn !== null));
+    if (!allReady() || room.starting) return;
+    let rated = false;
+    if (room.rated) {
+      const [a, b] = room.seats as [Seat, Seat];
+      room.starting = true;
+      try {
+        rated = await this.underPairCap(a, b);
+      } finally {
+        room.starting = false;
+      }
+      // The room may have changed while the store was asked; the answer is
+      // only good for the pair it was about.
+      const same = room.seats[0] === a && room.seats[1] === b;
+      if (this.rooms.get(room.code) !== room || !same || !allReady()) return;
+    }
+    this.startMatch(room, rated);
+  }
+
+  /** Whether two accounts have rated games left today (UTC). A store failure plays it casual. */
+  private async underPairCap(a: Seat, b: Seat): Promise<boolean> {
+    if (!this.accounts || a.account_id === null || b.account_id === null) return false;
+    const now = this.wallClock();
+    const midnight = now - (now % MS_PER_DAY);
+    try {
+      const played = await this.accounts.countRatedGames(a.account_id, b.account_id, midnight);
+      const inFlight = this.ratedInFlight.get(pairKey(a.account_id, b.account_id)) ?? 0;
+      return played + inFlight < RATED_GAMES_PER_PAIR_PER_DAY;
+    } catch (err) {
+      console.error('relay: failed to count rated games; playing casual:', err);
+      return false;
     }
   }
 
-  private startMatch(room: Room): void {
+  private startMatch(room: Room, rated: boolean): void {
+    // A rematch while a rated game is still in play (both readied without its
+    // result settling it): the game still counts, as far as it went.
+    if (room.state === 'playing' && room.match_rated) {
+      const winners: [number | null | undefined, number | null | undefined] = [
+        undefined,
+        undefined,
+      ];
+      for (const s of room.seats) winners[s.match_index] = s.reported_result;
+      this.settle(this.settlement(room, room.seats, { kind: 'result', winners }), 'result');
+    }
     room.state = 'playing';
+    room.match_rated = rated;
+    if (rated) {
+      // Held until the game is written (see Settlement.release), so a rematch
+      // started before the last game's verdict lands still counts it.
+      const pair = pairKey(room.seats[0]!.account_id!, room.seats[1]!.account_id!);
+      this.ratedInFlight.set(pair, (this.ratedInFlight.get(pair) ?? 0) + 1);
+    }
     // Server-generated seed, replacing the original's seed exchange
     // (Communicator.cxx:283-296). Both clients derive both sims from it.
     room.seed = randomUint32(this.entropy);
@@ -696,6 +930,7 @@ export class RelayServer {
       s.frames = [];
       s.digests.clear();
       s.reported_result = undefined;
+      s.progress_at = room.started_at;
       if (s.conn) {
         this.send(s.conn, {
           type: 'match_start',
@@ -704,6 +939,7 @@ export class RelayServer {
           inputDelay: this.inputDelay,
           players: names,
           ...(aiInfo ? { aiOpponent: aiInfo } : {}),
+          rated,
         });
       }
     }
@@ -716,9 +952,75 @@ export class RelayServer {
         players: names,
         frames: [[], []],
         ...(aiInfo ? { aiOpponent: aiInfo } : {}),
+        rated,
       });
     }
+    if (!ai) this.startWatchdog(room);
     this.broadcastRoomList();
+  }
+
+  /**
+   * Check a playing room every few seconds for a game going nowhere, which a
+   * player could otherwise use to turn a loss into a win (the opponent's only
+   * ways out, leaving or conceding, would each be a loss):
+   *
+   * - **One seat's result unanswered** for {@link stallMs}: the game is over
+   *   on that screen; settle it by replay, as if both had reported.
+   * - **No inputs from either seat** for {@link stallMs}, with both connected:
+   *   lockstep has stalled on whoever sent the fewest frames (the other can
+   *   only run {@link inputDelay} ticks past it), so that seat forfeits,
+   *   unless the replay shows the game had already ended.
+   *
+   * A dropped seat has its reconnect grace instead.
+   */
+  private startWatchdog(room: Room): void {
+    this.stopWatchdog(room);
+    const check = (): void => {
+      room.watchdog = null;
+      if (room.state !== 'playing' || this.rooms.get(room.code) !== room) return;
+      if (room.seats.length === 2 && room.seats.every((s) => s.conn !== null)) {
+        if (this.settleStalled(room)) return;
+      }
+      room.watchdog = setTimeout(check, WATCHDOG_EVERY_MS);
+    };
+    room.watchdog = setTimeout(check, WATCHDOG_EVERY_MS);
+  }
+
+  private stopWatchdog(room: Room): void {
+    if (room.watchdog !== null) clearTimeout(room.watchdog);
+    room.watchdog = null;
+  }
+
+  /** The watchdog's verdict (see {@link startWatchdog}); true if it ended the match. */
+  private settleStalled(room: Room): boolean {
+    const now = this.now();
+    const [a, b] = room.seats as [Seat, Seat];
+    const reported = room.seats.filter((s) => s.reported_result !== undefined);
+    if (reported.length === 1) {
+      const [only] = reported as [Seat];
+      if (now - only.reported_at < this.stallMs) return false;
+      const winners: [number | null | undefined, number | null | undefined] = [
+        undefined,
+        undefined,
+      ];
+      winners[only.match_index] = only.reported_result;
+      this.settle(this.settlement(room, room.seats, { kind: 'result', winners }), 'result');
+      this.endMatch(room, 'result', only.reported_result ?? null);
+      this.broadcastRoomList();
+      return true;
+    }
+    if (reported.length > 0) return false;
+    if (now - Math.max(a.progress_at, b.progress_at) < this.stallMs) return false;
+    if (a.frames.length === b.frames.length) return false;
+    const staller = a.frames.length < b.frames.length ? a : b;
+    const peer = staller === a ? b : a;
+    this.settle(
+      this.settlement(room, room.seats, { kind: 'forfeit', leaver: staller.match_index }),
+      'disconnect',
+    );
+    this.endMatch(room, 'disconnect', peer.match_index);
+    this.broadcastRoomList();
+    return true;
   }
 
   // --- In-match traffic ---------------------------------------------------------
@@ -763,6 +1065,7 @@ export class RelayServer {
       return;
     }
     for (const f of frames) seat.frames.push(f);
+    seat.progress_at = this.now();
     const relayed: ServerMessage = {
       type: 'peer_inputs',
       playerIndex: seat.match_index,
@@ -807,12 +1110,16 @@ export class RelayServer {
       // Then find out which seat's digests were true.
       const claimed: [[number, number], [number, number]] = [digests, digests];
       claimed[peer.match_index] = peerDigests;
-      const dispute = this.dispute(room, { kind: 'digest', tick, digests: claimed });
+      const dispute = this.settlement(room, room.seats, {
+        kind: 'digest',
+        tick,
+        digests: claimed,
+      });
       for (const s of room.seats) if (s.conn) this.send(s.conn, { type: 'desync', tick });
       for (const w of room.spectators) this.send(w.conn, { type: 'desync', tick });
       this.endMatch(room, 'desync', null);
       this.broadcastRoomList();
-      this.settleDispute(dispute);
+      this.settle(dispute, 'desync');
     }
   }
 
@@ -830,6 +1137,7 @@ export class RelayServer {
       return;
     }
     seat.reported_result = winner;
+    seat.reported_at = this.now();
     const peer = room.seats.find((s) => s !== seat);
 
     // Bot opponent: there is no second client to cross-check, and the outcome
@@ -844,21 +1152,25 @@ export class RelayServer {
 
     if (!peer || peer.reported_result === undefined) return;
 
+    const winners: [number | null, number | null] = [winner, winner];
+    winners[peer.match_index] = peer.reported_result;
     if (peer.reported_result !== winner) {
-      const winners: [number | null, number | null] = [winner, winner];
-      winners[peer.match_index] = peer.reported_result;
-      const dispute = this.dispute(room, { kind: 'result', winners });
+      const dispute = this.settlement(room, room.seats, { kind: 'result', winners });
       for (const s of room.seats) if (s.conn) this.send(s.conn, { type: 'desync', tick: 0 });
       this.endMatch(room, 'desync', null);
       this.broadcastRoomList();
-      this.settleDispute(dispute);
+      this.settle(dispute, 'result');
       return;
     }
 
-    if (winner !== null) {
+    if (room.match_rated) {
+      // Rated: the reports agree, but the relay decides. The result screen
+      // doesn't wait; `rating_update` follows once the replay is done.
+      this.settle(this.settlement(room, room.seats, { kind: 'result', winners }), 'result');
+    } else if (winner !== null) {
       const winnerSeat = room.seats.find((s) => s.match_index === winner);
       const loserSeat = room.seats.find((s) => s.match_index !== winner);
-      if (winnerSeat && loserSeat) await this.recordDecisive(winnerSeat.token, loserSeat.token);
+      if (winnerSeat && loserSeat) await this.recordDecisive(winnerSeat.key, loserSeat.key);
     }
     this.endMatch(room, 'result', winner);
     this.broadcastRoomList();
@@ -871,9 +1183,21 @@ export class RelayServer {
       this.error(session.conn, 'not_in_room', 'concede outside a match');
       return;
     }
+    // Not before the game has begun (the client holds concession through the
+    // countdown too, sending nothing, not even its pre-filled frames, until
+    // it's over): a concession that early is only good for trading wins.
+    const played = Math.max(...room.seats.map((s) => s.frames.length));
+    if (played <= this.inputDelay) {
+      this.error(session.conn, 'bad_message', "the game hasn't started");
+      return;
+    }
     const peer = room.seats.find((s) => s !== seat);
-    // A bot peer keeps no record; only persist against a real opponent.
-    if (peer && peer.ai === undefined) await this.recordDecisive(peer.token, seat.token);
+    if (peer && room.match_rated) {
+      this.rateNow(this.settlement(room, room.seats), peer.match_index, 'concession');
+    } else if (peer && peer.ai === undefined) {
+      // A bot peer keeps no record; only persist against a real opponent.
+      await this.recordDecisive(peer.key, seat.key);
+    }
     this.endMatch(room, 'concession', peer ? peer.match_index : 1 - seat.match_index);
     this.broadcastRoomList();
   }
@@ -884,6 +1208,10 @@ export class RelayServer {
    * baked into a running match (`match_start.players`) refresh next game.
    */
   private async handleRename(session: Session, name: string): Promise<void> {
+    if (session.identity.account) {
+      this.error(session.conn, 'bad_message', "an account's handle changes on the account screen");
+      return;
+    }
     // Persist (getPlayer updates the stored name as a side effect of lookup).
     await this.store.getPlayer(session.identity.token, name);
     session.identity.name = name;
@@ -914,53 +1242,105 @@ export class RelayServer {
   // --- Lifecycle ---------------------------------------------------------------
 
   /**
-   * Persist a decisive game and update the cached records: every seat and live
-   * session with either token, since a disputed game's verdict can land after
-   * its players have moved on.
+   * Persist a decisive casual game and update the cached records: every seat
+   * and live session with either key, since a disputed game's verdict can land
+   * after its players have moved on.
    */
-  private async recordDecisive(winnerToken: string, loserToken: string): Promise<void> {
-    await this.store.recordResult(winnerToken, loserToken);
-    const credit = (record: { wins: number; losses: number }, token: string): void => {
-      if (token === winnerToken) record.wins++;
-      else if (token === loserToken) record.losses++;
-    };
-    for (const room of this.rooms.values()) {
-      for (const seat of room.seats) credit(seat.record, seat.token);
-    }
-    for (const s of this.sessions.values()) if (s) credit(s.identity.record, s.identity.token);
+  private async recordDecisive(winnerKey: string, loserKey: string): Promise<void> {
+    await this.store.recordResult(winnerKey, loserKey);
+    this.forEachIdentity((record, key) => {
+      if (key === winnerKey) record.wins++;
+      else if (key === loserKey) record.losses++;
+    });
   }
 
-  /** Copy what a dispute needs out of the room, before `endMatch` clears it. */
-  private dispute(room: Room, claim: Dispute['claim']): Dispute {
-    const tokens: [string, string] = ['', ''];
-    for (const s of room.seats) tokens[s.match_index] = s.token;
-    return { code: room.code, seed: room.seed, ledgers: this.ledgers(room), tokens, claim };
+  /** Visit every cached record: each seat's and each live session's. */
+  private forEachIdentity(
+    visit: (record: PlayerRecord, key: string, holder: Seat | Identity) => void,
+  ): void {
+    for (const room of this.rooms.values()) {
+      for (const seat of room.seats) if (seat.key !== '') visit(seat.record, seat.key, seat);
+    }
+    for (const s of this.sessions.values())
+      if (s) visit(s.identity.record, s.identity.key, s.identity);
   }
 
   /**
-   * Re-simulate a disputed game in the background and record what it finds:
+   * Copy what settling a game needs out of the room, before `endMatch` clears
+   * it. `seats` are the match's two seats (one may already have left the room).
+   */
+  private settlement(
+    room: Room,
+    seats: readonly Seat[],
+    claim: Settlement['claim'] = { kind: 'result', winners: [undefined, undefined] },
+  ): Settlement {
+    const ledgers: [number[], number[]] = [[], []];
+    const keys: [string, string] = ['', ''];
+    const names: [string, string] = ['?', '?'];
+    const accounts: [number | null, number | null] = [null, null];
+    for (const s of seats) {
+      ledgers[s.match_index] = [...s.frames];
+      keys[s.match_index] = s.key;
+      names[s.match_index] = s.name;
+      accounts[s.match_index] = s.account_id;
+    }
+    const [a, b] = accounts;
+    const rated = room.match_rated && a !== null && b !== null;
+    let release: (() => void) | null = null;
+    if (rated) {
+      const pair = pairKey(a, b);
+      release = () => {
+        release = null;
+        const left = (this.ratedInFlight.get(pair) ?? 1) - 1;
+        if (left > 0) this.ratedInFlight.set(pair, left);
+        else this.ratedInFlight.delete(pair);
+      };
+    }
+    return {
+      code: room.code,
+      seed: room.seed,
+      ledgers,
+      keys,
+      names,
+      accounts: rated ? [a, b] : null,
+      claim,
+      release: () => release?.(),
+    };
+  }
+
+  /**
+   * Re-simulate a game in the background and record what it finds. Casual
+   * games come here only when disputed; a rated game always does, unless it
+   * ended by a concession or a forfeit (see {@link rateNow}).
    *
-   * - **Results disagree:** the match is played out from the ledgers. If it
-   *   ends, and one seat reported that ending, the result is recorded as for an
-   *   agreed one.
+   * - **Results:** the match is played out from the ledgers. If it ends, and
+   *   one seat reported that ending (or neither reported one: a rated game a
+   *   rematch cut short), that's the result.
    * - **Digests disagree:** the match is played to the digest's tick. If it
-   *   ended by then, that result is recorded. Otherwise, if exactly one seat's
+   *   ended by then, that's the result. Otherwise, if exactly one seat's
    *   digests are the true ones, the other seat's sims left the game both
    *   players were sent, so it takes the loss, as for a concession.
+   * - **A forfeit** (a seat left, ran out its grace, or stalled): if the
+   *   replay shows the game had ended, that's the result; otherwise the seat
+   *   that went loses.
    *
    * Anything else (the ledgers stop before the game ends, the replay agrees
-   * with neither seat) records nothing. Every verdict is logged.
+   * with neither seat) records nothing. Disputes and failures are logged.
    */
-  private settleDispute(dispute: Dispute): void {
-    const { claim } = dispute;
+  private settle(settlement: Settlement, end: RatedGameEnd): void {
+    const { claim } = settlement;
     const endTick = claim.kind === 'digest' ? claim.tick : undefined;
-    this.verifier
-      .verifyMatch({ seed: dispute.seed, ledgers: dispute.ledgers, endTick })
+    const settled = this.verifier
+      .verifyMatch({ seed: settlement.seed, ledgers: settlement.ledgers, endTick })
       .then(async (found) => {
+        const reported =
+          claim.kind === 'result' ? claim.winners.filter((w) => w !== undefined) : [];
         let winner: number | null | undefined;
         if (found.outcome) {
           winner = found.outcome.winner;
-          if (claim.kind === 'result' && !claim.winners.includes(winner)) winner = undefined;
+          if (reported.length > 0 && !reported.includes(winner)) winner = undefined;
+        } else if (claim.kind === 'forfeit') {
+          winner = 1 - claim.leaver;
         } else if (claim.kind === 'digest' && found.tick === claim.tick) {
           const honest = [0, 1].filter((i) => {
             const d = claim.digests[i]!;
@@ -969,37 +1349,149 @@ export class RelayServer {
           if (honest.length === 1) winner = honest[0]!;
         }
 
-        const what =
-          claim.kind === 'result'
-            ? `results ${String(claim.winners[0])}/${String(claim.winners[1])}`
-            : `digests at tick ${claim.tick}`;
-        const replayed = found.outcome
-          ? `ended on tick ${found.outcome.tick}, winner ${String(found.outcome.winner)}`
-          : `in play at tick ${found.tick}`;
-        const verdict =
-          winner === undefined
-            ? 'not recorded'
-            : winner === null
-              ? 'a draw, not recorded'
-              : `seat ${winner} wins`;
-        this.log(
-          `relay: disputed ${what} (room ${dispute.code}, seed ${dispute.seed}): ` +
-            `replay ${replayed}; ${verdict}`,
-        );
+        const overturned =
+          claim.kind === 'forfeit' && found.outcome !== null && winner !== 1 - claim.leaver;
+        const disputed =
+          claim.kind === 'digest' ||
+          overturned ||
+          (reported.length === 2 && reported[0] !== reported[1]);
+        if (disputed || winner === undefined) {
+          const what =
+            claim.kind === 'result'
+              ? `results ${String(claim.winners[0])}/${String(claim.winners[1])}`
+              : claim.kind === 'forfeit'
+                ? `forfeit by seat ${claim.leaver}`
+                : `digests at tick ${claim.tick}`;
+          const replayed = found.outcome
+            ? `ended on tick ${found.outcome.tick}, winner ${String(found.outcome.winner)}`
+            : `in play at tick ${found.tick}`;
+          const counted = settlement.accounts ? 'rated' : 'recorded';
+          const verdict =
+            winner === undefined
+              ? `not ${counted}`
+              : winner === null
+                ? settlement.accounts
+                  ? 'a draw, rated'
+                  : 'a draw, not recorded'
+                : `seat ${winner} wins`;
+          this.log(
+            `relay: ${disputed ? 'disputed' : 'unsettled'} ${what} ` +
+              `(room ${settlement.code}, seed ${settlement.seed}): replay ${replayed}; ${verdict}`,
+          );
+        }
 
-        if (winner === undefined || winner === null) return;
-        await this.recordDecisive(dispute.tokens[winner]!, dispute.tokens[1 - winner]!);
-        this.broadcastRoomList();
+        if (winner === undefined) return;
+        const reason =
+          claim.kind === 'forfeit'
+            ? found.outcome
+              ? 'result'
+              : end
+            : found.outcome
+              ? end
+              : 'desync';
+        if (settlement.accounts) {
+          await this.rate(settlement, winner, reason, found.tick);
+        } else if (winner !== null) {
+          await this.recordDecisive(settlement.keys[winner]!, settlement.keys[1 - winner]!);
+          this.broadcastRoomList();
+        }
       })
       .catch((err: unknown) => {
-        console.error(`relay: failed to settle a dispute (room ${dispute.code}):`, err);
+        console.error(`relay: failed to settle a game (room ${settlement.code}):`, err);
+      })
+      .finally(() => settlement.release?.());
+    this.settling.add(settled);
+    void settled.finally(() => this.settling.delete(settled));
+  }
+
+  /** Rate a game the relay decided without a replay: a concession. */
+  private rateNow(settlement: Settlement, winner: number, end: RatedGameEnd): void {
+    const ticks = Math.min(settlement.ledgers[0].length, settlement.ledgers[1].length);
+    this.rate(settlement, winner, end, ticks)
+      .catch((err: unknown) => {
+        console.error(`relay: failed to rate a game (room ${settlement.code}):`, err);
+      })
+      .finally(() => settlement.release?.());
+  }
+
+  /**
+   * Apply a rated game: both ratings (Glicko-2, each grown for its idle time
+   * first), W-L-D, and the game log, then tell the players and the room's
+   * spectators. Games apply one at a time, since each reads both ratings
+   * before writing them.
+   */
+  private rate(
+    settlement: Settlement,
+    winner: number | null,
+    end: RatedGameEnd,
+    ticks: number,
+  ): Promise<void> {
+    const run = async (): Promise<void> => {
+      const store = this.accounts;
+      if (!store || !settlement.accounts) return;
+      const [idA, idB] = settlement.accounts;
+      const [a, b] = await Promise.all([store.accountById(idA), store.accountById(idB)]);
+      if (!a || !b) {
+        this.log(`relay: a rated game's account is gone (room ${settlement.code}); not rated`);
+        return;
+      }
+      const now = this.wallClock();
+      const score = winner === null ? 0.5 : winner === 0 ? 1 : 0;
+      const rated = rateGame(a, b, score, now);
+      await store.recordRatedGame({
+        accountA: idA,
+        accountB: idB,
+        result: winner === null ? 'draw' : winner === 0 ? 'a' : 'b',
+        end,
+        ticks,
+        seed: settlement.seed,
+        simVersion: SIM_VERSION,
+        aBefore: snapshot(rated.aBefore),
+        bBefore: snapshot(rated.bBefore),
+        aAfter: rated.a,
+        bAfter: rated.b,
+        createdAt: now,
+        inputs: ratedGameInputs(settlement.ledgers),
       });
+      await this.sweepGameInputs(store, now);
+
+      const after: [PlayerRating, PlayerRating] = [shownRating(rated.a), shownRating(rated.b)];
+      this.forEachIdentity((record, key, holder) => {
+        const i = settlement.keys.indexOf(key);
+        if (i < 0) return;
+        if (winner === i) record.wins++;
+        else if (winner === 1 - i) record.losses++;
+        if ('account_id' in holder) holder.rating = { ...after[i]! };
+        else if (holder.account) holder.account.rating = { ...after[i]! };
+      });
+      const ratings: [RatingChange, RatingChange] = [
+        { before: shownRating(rated.aBefore), after: after[0] },
+        { before: shownRating(rated.bBefore), after: after[1] },
+      ];
+      const text = encodeMessage({ type: 'rating_update', players: settlement.names, ratings });
+      for (const session of this.sessions.values()) {
+        if (session && settlement.keys.includes(session.identity.key)) session.conn.send(text);
+      }
+      for (const w of this.rooms.get(settlement.code)?.spectators ?? []) w.conn.send(text);
+      this.broadcastRoomList();
+    };
+    const next = this.ratingChain.then(run);
+    this.ratingChain = next.catch(() => undefined);
+    return next;
+  }
+
+  /** Drop old rated games' inputs, at most every {@link INPUT_SWEEP_EVERY_MS}. */
+  private async sweepGameInputs(store: AccountStore, now: number): Promise<void> {
+    if (now - this.lastInputSweep < INPUT_SWEEP_EVERY_MS) return;
+    this.lastInputSweep = now;
+    await store.dropGameInputs(now - RATED_INPUTS_KEPT_MS);
   }
 
   /** End the current match and return the room to the waiting state. */
   private endMatch(room: Room, reason: MatchEndReason, winner: number | null): void {
     room.state = 'waiting';
     room.digest_floor = -1;
+    this.stopWatchdog(room);
 
     // The match is settled: a pending grace timer must not fire against it
     // later (it would double-record and re-end the room), and a dropped seat
@@ -1053,11 +1545,12 @@ export class RelayServer {
       return;
     }
     if (room.state === 'playing') {
-      // Leaving mid-match forfeits it. Recording is fire-and-forget here (the
-      // handler path is sync); failures only cost a stats update, but log them.
-      this.recordDecisive(peer.token, seat.token).catch((err: unknown) => {
-        console.error(`relay: failed to record mid-match leave forfeit (room ${room.code}):`, err);
-      });
+      // Leaving mid-match forfeits it, unless the replay shows the game had
+      // already ended (see expireGrace).
+      this.settle(
+        this.settlement(room, [seat, peer], { kind: 'forfeit', leaver: seat.match_index }),
+        'disconnect',
+      );
       this.endMatch(room, 'disconnect', peer.match_index);
     }
     if (peer.conn) this.send(peer.conn, { type: 'peer_left', name: seat.name });
@@ -1072,7 +1565,12 @@ export class RelayServer {
       rooms.push({
         code: room.code,
         state: room.state,
-        players: room.seats.map((s) => ({ name: s.name, record: { ...s.record } })),
+        rated: room.rated,
+        players: room.seats.map((s) => ({
+          name: s.name,
+          record: { ...s.record },
+          rating: s.rating ? { ...s.rating } : null,
+        })),
         spectators: room.spectators.map((w) => w.identity.name),
       });
     }
@@ -1137,4 +1635,46 @@ export class RelayServer {
     this.error(conn, 'bad_message', message);
     conn.close();
   }
+}
+
+/** The identity of an account logged in with session `token`. */
+function accountIdentity(token: string, account: StoredAccount): Identity {
+  return {
+    token,
+    key: accountKey(account.id),
+    name: account.handle,
+    record: { wins: account.wins, losses: account.losses },
+    account: { id: account.id, rating: shownRating(account) },
+  };
+}
+
+const snapshot = ({ rating, rd }: { rating: number; rd: number }) => ({ rating, rd });
+
+/**
+ * A rated game's inputs for the log: each seat's ledger as `[tickDelta,
+ * command]` changes, as in a solo replay, so a long game is a few KB.
+ */
+export function ratedGameInputs(ledgers: readonly [readonly number[], readonly number[]]): string {
+  const encode = (frames: readonly number[]): [number, number][] => {
+    const changes: [number, number][] = [];
+    let held = 0;
+    let last = 0;
+    frames.forEach((command, i) => {
+      if (command === held) return;
+      changes.push([i + 1 - last, command]);
+      last = i + 1;
+      held = command;
+    });
+    return changes;
+  };
+  return JSON.stringify({
+    version: 1,
+    ticks: [ledgers[0].length, ledgers[1].length],
+    inputs: [encode(ledgers[0]), encode(ledgers[1])],
+  });
+}
+
+/** A pair of accounts as one key, whichever way round. */
+function pairKey(a: number, b: number): string {
+  return a < b ? `${a}:${b}` : `${b}:${a}`;
 }

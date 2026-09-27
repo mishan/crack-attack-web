@@ -242,14 +242,16 @@ CORS_ORIGIN=http://localhost:5173 pnpm --filter @crack-attack/server start
 
 ### Accounts
 
-Accounts are the first step of a rated ladder (the plan is in
+Accounts are what the rated ladder ranks (the plan is in
 [`docs/RATING_PLAN.md`](docs/RATING_PLAN.md)). An account is a handle, a key
 and a rating: no email, password or real name. Registering returns a key of
 eight random words the server picks, meant for a password manager. The relay
 keeps only the key's SHA-256, so the key _is_ the account: there's no way to
 recover a lost one. Logging in trades the key for a session, sent as
 `Authorization: Bearer <session>`; sessions are stored hashed too, and last a
-year from their last use. The client doesn't use accounts yet.
+year from their last use. The same session logs into the lobby: `hello`
+takes it in place of a guest token, and the account plays under its handle.
+The client doesn't use accounts yet.
 
 | Route                        | What it does                                                                       |
 | ---------------------------- | ---------------------------------------------------------------------------------- |
@@ -286,6 +288,38 @@ DB=/var/lib/crack-attack/lobby.db node relay.mjs admin reset-rating misha
 ```
 
 A moderator's rename doesn't count against the player's 30 days.
+
+### Rated games
+
+A room created **rated** seats only accounts; anyone can watch. An account
+holds one seat at a time, however many browsers it's logged in on. The relay
+decides every rated game itself: when one is played out, it re-simulates it
+from the seed and both players' inputs and rates what really happened, whatever
+the players reported. A concession is a loss at once (not during the
+countdown). Leaving mid-game, or running out the reconnect grace, is a loss
+too, unless the replay shows the game had already ended: a loser can't win by
+leaving the winner waiting for a result that never comes. The relay also
+settles a game that goes nowhere: one player's result unanswered for 30 s is
+settled by replay as if both had reported, and a game with no inputs from
+either side for 30 s is forfeited by whoever sent the fewest (lockstep stalls
+on them). These rules apply to casual games' records too. A game the replay
+can't settle isn't rated, and is logged. Ratings are Glicko-2: a new account moves fast and
+settles as it plays, a rating's uncertainty grows again with days away, and a
+rating is provisional (`1580?`) while that uncertainty is high. A same-tick
+double loss is a draw.
+
+A pair of accounts gets 10 rated games per UTC day, counting games still
+being settled; later games in the room are casual. Casual games still count toward an account's W-L. Every rated game
+is logged with both players' ratings before and after, and with their inputs
+for a week.
+
+| Route                            | What it does                                                                       |
+| -------------------------------- | ---------------------------------------------------------------------------------- |
+| `GET /api/rating/leaderboard`    | Settled ratings with a rated game in the last 30 days, best first. `limit=1..100`. |
+| `GET /api/rating/player/:handle` | An account's rating, W-L-D and last 20 rated games.                                |
+
+`reset-rating` and `hide-account` (above) are the moderation tools; a hidden
+account is kept off the leaderboard only.
 
 ## Wiring the client to the relay
 

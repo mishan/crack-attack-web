@@ -238,6 +238,23 @@ describe('AccountService', () => {
     expect(await service.deleteAccount(CLIENT, undefined, { key: bob.key })).toEqual({});
   });
 
+  it('tells the relay which sessions ended', async () => {
+    const ended: unknown[] = [];
+    const { service, bearer } = setup({ onSessionsEnded: (e) => ended.push(e) });
+    const created = await service.register(CLIENT, { handle: 'misha' });
+    const { session } = await service.login(CLIENT, { key: created.key });
+    await service.logout(CLIENT, bearer(session));
+    const { key } = await service.replaceKey(CLIENT, bearer(created.session), {
+      key: created.key,
+    });
+    await service.deleteAccount(CLIENT, bearer(created.session), { key });
+    expect(ended).toEqual([
+      { kind: 'session', sessionHash: secretHash(session) },
+      { kind: 'account', accountId: 1, except: secretHash(created.session) },
+      { kind: 'account', accountId: 1, except: null },
+    ]);
+  });
+
   it('limits registrations per client, and logs a shared limit refusing', async () => {
     const { service, log } = setup({
       registerLimit: { capacity: 2, refillMs: 60_000 },

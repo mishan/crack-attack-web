@@ -13,11 +13,15 @@
 
 import type { ScoreBoard, SoloStanding } from '@crack-attack/protocol';
 import { DatabaseSync, type StatementSync } from 'node:sqlite';
+import type { RatedGameEnd } from '@crack-attack/protocol';
 import {
   START_RATING,
+  accountIdOf,
   type AccountStore,
   type NewAccount,
+  type NewRatedGame,
   type StoredAccount,
+  type StoredRatedGame,
 } from './accountStore.js';
 import type {
   NewSoloScore,
@@ -68,6 +72,26 @@ interface AccountRow {
   created_at: number;
   renamed_at: number | null;
   hidden: number;
+}
+
+interface RatedGameRow {
+  id: number;
+  account_a: number;
+  account_b: number;
+  handle_a: string | null;
+  handle_b: string | null;
+  result: 'a' | 'b' | 'draw';
+  end_reason: RatedGameEnd;
+  ticks: number;
+  a_rating_before: number;
+  a_rd_before: number;
+  a_rating_after: number;
+  a_rd_after: number;
+  b_rating_before: number;
+  b_rd_before: number;
+  b_rating_after: number;
+  b_rd_after: number;
+  created_at: number;
 }
 
 /**
@@ -143,6 +167,36 @@ export const MIGRATIONS: readonly string[] = [
   CREATE INDEX sessions_account ON sessions (account_id);
   CREATE INDEX sessions_last_used ON sessions (last_used_at);
   `,
+  // 3: the rated-game log, and the leaderboard's index. A game keeps both
+  // accounts' ratings before and after it, so the ladder can be recomputed
+  // from the log if the rating constants change.
+  `
+  CREATE TABLE rated_games (
+    id              INTEGER PRIMARY KEY,
+    account_a       INTEGER NOT NULL,
+    account_b       INTEGER NOT NULL,
+    result          TEXT NOT NULL CHECK (result IN ('a', 'b', 'draw')),
+    end_reason      TEXT NOT NULL,
+    ticks           INTEGER NOT NULL,
+    seed            INTEGER NOT NULL,
+    sim_version     INTEGER NOT NULL,
+    a_rating_before REAL NOT NULL,
+    a_rd_before     REAL NOT NULL,
+    a_rating_after  REAL NOT NULL,
+    a_rd_after      REAL NOT NULL,
+    b_rating_before REAL NOT NULL,
+    b_rd_before     REAL NOT NULL,
+    b_rating_after  REAL NOT NULL,
+    b_rd_after      REAL NOT NULL,
+    created_at      INTEGER NOT NULL,
+    -- Both seats' inputs (JSON); NULL once dropped.
+    inputs          TEXT
+  ) STRICT;
+  CREATE INDEX rated_games_a ON rated_games (account_a, created_at);
+  CREATE INDEX rated_games_b ON rated_games (account_b, created_at);
+  CREATE INDEX rated_games_with_inputs ON rated_games (created_at) WHERE inputs IS NOT NULL;
+  CREATE INDEX accounts_leaderboard ON accounts (hidden, rating DESC, id);
+  `,
 ];
 
 /** The schema version this build writes. */
@@ -151,6 +205,11 @@ export const SCHEMA_VERSION = MIGRATIONS.length;
 const ACCOUNT_COLUMNS =
   'id, handle, handle_folded, rating, rd, volatility, rated_at, wins, losses, draws, ' +
   'created_at, renamed_at, hidden';
+
+const RATED_GAME_COLUMNS =
+  'g.id, g.account_a, g.account_b, ha.handle AS handle_a, hb.handle AS handle_b, g.result, ' +
+  'g.end_reason, g.ticks, g.a_rating_before, g.a_rd_before, g.a_rating_after, g.a_rd_after, ' +
+  'g.b_rating_before, g.b_rd_before, g.b_rating_after, g.b_rd_after, g.created_at';
 
 const SCORE_COLUMNS =
   'id, run_id, name, score, top_multiplier, ticks, sim_version, created_at, hidden';
@@ -236,6 +295,14 @@ export class SqliteStore implements LobbyStore, ScoreStore, AccountStore {
   private readonly deleteAccountRow: StatementSync;
   private readonly updateAccountHidden: StatementSync;
   private readonly updateResetRating: StatementSync;
+  private readonly addAccountWin: StatementSync;
+  private readonly addAccountLoss: StatementSync;
+  private readonly insertRatedGame: StatementSync;
+  private readonly applyRatedGame: StatementSync;
+  private readonly countPairGames: StatementSync;
+  private readonly selectLeaderboard: StatementSync;
+  private readonly selectRatedGames: StatementSync;
+  private readonly dropOldGameInputs: StatementSync;
 
   /** @param path Database file path, or ':memory:' for an ephemeral store. */
   constructor(path: string) {
@@ -339,6 +406,47 @@ export class SqliteStore implements LobbyStore, ScoreStore, AccountStore {
     this.updateResetRating = this.db.prepare(
       'UPDATE accounts SET rating = ?, rd = ?, volatility = ?, rated_at = NULL WHERE id = ?',
     );
+    this.addAccountWin = this.db.prepare('UPDATE accounts SET wins = wins + 1 WHERE id = ?');
+    this.addAccountLoss = this.db.prepare('UPDATE accounts SET losses = losses + 1 WHERE id = ?');
+    this.insertRatedGame = this.db.prepare(
+      `INSERT INTO rated_games (account_a, account_b, result, end_reason, ticks, seed, sim_version,
+         a_rating_before, a_rd_before, a_rating_after, a_rd_after,
+         b_rating_before, b_rd_before, b_rating_after, b_rd_after, created_at, inputs)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    );
+    this.applyRatedGame = this.db.prepare(
+      `UPDATE accounts SET rating = :rating, rd = :rd, volatility = :volatility, rated_at = :at,
+         wins = wins + :win, losses = losses + :loss, draws = draws + :draw
+       WHERE id = :id`,
+    );
+    // Two index range counts, one per seat order: an OR would defeat the indexes.
+    this.countPairGames = this.db.prepare(
+      `SELECT
+         (SELECT COUNT(*) FROM rated_games
+            WHERE account_a = :a AND account_b = :b AND created_at >= :since)
+         + (SELECT COUNT(*) FROM rated_games
+            WHERE account_a = :b AND account_b = :a AND created_at >= :since) AS n`,
+    );
+    this.selectLeaderboard = this.db.prepare(
+      `SELECT ${ACCOUNT_COLUMNS} FROM accounts
+       WHERE hidden = 0 AND rd <= :maxRd AND rated_at >= :since
+       ORDER BY rating DESC, id LIMIT :limit`,
+    );
+    this.selectRatedGames = this.db.prepare(
+      `SELECT ${RATED_GAME_COLUMNS} FROM (
+         SELECT * FROM (SELECT * FROM rated_games WHERE account_a = :id
+                        ORDER BY created_at DESC, id DESC LIMIT :limit)
+         UNION ALL
+         SELECT * FROM (SELECT * FROM rated_games WHERE account_b = :id
+                        ORDER BY created_at DESC, id DESC LIMIT :limit)
+       ) g
+       LEFT JOIN accounts ha ON ha.id = g.account_a
+       LEFT JOIN accounts hb ON hb.id = g.account_b
+       ORDER BY g.created_at DESC, g.id DESC LIMIT :limit`,
+    );
+    this.dropOldGameInputs = this.db.prepare(
+      'UPDATE rated_games SET inputs = NULL WHERE inputs IS NOT NULL AND created_at < ?',
+    );
   }
 
   /**
@@ -395,13 +503,17 @@ export class SqliteStore implements LobbyStore, ScoreStore, AccountStore {
     return Promise.resolve({ token, name, record: { wins: 0, losses: 0 } });
   }
 
-  recordResult(winnerToken: string, loserToken: string): Promise<void> {
+  recordResult(winnerKey: string, loserKey: string): Promise<void> {
     // Atomic: a failure part-way (a disk error, say) can't leave the win
-    // recorded without the loss. A token with no row just updates nothing —
+    // recorded without the loss. A key with no row just updates nothing —
     // tolerated, as the store conformance suite expects.
     this.transaction(() => {
-      this.addWin.run(winnerToken);
-      this.addLoss.run(loserToken);
+      const winner = accountIdOf(winnerKey);
+      const loser = accountIdOf(loserKey);
+      if (winner === null) this.addWin.run(winnerKey);
+      else this.addAccountWin.run(winner);
+      if (loser === null) this.addLoss.run(loserKey);
+      else this.addAccountLoss.run(loser);
     });
     return Promise.resolve();
   }
@@ -605,6 +717,76 @@ export class SqliteStore implements LobbyStore, ScoreStore, AccountStore {
     return Promise.resolve(Number(changes) > 0);
   }
 
+  accountById(accountId: number): Promise<StoredAccount | null> {
+    const row = this.selectAccount.get(accountId) as AccountRow | undefined;
+    return Promise.resolve(row ? accountOf(row) : null);
+  }
+
+  recordRatedGame(game: NewRatedGame): Promise<number> {
+    const id = this.transaction(() => {
+      const { lastInsertRowid } = this.insertRatedGame.run(
+        game.accountA,
+        game.accountB,
+        game.result,
+        game.end,
+        game.ticks,
+        game.seed,
+        game.simVersion,
+        game.aBefore.rating,
+        game.aBefore.rd,
+        game.aAfter.rating,
+        game.aAfter.rd,
+        game.bBefore.rating,
+        game.bBefore.rd,
+        game.bAfter.rating,
+        game.bAfter.rd,
+        game.createdAt,
+        game.inputs,
+      );
+      const scoreA = game.result === 'a' ? 1 : game.result === 'b' ? 0 : 0.5;
+      for (const [accountId, after, score] of [
+        [game.accountA, game.aAfter, scoreA],
+        [game.accountB, game.bAfter, 1 - scoreA],
+      ] as const) {
+        this.applyRatedGame.run({
+          id: accountId,
+          rating: after.rating,
+          rd: after.rd,
+          volatility: after.volatility,
+          at: game.createdAt,
+          win: score === 1 ? 1 : 0,
+          loss: score === 0 ? 1 : 0,
+          draw: score === 0.5 ? 1 : 0,
+        });
+      }
+      return Number(lastInsertRowid);
+    });
+    return Promise.resolve(id);
+  }
+
+  countRatedGames(accountA: number, accountB: number, since: number): Promise<number> {
+    const row = this.countPairGames.get({ a: accountA, b: accountB, since }) as { n: number };
+    return Promise.resolve(row.n);
+  }
+
+  leaderboard(activeSince: number, maxRd: number, limit: number): Promise<StoredAccount[]> {
+    const rows = this.selectLeaderboard.all({
+      since: activeSince,
+      maxRd,
+      limit,
+    }) as unknown as AccountRow[];
+    return Promise.resolve(rows.map(accountOf));
+  }
+
+  ratedGames(accountId: number, limit: number): Promise<StoredRatedGame[]> {
+    const rows = this.selectRatedGames.all({ id: accountId, limit }) as unknown as RatedGameRow[];
+    return Promise.resolve(rows.map(ratedGameOf));
+  }
+
+  dropGameInputs(before: number): Promise<number> {
+    return Promise.resolve(Number(this.dropOldGameInputs.run(before).changes));
+  }
+
   resetRating(accountId: number): Promise<boolean> {
     const { rating, rd, volatility } = START_RATING;
     const { changes } = this.updateResetRating.run(rating, rd, volatility, accountId);
@@ -632,6 +814,24 @@ function accountOf(row: AccountRow): StoredAccount {
     createdAt: row.created_at,
     renamedAt: row.renamed_at,
     hidden: row.hidden !== 0,
+  };
+}
+
+function ratedGameOf(row: RatedGameRow): StoredRatedGame {
+  return {
+    id: row.id,
+    accountA: row.account_a,
+    accountB: row.account_b,
+    handleA: row.handle_a,
+    handleB: row.handle_b,
+    result: row.result,
+    end: row.end_reason,
+    ticks: row.ticks,
+    aBefore: { rating: row.a_rating_before, rd: row.a_rd_before },
+    aAfter: { rating: row.a_rating_after, rd: row.a_rd_after },
+    bBefore: { rating: row.b_rating_before, rd: row.b_rd_before },
+    bAfter: { rating: row.b_rating_after, rd: row.b_rd_after },
+    createdAt: row.created_at,
   };
 }
 

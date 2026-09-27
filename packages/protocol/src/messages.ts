@@ -54,8 +54,15 @@ import { CC_MOVE_MASK, CC_SWAP, CC_ADVANCE } from '@crack-attack/core';
  * only the bot's `aiOpponent` descriptor (difficulty + seat index) — the AI sim
  * shares the existing match seed and the controller draws no RNG, so nothing
  * else is needed for every machine to reproduce identical moves.
+ *
+ * v5: rated games (docs/RATING_PLAN.md). `hello` may carry an account's
+ * session token in place of a guest token; `welcome` and each room-list
+ * player carry a rating (null for guests), rooms carry a `rated` flag,
+ * `create_room` takes `rated`, `match_start`/`match_resume`/`spectate_start`
+ * say whether this game counts, and `rating_update` follows a rated game once
+ * the relay has verified it.
  */
-export const PROTOCOL_VERSION = 4;
+export const PROTOCOL_VERSION = 5;
 
 /** AI opponent difficulty levels (mirrors core's `AiController`). */
 export const AI_DIFFICULTIES = ['easy', 'medium', 'hard'] as const;
@@ -122,11 +129,26 @@ export interface PlayerRecord {
   losses: number;
 }
 
+/**
+ * Rated games per pair of players per UTC day. Past it, games in a rated room
+ * are casual until the next day, so an alt can't feed one account for long.
+ */
+export const RATED_GAMES_PER_PAIR_PER_DAY = 10;
+
+/** An account's rating as shown: a whole number, provisional (`1580?`) while still uncertain. */
+export interface PlayerRating {
+  rating: number;
+  provisional: boolean;
+}
+
 /** One lobby room as shown in the room list. */
 export interface RoomSummary {
   code: string;
   state: 'waiting' | 'playing';
-  players: { name: string; record: PlayerRecord }[];
+  /** Only accounts may sit in a rated room; anyone may watch. */
+  rated: boolean;
+  /** `rating` is null for a guest. */
+  players: { name: string; record: PlayerRecord; rating: PlayerRating | null }[];
   /** Names of everyone watching (spectators are visible by design). */
   spectators: string[];
 }
@@ -141,8 +163,10 @@ export interface HelloMessage {
   name: string;
   /**
    * Session token from a previous `welcome`, to reclaim identity (records,
-   * and any in-progress match within the reconnect grace). Omitted on first
-   * connect; an unknown token just mints a fresh identity.
+   * and any in-progress match within the reconnect grace), or an account's
+   * session from logging in (then `name` is ignored: an account plays under
+   * its handle). Omitted on first connect; an unknown token just mints a
+   * fresh guest identity.
    */
   token?: string;
 }
@@ -155,6 +179,8 @@ export interface CreateRoomMessage {
    * instead of waiting for a second human — a single ready starts the match.
    */
   aiOpponent?: { difficulty: AiDifficulty };
+  /** A rated room: only for accounts, and not with a bot. */
+  rated?: boolean;
 }
 
 /** Join an existing room by code; the server replies `room_joined` or `error`. */
@@ -255,9 +281,11 @@ export interface WelcomeMessage {
   protocolVersion: number;
   /** Session token to present on future `hello`s (store client-side). */
   token: string;
-  /** Canonical display name (the hello name, as stored). */
+  /** Canonical display name (the hello name, as stored, or an account's handle). */
   name: string;
   record: PlayerRecord;
+  /** The account's rating; null for a guest. */
+  rating: PlayerRating | null;
 }
 
 /**
@@ -313,6 +341,8 @@ export interface MatchStartMessage {
    * bot's inputs are reproduced identically without ever crossing the wire.
    */
   aiOpponent?: AiOpponentInfo;
+  /** Whether this game counts for the ladder. */
+  rated: boolean;
 }
 
 /** A relayed `inputs` batch from the peer at `playerIndex`. */
@@ -352,6 +382,7 @@ export interface SpectateStartMessage {
    * identical AI moves the players do.
    */
   aiOpponent?: AiOpponentInfo;
+  rated: boolean;
 }
 
 /** The room's watcher roster changed (sent to players and spectators). */
@@ -401,6 +432,25 @@ export interface MatchResumeMessage {
   inputDelay: number;
   players: [string, string];
   frames: [number[], number[]];
+  rated: boolean;
+}
+
+/** One player's rating before and after a rated game. */
+export interface RatingChange {
+  before: PlayerRating;
+  after: PlayerRating;
+}
+
+/**
+ * A rated game's rating changes, by player index: sent to both players and
+ * the room's spectators a moment after `match_end`, once the relay has
+ * settled the game (by re-simulating it, unless it ended by a concession or
+ * a forfeit). A rated game the relay can't settle gets none.
+ */
+export interface RatingUpdateMessage {
+  type: 'rating_update';
+  players: [string, string];
+  ratings: [RatingChange, RatingChange];
 }
 
 /**
@@ -422,7 +472,14 @@ export interface MatchEndMessage {
 
 /** Machine-readable request failures. */
 export type ErrorCode =
-  'version_mismatch' | 'bad_name' | 'room_not_found' | 'room_full' | 'not_in_room' | 'bad_message';
+  | 'version_mismatch'
+  | 'bad_name'
+  | 'room_not_found'
+  | 'room_full'
+  | 'not_in_room'
+  | 'bad_message'
+  /** Rated rooms are for accounts. */
+  | 'account_required';
 
 export interface ErrorMessage {
   type: 'error';
@@ -448,6 +505,7 @@ export type ServerMessage =
   | PeerInputsMessage
   | DesyncMessage
   | MatchEndMessage
+  | RatingUpdateMessage
   | ErrorMessage;
 
 export type Message = ClientMessage | ServerMessage;

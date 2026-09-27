@@ -1,9 +1,9 @@
 /**
  * httpApi.ts — the relay's HTTP routes: the scoreboard's (protocol
- * `scoreboard.ts`) and the accounts' (protocol `account.ts`). A thin Node
- * layer over the transport-free {@link SoloScoreboard} and
- * {@link AccountService}, served on the relay's port beside the WebSocket
- * upgrade (see `wsServer.ts`).
+ * `scoreboard.ts`), the accounts' (protocol `account.ts`) and the ladder's
+ * (protocol `rating.ts`). A thin Node layer over the transport-free
+ * {@link SoloScoreboard}, {@link AccountService} and {@link RatingService},
+ * served on the relay's port beside the WebSocket upgrade (see `wsServer.ts`).
  */
 
 import type { IncomingMessage, RequestListener, ServerResponse } from 'node:http';
@@ -11,10 +11,12 @@ import { isIP } from 'node:net';
 import {
   ACCOUNT_API_PREFIX,
   ACCOUNT_MAX_BODY_BYTES,
+  RATING_API_PREFIX,
   SOLO_API_PREFIX,
   SOLO_SUBMIT_MAX_BYTES,
 } from '@crack-attack/protocol';
 import type { AccountService } from './accounts.js';
+import type { RatingService } from './ratings.js';
 import { clientKey } from './rateLimit.js';
 import { ApiError } from './apiError.js';
 import type { SoloScoreboard } from './scoreboard.js';
@@ -48,6 +50,8 @@ export interface ScoreboardApiOptions {
   publicUrl?: string | undefined;
   /** Serves the account routes too, when given. */
   accounts?: AccountService | undefined;
+  /** Serves the ladder's routes too, when given. */
+  ratings?: RatingService | undefined;
 }
 
 /** The client went away mid-request: there's no one left to answer. */
@@ -80,7 +84,8 @@ async function handle(
   try {
     const url = parseUrl(req.url ?? '/');
     const accounts = url.pathname.startsWith(`${ACCOUNT_API_PREFIX}/`) ? options.accounts : null;
-    if (!accounts && !url.pathname.startsWith(`${SOLO_API_PREFIX}/`)) {
+    const ratings = url.pathname.startsWith(`${RATING_API_PREFIX}/`) ? options.ratings : null;
+    if (!accounts && !ratings && !url.pathname.startsWith(`${SOLO_API_PREFIX}/`)) {
       throw new ApiError(404, 'not_found', 'not found');
     }
     if (req.method === 'OPTIONS') {
@@ -103,6 +108,18 @@ async function handle(
         req,
         res,
       );
+      return;
+    }
+    if (ratings) {
+      const route = url.pathname.slice(RATING_API_PREFIX.length);
+      allow(req, 'GET');
+      if (route === '/leaderboard') {
+        send(res, 200, await ratings.leaderboard(client, url.searchParams), 'no-cache');
+        return;
+      }
+      const [, handle] = /^\/player\/([^/]+)$/.exec(route) ?? [];
+      if (handle === undefined) throw new ApiError(404, 'not_found', 'not found');
+      send(res, 200, await ratings.player(client, handle), 'no-cache');
       return;
     }
     const route = url.pathname.slice(SOLO_API_PREFIX.length);

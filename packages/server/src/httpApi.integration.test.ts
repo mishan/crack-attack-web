@@ -13,6 +13,7 @@ import { PROTOCOL_VERSION, SOLO_SUBMIT_MAX_BYTES, encodeMessage } from '@crack-a
 import { MemoryAccountStore } from './accountStore.js';
 import { AccountService } from './accounts.js';
 import { createScoreboardApi, forwardedAddress, parseAddress, requestGameUrl } from './httpApi.js';
+import { RatingService } from './ratings.js';
 import { SoloScoreboard } from './scoreboard.js';
 import { MemoryScoreStore } from './scoreStore.js';
 import { Verifier } from './verifier.js';
@@ -552,5 +553,85 @@ describe('relay shutdown', () => {
     expect(res.status).toBe(200);
     expect(await res.json()).toMatchObject({ score: 48 });
     await closing;
+  });
+});
+
+describe('rating HTTP API', () => {
+  it('serves the leaderboard and a player page', async () => {
+    const store = new MemoryAccountStore();
+    const now = Date.UTC(2026, 8, 27, 12);
+    for (const [n, handle] of [
+      [1, 'Misha'],
+      [2, 'bob'],
+    ] as const) {
+      await store.createAccount({
+        handle,
+        handleFolded: handle.toLowerCase(),
+        keyHash: `k${n}`,
+        sessionHash: `s${n}`,
+        createdAt: now,
+      });
+    }
+    await store.recordRatedGame({
+      accountA: 1,
+      accountB: 2,
+      result: 'a',
+      end: 'concession',
+      ticks: 500,
+      seed: 1,
+      simVersion: 1,
+      aBefore: { rating: 1500, rd: 100 },
+      bBefore: { rating: 1500, rd: 100 },
+      aAfter: { rating: 1520.4, rd: 95, volatility: 0.06 },
+      bAfter: { rating: 1479.6, rd: 95, volatility: 0.06 },
+      createdAt: now,
+      inputs: null,
+    });
+    const rated = await startRelayWsServer({
+      port: 0,
+      host: '127.0.0.1',
+      http: createScoreboardApi(new SoloScoreboard({ store: new MemoryScoreStore() }), {
+        ratings: new RatingService({ store, now: () => now }),
+      }),
+    });
+    const url = `http://127.0.0.1:${rated.port}/api/rating`;
+    try {
+      const board = await fetch(`${url}/leaderboard?limit=5`);
+      expect(board.headers.get('cache-control')).toBe('no-cache');
+      expect(await board.json()).toEqual({
+        entries: [
+          { rank: 1, handle: 'Misha', rating: 1520, wins: 1, losses: 0, draws: 0 },
+          { rank: 2, handle: 'bob', rating: 1480, wins: 0, losses: 1, draws: 0 },
+        ],
+      });
+      expect((await fetch(`${url}/leaderboard?limit=0`)).status).toBe(400);
+
+      const page = await fetch(`${url}/player/${encodeURIComponent('BOB')}`);
+      expect(await page.json()).toEqual({
+        handle: 'bob',
+        rating: 1480,
+        provisional: false,
+        wins: 0,
+        losses: 1,
+        draws: 0,
+        games: [
+          {
+            id: 1,
+            opponent: 'Misha',
+            result: 'loss',
+            end: 'concession',
+            ratingBefore: 1500,
+            ratingAfter: 1480,
+            createdAt: now,
+          },
+        ],
+      });
+      expect((await fetch(`${url}/player/nobody`)).status).toBe(404);
+      expect((await fetch(`${url}/player/%E0%A4%A`)).status).toBe(400);
+      expect((await fetch(`${url}/players`)).status).toBe(404);
+      expect((await fetch(`${url}/leaderboard`, { method: 'POST' })).status).toBe(405);
+    } finally {
+      await rated.close();
+    }
   });
 });

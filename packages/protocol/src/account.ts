@@ -32,6 +32,7 @@
  */
 
 import { ProtocolError, isSessionToken } from './codec.js';
+import { MAX_PLAYER_NAME_LENGTH } from './messages.js';
 import { SCOREBOARD_ERROR_CODES, normalizeScoreName } from './scoreboard.js';
 
 /** Path prefix of every account route. */
@@ -134,9 +135,15 @@ export interface ApiErrorBody {
   message: string;
 }
 
-/** A handle cleaned up as for the scoreboard (see `normalizeScoreName`), or null if nothing usable is left. */
+/**
+ * A handle cleaned up as for the scoreboard (see `normalizeScoreName`), or
+ * null if nothing usable is left, or if it's longer than a lobby name may be
+ * ({@link MAX_PLAYER_NAME_LENGTH} UTF-16 units: an account plays under its
+ * handle, and sixteen characters of long emoji sequences can run past that).
+ */
 export function normalizeHandle(raw: string): string | null {
-  return normalizeScoreName(raw);
+  const handle = normalizeScoreName(raw);
+  return handle !== null && handle.length <= MAX_PLAYER_NAME_LENGTH ? handle : null;
 }
 
 /**
