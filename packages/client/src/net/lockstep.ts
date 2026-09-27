@@ -9,19 +9,14 @@
  * a waiting indicator, exactly the "no blocking" replacement for the C++'s
  * alternating send/recv (Communicator.cxx:453).
  *
- * The two sims' garbage-out ports are cross-wired locally, so garbage insertion
- * happens at the same tick on both machines and never crosses the wire. Both
- * sims share the match seed, as the original's seed exchange did — both boards
- * see the same block sequence, which is the fairness the C++ intended.
- *
- * Every DIGEST_PERIOD ticks the session snapshots both sims' digests for the
- * relay to compare (desync detection). Game over is decided deterministically:
- * the first sim to lose loses; both losing on the same tick is a draw
- * (retiring the C++'s hidden server-wins-ties quirk, Communicator.cxx:423).
+ * The match itself — shared seed, cross-wired garbage, step order, who won —
+ * is core's {@link NetMatch}, so every client, spectator and the relay agree on
+ * it. Every DIGEST_PERIOD ticks the session snapshots both sims' digests for
+ * the relay to compare (desync detection).
  */
 
-import { ActionState, GameSim } from '@crack-attack/core';
-import type { AiController } from '@crack-attack/core';
+import { NetMatch } from '@crack-attack/core';
+import type { AiController, GameSim } from '@crack-attack/core';
 import { ACTION_MASK, DIGEST_PERIOD, MAX_INPUT_FRAMES_PER_MESSAGE } from '@crack-attack/protocol';
 
 /**
@@ -57,15 +52,13 @@ export interface Outcome {
 }
 
 export class LockstepSession {
-  /** Both players' sims, indexed by player index. */
-  readonly sims: [GameSim, GameSim];
+  /** The match both sims play in. */
+  readonly match: NetMatch;
   readonly localIndex: number;
   readonly inputDelay: number;
 
   /** Per-player input frames by tick. */
   private readonly frames: [number[], number[]] = [[], []];
-  /** Ticks stepped so far (both sims are always at this tick). */
-  private ticks = 0;
   /** Local frames scheduled but not yet handed to the transport. */
   private readonly outbox: number[] = [];
   private outboxStart = 0;
@@ -77,8 +70,6 @@ export class LockstepSession {
    * discarded, and resubmitting them would leak into its pending map.
    */
   private digestFloor = -1;
-
-  private readonly scratchActions = new ActionState(0);
 
   /**
    * When the opponent is a bot: its controller + seat index. The bot's frames
@@ -118,22 +109,7 @@ export class LockstepSession {
     this.localIndex = localIndex;
     this.inputDelay = inputDelay;
     this.aiOpponent = aiOpponent ?? null;
-    this.sims = [new GameSim(seed), new GameSim(seed)];
-
-    // Cross-wire the garbage ports: sim i's outbound garbage is queued on the
-    // other sim, stamped with the current (shared) tick — the lockstep
-    // equivalent of the C++ addToQueue(..., time_stamp) ingress
-    // (GarbageGenerator.cxx:154). Runs at the same point on both machines.
-    for (let i = 0; i < 2; i++) {
-      const from = this.sims[i]!;
-      const to = this.sims[1 - i]!;
-      from.garbageGenerator.outSink = {
-        sendGarbage: (height, width, flavor) =>
-          to.garbageGenerator.addToQueue(height, width, flavor, from.clock.time_step),
-        sendSpecialGarbage: (flavor) =>
-          to.garbageGenerator.addToQueue(1, 1, flavor, from.clock.time_step),
-      };
-    }
+    this.match = new NetMatch(seed);
 
     if (resumeHistories) {
       // Resume: adopt the server ledgers wholesale. Everything in them was
@@ -155,21 +131,26 @@ export class LockstepSession {
     }
   }
 
+  /** Both players' sims, indexed by player index. */
+  get sims(): readonly [GameSim, GameSim] {
+    return this.match.sims;
+  }
+
   /** How many remote ticks are buffered beyond the current tick (catch-up depth). */
   get bufferedRemoteTicks(): number {
-    return Math.max(0, this.frames[1 - this.localIndex]!.length - this.ticks);
+    return Math.max(0, this.frames[1 - this.localIndex]!.length - this.match.tick);
   }
 
   /** The tick both sims are at. */
   get currentTick(): number {
-    return this.ticks;
+    return this.match.tick;
   }
 
   /** True when the next tick is blocked on the opponent's input frames. */
   get waitingForRemote(): boolean {
     // A bot opponent's frames are produced on demand, so we never wait on it.
     if (this.aiOpponent) return false;
-    return this.outcome === null && this.frames[1 - this.localIndex]!.length <= this.ticks;
+    return this.outcome === null && this.frames[1 - this.localIndex]!.length <= this.match.tick;
   }
 
   /**
@@ -202,7 +183,7 @@ export class LockstepSession {
     const remote = this.frames[1 - this.localIndex]!;
 
     while (stepped < maxSteps && this.outcome === null) {
-      const t = this.ticks;
+      const t = this.match.tick;
 
       // Bot opponent: synthesize its frame for this tick from its own sim
       // (read *before* stepping, exactly like a sampled human input), so the
@@ -223,28 +204,19 @@ export class LockstepSession {
         this.outbox.push(bits);
       }
 
-      for (let i = 0; i < 2; i++) {
-        this.scratchActions.state = this.frames[i]![t]!;
-        this.sims[i]!.step(this.scratchActions);
-      }
-      this.ticks++;
+      const ended = this.match.step(this.frames[0]![t]!, this.frames[1]![t]!);
+      const tick = this.match.tick;
       stepped++;
 
       // Skip digests against a bot: its inputs never reach the relay, so there
       // is no peer submission to compare them with (desync detection is moot).
-      if (!this.aiOpponent && this.ticks % DIGEST_PERIOD === 0 && this.ticks > this.digestFloor) {
-        this.digestQueue.push({
-          tick: this.ticks,
-          digests: [this.sims[0]!.digest(), this.sims[1]!.digest()],
-        });
+      if (!this.aiOpponent && tick % DIGEST_PERIOD === 0 && tick > this.digestFloor) {
+        const [sim0, sim1] = this.match.sims;
+        this.digestQueue.push({ tick, digests: [sim0.digest(), sim1.digest()] });
       }
 
-      const lost0 = this.sims[0]!.lost;
-      const lost1 = this.sims[1]!.lost;
-      if (lost0 || lost1) {
-        this.outcome = { winner: lost0 && lost1 ? null : lost0 ? 1 : 0, tick: this.ticks };
-      }
-      onTick?.(this.ticks);
+      if (ended) this.outcome = { ...ended };
+      onTick?.(tick);
     }
     return stepped;
   }

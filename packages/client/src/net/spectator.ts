@@ -10,20 +10,17 @@
  * a spectator has no inputs, no digests, no results.
  */
 
-import { ActionState, GameSim } from '@crack-attack/core';
+import { NetMatch } from '@crack-attack/core';
+import type { GameSim } from '@crack-attack/core';
 import { ACTION_MASK } from '@crack-attack/protocol';
 import type { AiSeat, Outcome } from './lockstep.js';
 
 export class SpectatorSession {
-  /** Both players' sims, indexed by player index. */
-  readonly sims: [GameSim, GameSim];
+  /** The match both sims play in, the same {@link NetMatch} the players run. */
+  readonly match: NetMatch;
 
   /** Per-player input frames by tick. */
   private readonly frames: [number[], number[]];
-  /** Ticks stepped so far (both sims are always at this tick). */
-  private ticks = 0;
-
-  private readonly scratchActions = new ActionState(0);
 
   /**
    * If a seat is a bot: its controller + index. Its frames aren't relayed; the
@@ -36,27 +33,19 @@ export class SpectatorSession {
   outcome: Outcome | null = null;
 
   constructor(seed: number, histories: [number[], number[]], aiOpponent?: AiSeat) {
-    this.sims = [new GameSim(seed), new GameSim(seed)];
+    this.match = new NetMatch(seed);
     this.frames = [[...histories[0]], [...histories[1]]];
     this.aiOpponent = aiOpponent ?? null;
+  }
 
-    // Cross-wire the garbage ports exactly as the players do, so this sim
-    // pair reproduces theirs tick for tick.
-    for (let i = 0; i < 2; i++) {
-      const from = this.sims[i]!;
-      const to = this.sims[1 - i]!;
-      from.garbageGenerator.outSink = {
-        sendGarbage: (height, width, flavor) =>
-          to.garbageGenerator.addToQueue(height, width, flavor, from.clock.time_step),
-        sendSpecialGarbage: (flavor) =>
-          to.garbageGenerator.addToQueue(1, 1, flavor, from.clock.time_step),
-      };
-    }
+  /** Both players' sims, indexed by player index. */
+  get sims(): readonly [GameSim, GameSim] {
+    return this.match.sims;
   }
 
   /** The tick both sims are at. */
   get currentTick(): number {
-    return this.ticks;
+    return this.match.tick;
   }
 
   /**
@@ -67,7 +56,7 @@ export class SpectatorSession {
     const buffered = this.aiOpponent
       ? this.frames[1 - this.aiOpponent.index]!.length
       : Math.min(this.frames[0]!.length, this.frames[1]!.length);
-    return Math.max(0, buffered - this.ticks);
+    return Math.max(0, buffered - this.match.tick);
   }
 
   /** True when the next tick is blocked on either player's frames. */
@@ -98,7 +87,7 @@ export class SpectatorSession {
   advance(maxSteps: number, onTick?: (tick: number) => void): number {
     let stepped = 0;
     while (stepped < maxSteps && this.outcome === null && this.bufferedTicks > 0) {
-      const t = this.ticks;
+      const t = this.match.tick;
       // Synthesize the bot's frame for this tick from its own sim, before
       // stepping — the same computation the players run, over an identical AI
       // sim, so the spectator's boards match theirs tick for tick.
@@ -107,19 +96,10 @@ export class SpectatorSession {
           this.aiOpponent.controller.decide(this.sims[this.aiOpponent.index]!).state,
         );
       }
-      for (let i = 0; i < 2; i++) {
-        this.scratchActions.state = this.frames[i]![t]!;
-        this.sims[i]!.step(this.scratchActions);
-      }
-      this.ticks++;
+      const ended = this.match.step(this.frames[0]![t]!, this.frames[1]![t]!);
       stepped++;
-
-      const lost0 = this.sims[0]!.lost;
-      const lost1 = this.sims[1]!.lost;
-      if (lost0 || lost1) {
-        this.outcome = { winner: lost0 && lost1 ? null : lost0 ? 1 : 0, tick: this.ticks };
-      }
-      onTick?.(this.ticks);
+      if (ended) this.outcome = { ...ended };
+      onTick?.(this.match.tick);
     }
     return stepped;
   }

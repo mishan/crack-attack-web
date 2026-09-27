@@ -673,6 +673,19 @@ A generator header that a real, non-AI tool always writes (e.g. a lockfile's own
       (client build); the preview image is `public/og-image.png`. The title
       card, high-score screen, share dialog and share page link the source on
       GitHub (`SOURCE_URL` in protocol).
+- [~] **Multiplayer rating** (plan: `docs/RATING_PLAN.md`) — phase 1
+  landed: `core/netMatch.ts`, the two-board match. `NetMatch` owns the
+  shared seed, the garbage cross-wiring, the step order (both frames fixed,
+  seat 0 then seat 1) and the outcome (same-tick double loss = draw).
+  `LockstepSession`, `SpectatorSession`, the AI-vs-AI demo and
+  `tools/ai-arena` all step one, so "who won" has one definition; the arena
+  and demo bots now decide from the start of the tick, as a netplay bot seat
+  does, which left arena results unchanged on the seeds measured. Solo vs AI
+  (`aiMatch.ts`) keeps its own loop, since `tools/replay-analyze` replays its
+  saved games in that order. A golden fixture
+  (`core/src/fixtures/net-hard-medium-42.match.json`, hard vs medium, both
+  sending garbage) pins it. Next: phase 2, the relay verifying disputed and
+  desynced games.
 - [ ] Phase 6 stretch (X-mode, replays, WebRTC, binary codec if
       measurements demand it)
 

@@ -31,3 +31,4 @@ export * from './computerPlayer.js';
 export * from './aiController.js';
 export * from './aiPlanner.js';
 export * from './gameSim.js';
+export * from './netMatch.js';
