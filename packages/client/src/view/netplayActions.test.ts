@@ -15,6 +15,7 @@ describe('netplayActions', () => {
       rematch: 'hidden',
       leave: false,
       stopWatching: false,
+      queueAgain: false,
       touchPad: true,
     });
   });
@@ -41,6 +42,7 @@ describe('netplayActions', () => {
       rematch: 'hidden',
       leave: false,
       stopWatching: true,
+      queueAgain: false,
       touchPad: false,
     });
   });
@@ -52,8 +54,16 @@ describe('netplayActions', () => {
         rematch: 'hidden',
         leave: false,
         stopWatching: false,
+        queueAgain: false,
         touchPad: false,
       });
     }
+  });
+
+  it('offers Queue again after a game the queue found', () => {
+    const over = { ...base, phase: 'ended' as const, decided: true };
+    expect(netplayActions({ ...over, fromQueue: true }).queueAgain).toBe(true);
+    expect(netplayActions(over).queueAgain).toBe(false);
+    expect(netplayActions({ ...base, phase: 'playing', fromQueue: true }).queueAgain).toBe(false);
   });
 });

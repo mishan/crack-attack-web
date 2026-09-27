@@ -61,8 +61,14 @@ import { CC_MOVE_MASK, CC_SWAP, CC_ADVANCE } from '@crack-attack/core';
  * `create_room` takes `rated`, `match_start`/`match_resume`/`spectate_start`
  * say whether this game counts, and `rating_update` follows a rated game once
  * the relay has verified it.
+ *
+ * v6: matchmaking. `queue_join` puts an account in the rated queue;
+ * `queue_status` tells it where it stands (and `room_list` tells everyone how
+ * many are queued); `match_found` offers a pairing, which each side answers
+ * with `queue_accept` (or `queue_leave`) within {@link QUEUE_ACCEPT_MS}. Two
+ * acceptances seat both in a new rated room and start the match at once.
  */
-export const PROTOCOL_VERSION = 5;
+export const PROTOCOL_VERSION = 6;
 
 /** AI opponent difficulty levels (mirrors core's `AiController`). */
 export const AI_DIFFICULTIES = ['easy', 'medium', 'hard'] as const;
@@ -134,6 +140,15 @@ export interface PlayerRecord {
  * are casual until the next day, so an alt can't feed one account for long.
  */
 export const RATED_GAMES_PER_PAIR_PER_DAY = 10;
+
+/** A queued player's rating window: ±this at first... */
+export const QUEUE_WINDOW_START = 100;
+/** ...widening by this... */
+export const QUEUE_WINDOW_STEP = 50;
+/** ...for every this long waited, in ms. */
+export const QUEUE_WINDOW_EVERY_MS = 10_000;
+/** How long each side of a found match has to accept it, in ms. */
+export const QUEUE_ACCEPT_MS = 10_000;
 
 /** An account's rating as shown: a whole number, provisional (`1580?`) while still uncertain. */
 export interface PlayerRating {
@@ -255,6 +270,21 @@ export interface ConcedeMessage {
   type: 'concede';
 }
 
+/** Join the rated queue (accounts only, outside any room). The server replies `queue_status`. */
+export interface QueueJoinMessage {
+  type: 'queue_join';
+}
+
+/** Leave the rated queue, or decline a `match_found`. The server replies `queue_status`. */
+export interface QueueLeaveMessage {
+  type: 'queue_leave';
+}
+
+/** Accept a `match_found`. */
+export interface QueueAcceptMessage {
+  type: 'queue_accept';
+}
+
 /** Leave the current room (pre-match). Peers receive `peer_left`. */
 export interface LeaveRoomMessage {
   type: 'leave_room';
@@ -271,7 +301,10 @@ export type ClientMessage =
   | ResultMessage
   | RenameMessage
   | ConcedeMessage
-  | LeaveRoomMessage;
+  | LeaveRoomMessage
+  | QueueJoinMessage
+  | QueueLeaveMessage
+  | QueueAcceptMessage;
 
 // --- Server → Client --------------------------------------------------------
 
@@ -295,6 +328,8 @@ export interface WelcomeMessage {
 export interface RoomListMessage {
   type: 'room_list';
   rooms: RoomSummary[];
+  /** Players in the rated queue, so one waiting player draws in others. */
+  queued: number;
 }
 
 /** The room was created; share `code` with the opponent. */
@@ -435,6 +470,34 @@ export interface MatchResumeMessage {
   rated: boolean;
 }
 
+/**
+ * Where a player stands in the rated queue: sent on joining, whenever the
+ * queue's size or the player's window changes, and on leaving it (then
+ * `inQueue` is false: a `queue_leave`, a declined or missed `match_found`).
+ */
+export interface QueueStatusMessage {
+  type: 'queue_status';
+  inQueue: boolean;
+  /** Players in the queue, this one included. */
+  queued: number;
+  /** Time waited so far, in ms. */
+  waitedMs: number;
+  /** The rating gap this player accepts now (±). */
+  window: number;
+}
+
+/**
+ * The queue found an opponent. Answer with `queue_accept` within `acceptMs`,
+ * or `queue_leave` to decline. A side that doesn't accept leaves the queue;
+ * the other goes back in, keeping its time waited.
+ */
+export interface MatchFoundMessage {
+  type: 'match_found';
+  opponent: string;
+  rating: PlayerRating;
+  acceptMs: number;
+}
+
 /** One player's rating before and after a rated game. */
 export interface RatingChange {
   before: PlayerRating;
@@ -506,6 +569,8 @@ export type ServerMessage =
   | DesyncMessage
   | MatchEndMessage
   | RatingUpdateMessage
+  | QueueStatusMessage
+  | MatchFoundMessage
   | ErrorMessage;
 
 export type Message = ClientMessage | ServerMessage;

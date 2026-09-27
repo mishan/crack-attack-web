@@ -26,6 +26,11 @@
  * directly for a concession or a forfeit. Ratings are Glicko-2
  * (`glicko.ts`), and every rated game is logged with both players' inputs.
  *
+ * Accounts may also queue for a rated game (protocol v6): the relay pairs the
+ * two closest ratings inside both players' windows (`matchmaker.ts`), asks
+ * both to accept, and seats them in a new rated room. The queue lives in
+ * memory, like rooms: a restart or a disconnect empties it.
+ *
  * Original work Copyright (C) 2000 Daniel Nelson. GPL-2.0-or-later.
  */
 
@@ -35,6 +40,7 @@ import {
   DEFAULT_RECONNECT_GRACE_MS,
   MAX_MATCH_FRAMES,
   PROTOCOL_VERSION,
+  QUEUE_ACCEPT_MS,
   RATED_GAMES_PER_PAIR_PER_DAY,
   SESSION_TTL_MS,
   ROOM_CODE_ALPHABET,
@@ -60,6 +66,7 @@ import { randomBytes } from 'node:crypto';
 import { accountKey, type AccountStore, type StoredAccount } from './accountStore.js';
 import { secretHash, shownRating, type SessionsEnded } from './accounts.js';
 import { rateGame } from './glicko.js';
+import { bestPair, queueWindow, type QueueEntry } from './matchmaker.js';
 import { MemoryStore, type LobbyStore } from './store.js';
 import { Verifier } from './verifier.js';
 
@@ -215,6 +222,26 @@ interface Settlement {
   release: (() => void) | null;
 }
 
+/** An account waiting in the rated queue. */
+interface Queued {
+  session: Session;
+  accountId: number;
+  /** On the relay's clock; kept if a found match falls through. */
+  joinedAt: number;
+  /** The window last reported in `queue_status`, to tell it when it widens. */
+  lastWindow: number;
+}
+
+/** A pairing the queue found, waiting for both sides to accept. */
+interface Proposal {
+  sides: [Queued, Queued];
+  accepted: [boolean, boolean];
+  timer: ReturnType<typeof setTimeout>;
+}
+
+/** How often the queue re-pairs, as windows widen. */
+const QUEUE_TICK_MS = 1000;
+
 /** A live, helloed connection: identity plus (optionally) a seat or a watch. */
 interface Session {
   conn: ClientConnection;
@@ -303,6 +330,17 @@ export class RelayServer {
   private readonly sessions = new Map<ClientConnection, Session | null>();
   /** Dropped mid-match, grace pending: token → their room. */
   private readonly dropped = new Map<string, Room>();
+  /** The rated queue, oldest first. */
+  private readonly queue = new Map<Session, Queued>();
+  /** Found matches awaiting acceptance, by each side's session. */
+  private readonly proposals = new Map<Session, Proposal>();
+  /** Whom the queue last paired each player with, by record key. */
+  private readonly lastQueueOpponent = new Map<string, string>();
+  /** Account pairs known to be at today's rated cap: pair → the UTC day's start. */
+  private readonly cappedPairs = new Map<string, number>();
+  private queueTimer: ReturnType<typeof setTimeout> | null = null;
+  /** A pairing pass is running (it awaits the store, so passes mustn't overlap). */
+  private matching = false;
   private readonly entropy: () => number;
   private readonly inputDelay: number;
   private readonly store: LobbyStore;
@@ -398,6 +436,9 @@ export class RelayServer {
       this.error(session.conn, 'bad_message', 'your session has ended; log in again');
       session.conn.close();
     }
+    if (this.queueTimer !== null) clearTimeout(this.queueTimer);
+    this.queueTimer = null;
+    for (const p of this.proposals.values()) clearTimeout(p.timer);
   }
 
   /** The transport reports a new connection. */
@@ -411,6 +452,13 @@ export class RelayServer {
     const session = this.sessions.get(conn);
     this.sessions.delete(conn);
     if (!session) return;
+    // No grace for the queue: a disconnect leaves it (and declines a found match).
+    this.leaveQueue(session, false);
+    // Whom the queue last paired it with only matters while it's connected.
+    const key = session.identity.key;
+    if (![...this.sessions.values()].some((s) => s?.identity.key === key)) {
+      this.lastQueueOpponent.delete(key);
+    }
 
     if (session.watching) {
       this.stopSpectating(session);
@@ -484,6 +532,15 @@ export class RelayServer {
       case 'leave_room':
         this.handleLeave(session);
         return;
+      case 'queue_join':
+        this.handleQueueJoin(session);
+        return;
+      case 'queue_leave':
+        if (!this.leaveQueue(session, true)) this.sendQueueStatus(session, null);
+        return;
+      case 'queue_accept':
+        this.handleQueueAccept(session);
+        return;
     }
   }
 
@@ -513,7 +570,7 @@ export class RelayServer {
       record: identity.record,
       rating: identity.account?.rating ?? null,
     });
-    this.send(conn, { type: 'room_list', rooms: this.roomSummaries() });
+    this.send(conn, { type: 'room_list', rooms: this.roomSummaries(), queued: this.queue.size });
 
     // Reconnect: this token has a seat in a playing room within grace.
     const room = this.dropped.get(identity.token);
@@ -679,6 +736,7 @@ export class RelayServer {
     aiOpponent: { difficulty: AiDifficulty } | undefined,
     rated: boolean,
   ): void {
+    this.leaveQueue(session, true);
     if (session.room || session.watching) {
       this.error(session.conn, 'bad_message', 'already in a room');
       return;
@@ -719,6 +777,7 @@ export class RelayServer {
   }
 
   private handleJoinRoom(session: Session, code: string): void {
+    this.leaveQueue(session, true);
     if (session.room || session.watching) {
       this.error(session.conn, 'bad_message', 'already in a room');
       return;
@@ -757,6 +816,7 @@ export class RelayServer {
 
   /** Attach a watcher to a room; a playing room also ships the ledgers. */
   private handleSpectate(session: Session, code: string): void {
+    this.leaveQueue(session, true);
     if (session.room || session.watching) {
       this.error(session.conn, 'bad_message', 'already in a room');
       return;
@@ -821,11 +881,17 @@ export class RelayServer {
   private busyElsewhere(session: Session): boolean {
     if (!session.identity.account) return false;
     const key = session.identity.key;
+    const mine = (other: Session): boolean => other !== session && other.identity.key === key;
     for (const room of this.rooms.values()) {
       if (room.seats.some((s) => s.key === key)) {
         this.error(session.conn, 'bad_message', "you're already in a room on another connection");
         return true;
       }
+    }
+    // The queue too: two connections each queued could be paired at once.
+    if ([...this.queue.keys(), ...this.proposals.keys()].some(mine)) {
+      this.error(session.conn, 'bad_message', "you're already in the queue on another connection");
+      return true;
     }
     return false;
   }
@@ -879,17 +945,258 @@ export class RelayServer {
 
   /** Whether two accounts have rated games left today (UTC). A store failure plays it casual. */
   private async underPairCap(a: Seat, b: Seat): Promise<boolean> {
-    if (!this.accounts || a.account_id === null || b.account_id === null) return false;
-    const now = this.wallClock();
-    const midnight = now - (now % MS_PER_DAY);
+    if (a.account_id === null || b.account_id === null) return false;
+    const played = await this.ratedGamesToday(a.account_id, b.account_id);
+    return played !== null && played < RATED_GAMES_PER_PAIR_PER_DAY;
+  }
+
+  /** Rated games two accounts have played today (UTC); null if the store can't say. */
+  private async ratedGamesToday(a: number, b: number): Promise<number | null> {
+    if (!this.accounts) return null;
     try {
-      const played = await this.accounts.countRatedGames(a.account_id, b.account_id, midnight);
-      const inFlight = this.ratedInFlight.get(pairKey(a.account_id, b.account_id)) ?? 0;
-      return played + inFlight < RATED_GAMES_PER_PAIR_PER_DAY;
+      const played = await this.accounts.countRatedGames(a, b, this.utcDayStart());
+      // Rated games under way count too: they'll be written once settled.
+      return played + (this.ratedInFlight.get(pairKey(a, b)) ?? 0);
     } catch (err) {
-      console.error('relay: failed to count rated games; playing casual:', err);
-      return false;
+      console.error('relay: failed to count rated games:', err);
+      return null;
     }
+  }
+
+  private utcDayStart(): number {
+    const now = this.wallClock();
+    return now - (now % MS_PER_DAY);
+  }
+
+  // --- The rated queue ------------------------------------------------------------------
+
+  private handleQueueJoin(session: Session): void {
+    const account = session.identity.account;
+    if (!account || !this.accounts) {
+      this.error(session.conn, 'account_required', 'log in to an account to play rated');
+      return;
+    }
+    if (session.room || session.watching) {
+      this.error(session.conn, 'bad_message', 'leave the room first');
+      return;
+    }
+    if (this.queue.has(session) || this.proposals.has(session)) {
+      this.sendQueueStatus(session, this.queue.get(session) ?? null);
+      return;
+    }
+    if (this.busyElsewhere(session)) return;
+    const now = this.now();
+    this.queue.set(session, {
+      session,
+      accountId: account.id,
+      joinedAt: now,
+      lastWindow: 0,
+    });
+    this.queueChanged();
+  }
+
+  /**
+   * Take `session` out of the queue, or decline its found match (the other
+   * side goes back in). With `notify`, it's told it's out. False if it wasn't
+   * queued at all.
+   */
+  private leaveQueue(session: Session, notify: boolean): boolean {
+    if (this.queue.delete(session)) {
+      if (notify) this.sendQueueStatus(session, null);
+      this.queueChanged();
+      return true;
+    }
+    const proposal = this.proposals.get(session);
+    if (!proposal) return false;
+    this.endProposal(proposal, (side) => side.session !== session);
+    return true;
+  }
+
+  private handleQueueAccept(session: Session): void {
+    const proposal = this.proposals.get(session);
+    if (!proposal) {
+      this.error(session.conn, 'bad_message', 'no match to accept');
+      return;
+    }
+    proposal.accepted[proposal.sides[0].session === session ? 0 : 1] = true;
+    if (!proposal.accepted[0] || !proposal.accepted[1]) return;
+    clearTimeout(proposal.timer);
+    for (const side of proposal.sides) this.proposals.delete(side.session);
+    void this.seatQueuedPair(proposal.sides[0].session, proposal.sides[1].session);
+  }
+
+  /**
+   * A found match is off: sides `keep` says so go back in the queue with the
+   * time they'd waited, the rest are out.
+   */
+  private endProposal(proposal: Proposal, keep: (side: Queued) => boolean): void {
+    clearTimeout(proposal.timer);
+    for (const side of proposal.sides) {
+      this.proposals.delete(side.session);
+      if (keep(side) && this.sessions.has(side.session.conn)) {
+        side.lastWindow = 0; // report the window afresh
+        this.queue.set(side.session, side);
+      } else {
+        this.sendQueueStatus(side.session, null);
+      }
+    }
+    this.queueChanged();
+  }
+
+  /** The queue changed: tell those in it where they stand, the lobby its size, and pair. */
+  private queueChanged(): void {
+    const now = this.now();
+    for (const queued of this.queue.values()) this.sendQueueStatus(queued.session, queued, now);
+    this.broadcastRoomList();
+    this.scheduleQueueTick();
+    void this.matchmake();
+  }
+
+  /** While anyone's queued, re-pair every second as windows widen. */
+  private scheduleQueueTick(): void {
+    if (this.queue.size === 0 || this.queueTimer !== null) return;
+    this.queueTimer = setTimeout(() => {
+      this.queueTimer = null;
+      const now = this.now();
+      for (const queued of this.queue.values()) {
+        if (this.windowOf(queued, now) !== queued.lastWindow) {
+          this.sendQueueStatus(queued.session, queued, now);
+        }
+      }
+      this.scheduleQueueTick();
+      void this.matchmake();
+    }, QUEUE_TICK_MS);
+  }
+
+  private windowOf(queued: Queued, now: number): number {
+    return queueWindow(this.entryOf(queued), now);
+  }
+
+  private entryOf(queued: Queued): QueueEntry {
+    const { identity } = queued.session;
+    return {
+      key: identity.key,
+      rating: identity.account?.rating.rating ?? 0,
+      joinedAt: queued.joinedAt,
+      lastOpponent: this.lastQueueOpponent.get(identity.key) ?? null,
+    };
+  }
+
+  private sendQueueStatus(session: Session, queued: Queued | null, now = this.now()): void {
+    const window = queued ? this.windowOf(queued, now) : 0;
+    if (queued) queued.lastWindow = window;
+    this.send(session.conn, {
+      type: 'queue_status',
+      inQueue: queued !== null,
+      queued: this.queue.size,
+      waitedMs: queued ? Math.max(0, Math.round(now - queued.joinedAt)) : 0,
+      window,
+    });
+  }
+
+  /**
+   * Pair whoever can be paired. Each candidate pair is checked against today's
+   * cap in the store; one that's reached it is remembered for the day and
+   * skipped.
+   */
+  private async matchmake(): Promise<void> {
+    if (this.matching) return;
+    this.matching = true;
+    try {
+      for (;;) {
+        const day = this.utcDayStart();
+        const queued = [...this.queue.values()];
+        const entries = queued.map((q) => this.entryOf(q));
+        const byEntry = new Map(entries.map((e, i) => [e, queued[i]!]));
+        const pair = bestPair(entries, this.now(), (a, b) => {
+          const key = pairKey(byEntry.get(a)!.accountId, byEntry.get(b)!.accountId);
+          return this.cappedPairs.get(key) === day;
+        });
+        if (!pair) return;
+        const [a, b] = [byEntry.get(pair[0])!, byEntry.get(pair[1])!];
+        const played = await this.ratedGamesToday(a.accountId, b.accountId);
+        if (played === null) return; // try again on the next tick
+        if (played >= RATED_GAMES_PER_PAIR_PER_DAY) {
+          // Only today's entries matter: drop older days' as a new one comes.
+          for (const [pair, at] of this.cappedPairs) if (at !== day) this.cappedPairs.delete(pair);
+          this.cappedPairs.set(pairKey(a.accountId, b.accountId), day);
+          continue;
+        }
+        // Either may have left while the store was asked.
+        if (this.queue.get(a.session) !== a || this.queue.get(b.session) !== b) continue;
+        this.propose(a, b);
+      }
+    } finally {
+      this.matching = false;
+    }
+  }
+
+  private propose(a: Queued, b: Queued): void {
+    this.queue.delete(a.session);
+    this.queue.delete(b.session);
+    const proposal: Proposal = {
+      sides: [a, b],
+      accepted: [false, false],
+      timer: setTimeout(() => {
+        // Whoever didn't accept in time leaves the queue.
+        this.endProposal(proposal, (side) => proposal.accepted[proposal.sides.indexOf(side)]!);
+      }, QUEUE_ACCEPT_MS),
+    };
+    for (const [me, them] of [
+      [a, b],
+      [b, a],
+    ] as const) {
+      this.proposals.set(me.session, proposal);
+      this.lastQueueOpponent.set(me.session.identity.key, them.session.identity.key);
+      this.send(me.session.conn, {
+        type: 'match_found',
+        opponent: them.session.identity.name,
+        rating: { ...them.session.identity.account!.rating },
+        acceptMs: QUEUE_ACCEPT_MS,
+      });
+    }
+    this.queueChanged();
+  }
+
+  /** Both accepted: a new rated room, both seated, and the match under way. */
+  private async seatQueuedPair(a: Session, b: Session): Promise<void> {
+    const code = this.generateRoomCode();
+    const seats = [this.newSeat(a), this.newSeat(b)];
+    const room: Room = {
+      code,
+      seats,
+      spectators: [],
+      state: 'waiting',
+      rated: true,
+      match_rated: false,
+      starting: true,
+      seed: 0,
+      started_at: 0,
+      digest_floor: -1,
+      grace_timer: null,
+      watchdog: null,
+    };
+    this.rooms.set(code, room);
+    for (const [session, seat] of [
+      [a, seats[0]!],
+      [b, seats[1]!],
+    ] as const) {
+      session.room = room;
+      session.seat = seat;
+      this.send(session.conn, { type: 'room_joined', code, players: seats.map((s) => s.name) });
+    }
+    this.broadcastRoomList();
+    let rated = false;
+    try {
+      rated = await this.underPairCap(seats[0]!, seats[1]!);
+    } finally {
+      room.starting = false;
+    }
+    // Either may have left (or dropped) while the store was asked.
+    if (this.rooms.get(code) !== room || room.seats.length !== 2 || room.state !== 'waiting') {
+      return;
+    }
+    this.startMatch(room, rated);
   }
 
   private startMatch(room: Room, rated: boolean): void {
@@ -1579,7 +1886,11 @@ export class RelayServer {
 
   /** Push the lobby snapshot to every helloed connection. */
   private broadcastRoomList(): void {
-    const msg: ServerMessage = { type: 'room_list', rooms: this.roomSummaries() };
+    const msg: ServerMessage = {
+      type: 'room_list',
+      rooms: this.roomSummaries(),
+      queued: this.queue.size,
+    };
     const text = encodeMessage(msg);
     for (const session of this.sessions.values()) {
       session?.conn.send(text);
