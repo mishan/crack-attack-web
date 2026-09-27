@@ -755,6 +755,10 @@ A generator header that a real, non-AI tool always writes (e.g. a lockfile's own
   restores the guest set aside); rating changes go to the lobby's status line
   when the lobby is up, and countdown-time banners clear at GO; Back and Esc
   hold while registering and ask twice before leaving an unsaved key.
+  **Phase 6 (docs)**: the README's deploy guide covers accounts and the
+  ladder (the `/api/` proxy already carries them), the new log lines, account
+  moderation, backups (a lost database loses every account for good) and
+  updating a running relay.
 - [ ] Phase 6 stretch (X-mode, replays, WebRTC, binary codec if
       measurements demand it)
 
