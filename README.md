@@ -321,10 +321,22 @@ settles as it plays, a rating's uncertainty grows again with days away, and a
 rating is provisional (`1580?`) while that uncertainty is high. A same-tick
 double loss is a draw.
 
-A pair of accounts gets 10 rated games per UTC day, counting games still
-being settled; later games in the room are casual. Casual games still count toward an account's W-L. Every rated game
-is logged with both players' ratings before and after, and with their inputs
-for a week.
+To find a game, an account can press **Play rated** in the lobby and join the
+rated queue. The relay pairs the two waiting players whose ratings are
+closest, as long as they're within both players' windows: ±100 at first,
+widening by 50 for every 10 s waited, so a quiet queue still finds someone.
+Both then have 10 s to accept; whoever doesn't leaves the queue, and the other
+goes back in with the time they'd waited. Two acceptances seat both in a new
+rated room and start the game. **Queue again** after it goes back in the
+queue, and the queue won't pair the same two again while anyone else is
+waiting. The lobby shows how many are queued. The queue lives in memory: a
+restart or a disconnect empties it.
+
+A pair of accounts gets 10 rated games per UTC day, however they meet and
+counting games still being settled; later games in the room are casual, and the
+queue stops pairing them. Casual games still count toward an account's W-L.
+Every rated game is logged with both players' ratings before and after, and with
+their inputs for a week.
 
 | Route                            | What it does                                                                       |
 | -------------------------------- | ---------------------------------------------------------------------------------- |

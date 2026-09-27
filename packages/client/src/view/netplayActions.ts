@@ -15,6 +15,8 @@ export interface NetplayActionInput {
   readonly countdown: boolean;
   /** We've asked for a rematch and are waiting on the opponent. */
   readonly rematchSent: boolean;
+  /** The room came from the rated queue (so the queue can be rejoined from it). */
+  readonly fromQueue?: boolean;
 }
 
 export interface NetplayActions {
@@ -22,6 +24,8 @@ export interface NetplayActions {
   readonly rematch: 'hidden' | 'enabled' | 'waiting';
   readonly leave: boolean;
   readonly stopWatching: boolean;
+  /** Leave for the rated queue: after a game the queue found. */
+  readonly queueAgain: boolean;
   /** The on-screen D-pad / Swap / Raise: live play only. */
   readonly touchPad: boolean;
 }
@@ -35,6 +39,7 @@ export function netplayActions(s: NetplayActionInput): NetplayActions {
     rematch: over ? (s.rematchSent ? 'waiting' : 'enabled') : 'hidden',
     leave: over,
     stopWatching: s.phase === 'spectating',
+    queueAgain: over && s.fromQueue === true,
     touchPad: live,
   };
 }

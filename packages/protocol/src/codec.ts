@@ -305,6 +305,9 @@ const CLIENT_TYPES: ReadonlySet<string> = new Set([
   'rename',
   'concede',
   'leave_room',
+  'queue_join',
+  'queue_leave',
+  'queue_accept',
 ]);
 
 const SERVER_TYPES: ReadonlySet<string> = new Set([
@@ -326,6 +329,8 @@ const SERVER_TYPES: ReadonlySet<string> = new Set([
   'desync',
   'match_end',
   'rating_update',
+  'queue_status',
+  'match_found',
   'error',
 ]);
 
@@ -357,6 +362,9 @@ function decodeAny(m: Record<string, unknown>): Message {
     case 'ready':
     case 'concede':
     case 'leave_room':
+    case 'queue_join':
+    case 'queue_leave':
+    case 'queue_accept':
       return { type };
     case 'join_room':
     case 'spectate':
@@ -384,7 +392,22 @@ function decodeAny(m: Record<string, unknown>): Message {
         rating: optionalRating(m, 'rating'),
       };
     case 'room_list':
-      return { type, rooms: roomSummaries(m, 'rooms') };
+      return { type, rooms: roomSummaries(m, 'rooms'), queued: uint32(m, 'queued') };
+    case 'queue_status':
+      return {
+        type,
+        inQueue: bool(m, 'inQueue'),
+        queued: uint32(m, 'queued'),
+        waitedMs: uint32(m, 'waitedMs'),
+        window: uint32(m, 'window'),
+      };
+    case 'match_found':
+      return {
+        type,
+        opponent: playerName(m, 'opponent'),
+        rating: playerRating(m['rating'], 'rating'),
+        acceptMs: uint32(m, 'acceptMs'),
+      };
     case 'peer_dropped':
       return { type, name: playerName(m, 'name'), graceMs: uint32(m, 'graceMs') };
     case 'peer_rejoined':

@@ -37,6 +37,9 @@ const clientMessages: ClientMessage[] = [
   { type: 'leave_room' },
   { type: 'spectate', code: CODE },
   { type: 'rename', name: 'misha2' },
+  { type: 'queue_join' },
+  { type: 'queue_leave' },
+  { type: 'queue_accept' },
 ];
 
 const serverMessages: ServerMessage[] = [
@@ -56,7 +59,7 @@ const serverMessages: ServerMessage[] = [
     record: RECORD,
     rating: RATING,
   },
-  { type: 'room_list', rooms: [] },
+  { type: 'room_list', rooms: [], queued: 0 },
   {
     type: 'room_list',
     rooms: [
@@ -78,6 +81,7 @@ const serverMessages: ServerMessage[] = [
         spectators: ['carol', 'dave'],
       },
     ],
+    queued: 3,
   },
   { type: 'spectate_joined', code: CODE, players: ['a', 'b'], spectators: ['carol'] },
   { type: 'spectate_joined', code: CODE, players: [], spectators: ['carol'] },
@@ -140,6 +144,14 @@ const serverMessages: ServerMessage[] = [
       { before: RATING, after: { rating: 1594, provisional: false } },
       { before: { rating: 1500, provisional: true }, after: { rating: 1430, provisional: true } },
     ],
+  },
+  { type: 'queue_status', inQueue: true, queued: 2, waitedMs: 12_345, window: 150 },
+  { type: 'queue_status', inQueue: false, queued: 1, waitedMs: 0, window: 100 },
+  {
+    type: 'match_found',
+    opponent: 'Bob',
+    rating: { rating: 1620, provisional: true },
+    acceptMs: 10_000,
   },
   { type: 'error', code: 'room_not_found', message: 'no such room' },
   { type: 'error', code: 'account_required', message: 'log in' },
@@ -280,7 +292,16 @@ describe('malformed input', () => {
       'welcome record with negative wins',
       `{"type":"welcome","protocolVersion":2,"token":"${'a'.repeat(32)}","name":"m","record":{"wins":-1,"losses":0}}`,
     ],
-    ['room_list rooms not array', '{"type":"room_list","rooms":"nope"}'],
+    ['room_list rooms not array', '{"type":"room_list","rooms":"nope","queued":0}'],
+    ['room_list missing queued', '{"type":"room_list","rooms":[]}'],
+    [
+      'match_found without a rating',
+      '{"type":"match_found","opponent":"Bob","rating":null,"acceptMs":10000}',
+    ],
+    [
+      'queue_status negative wait',
+      '{"type":"queue_status","inQueue":true,"queued":1,"waitedMs":-1,"window":100}',
+    ],
     [
       'match_start missing rated',
       JSON.stringify({
