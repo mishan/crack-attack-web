@@ -19,6 +19,7 @@ import { createScoreboardApi } from './httpApi.js';
 import { SoloScoreboard } from './scoreboard.js';
 import { SqliteStore } from './sqliteStore.js';
 import { startStatsProbe } from './stats.js';
+import { Verifier } from './verifier.js';
 import { DEFAULT_PORT, startRelayWsServer } from './wsServer.js';
 
 /**
@@ -99,11 +100,15 @@ const corsOrigin = process.env['CORS_ORIGIN'] || undefined;
 const publicUrl = parsePublicUrl(process.env['PUBLIC_URL']);
 
 const store = new SqliteStore(dbPath);
-const scoreboard = new SoloScoreboard({ store });
+// One queue for solo replays and disputed matches, so between them they
+// re-simulate one game at a time.
+const verifier = new Verifier();
+const scoreboard = new SoloScoreboard({ store, verifier });
 const server = await startRelayWsServer({
   port,
   host,
   store,
+  verifier,
   http: createScoreboardApi(scoreboard, { trustProxy, corsOrigin, publicUrl }),
 });
 console.log(`crack-attack relay listening on :${server.port} (db: ${dbPath})`);

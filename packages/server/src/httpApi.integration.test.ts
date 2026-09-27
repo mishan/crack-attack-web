@@ -13,7 +13,7 @@ import { PROTOCOL_VERSION, SOLO_SUBMIT_MAX_BYTES, encodeMessage } from '@crack-a
 import { createScoreboardApi, forwardedAddress, parseAddress, requestGameUrl } from './httpApi.js';
 import { SoloScoreboard } from './scoreboard.js';
 import { MemoryScoreStore } from './scoreStore.js';
-import { SoloVerifier } from './soloVerifier.js';
+import { Verifier } from './verifier.js';
 import { startRelayWsServer, type RelayWsServer } from './wsServer.js';
 
 /** A real solo game (hard AI, seed 2026): 2757 ticks, score 48, top multiplier 3. */
@@ -448,7 +448,7 @@ describe('relay shutdown', () => {
   it('lets a submission being verified finish before it closes', async () => {
     let release!: () => void;
     const gate = new Promise<void>((resolve) => (release = resolve));
-    const verifier = new SoloVerifier({ sliceTicks: 100, yieldFn: () => gate });
+    const verifier = new Verifier({ sliceTicks: 100, yieldFn: () => gate });
     const now = { t: Date.UTC(2026, 8, 13, 12) };
     const scoreboard = new SoloScoreboard({
       store: new MemoryScoreStore(),

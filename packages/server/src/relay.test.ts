@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { GC_STEPS_PER_SECOND } from '@crack-attack/core';
+import { CC_ADVANCE, GC_STEPS_PER_SECOND, NetMatch } from '@crack-attack/core';
 import {
   DEFAULT_INPUT_DELAY_TICKS,
   DEFAULT_RECONNECT_GRACE_MS,
@@ -15,6 +15,7 @@ import {
 } from '@crack-attack/protocol';
 import { MAX_INPUT_LEAD_TICKS, RelayServer, type ClientConnection } from './relay.js';
 import { MemoryStore } from './store.js';
+import { Verifier } from './verifier.js';
 
 /** A store whose result writes fail, like a SQLITE_BUSY or closed-DB backend. */
 class FailingRecordStore extends MemoryStore {
@@ -381,7 +382,7 @@ describe('input relay', () => {
 
 describe('digest comparison', () => {
   it('broadcasts desync and voids the match on mismatch', async () => {
-    const relay = new RelayServer();
+    const relay = new RelayServer({ log: () => {} });
     const [a, b] = await startedMatch(relay);
     await say(relay, a, { type: 'digest', tick: 64, digests: [111, 222] });
     await say(relay, b, { type: 'digest', tick: 64, digests: [111, 999] });
@@ -430,7 +431,7 @@ describe('results + records', () => {
   });
 
   it('treats disagreeing results as a desync', async () => {
-    const relay = new RelayServer();
+    const relay = new RelayServer({ log: () => {} });
     const [a, b] = await startedMatch(relay);
     await say(relay, a, { type: 'result', winner: 0 });
     await say(relay, b, { type: 'result', winner: 1 });
@@ -487,6 +488,187 @@ describe('background store failures', () => {
     } finally {
       errors.mockRestore();
     }
+  });
+});
+
+describe('disputes', () => {
+  /**
+   * A real game: seat 0 idles while seat 1 raises its stack every tick, so
+   * seat 1 tops out first. Returns both ledgers, to the losing tick, and the
+   * tick. Any prefix of it is a game still in play.
+   */
+  function decidedGame(seed: number): { ledgers: [number[], number[]]; tick: number } {
+    const match = new NetMatch(seed);
+    let ended = null;
+    while (!ended) ended = match.step(0, CC_ADVANCE);
+    expect(ended.winner).toBe(0);
+    return {
+      ledgers: [neutral(ended.tick), new Array<number>(ended.tick).fill(CC_ADVANCE)],
+      tick: ended.tick,
+    };
+  }
+
+  /** Both digests after playing `ticks` ticks of `ledgers`. */
+  function digestsAt(seed: number, ledgers: [number[], number[]], ticks: number): [number, number] {
+    const match = new NetMatch(seed);
+    for (let t = 0; t < ticks; t++) match.step(ledgers[0][t]!, ledgers[1][t]!);
+    return [match.sims[0].digest(), match.sims[1].digest()];
+  }
+
+  /**
+   * A started match whose players are alice (seat 0) and bob (seat 1), with a
+   * clock far enough ahead that a whole game's input is within pacing.
+   */
+  async function setup() {
+    let ms = 0;
+    const store = new MemoryStore();
+    const verifier = new Verifier();
+    const log: string[] = [];
+    const relay = new RelayServer({
+      store,
+      verifier,
+      now: () => ms,
+      log: (line) => log.push(line),
+      entropy: fixedEntropy(0.25, 0.5, 0.75),
+    });
+    const a = await client(relay, 'alice');
+    const b = await client(relay, 'bob');
+    const tokens = [a.lastOf('welcome').token, b.lastOf('welcome').token] as const;
+    const code = await createRoom(relay, a);
+    await say(relay, b, { type: 'join_room', code });
+    await say(relay, a, { type: 'ready' });
+    await say(relay, b, { type: 'ready' });
+    const seed = a.lastOf('match_start').seed;
+    ms = 1e9;
+    /** Alice's and bob's W-L records, from the store. */
+    const records = async () => [
+      (await store.getPlayer(tokens[0], 'alice'))!.record,
+      (await store.getPlayer(tokens[1], 'bob'))!.record,
+    ];
+    return { relay, verifier, log, a, b, seed, records };
+  }
+
+  /** Send each seat's ledger through the relay, in protocol-sized batches. */
+  async function sendLedgers(
+    relay: RelayServer,
+    conns: [FakeConn, FakeConn],
+    ledgers: [number[], number[]],
+  ): Promise<void> {
+    for (let i = 0; i < 2; i++) {
+      const frames = ledgers[i]!;
+      for (let t = 0; t < frames.length; t += MAX_INPUT_FRAMES_PER_MESSAGE) {
+        const batch = frames.slice(t, t + MAX_INPUT_FRAMES_PER_MESSAGE);
+        await say(relay, conns[i]!, { type: 'inputs', startTick: t, frames: batch });
+      }
+    }
+  }
+
+  it('records the real result when the loser reports a win', async () => {
+    const { relay, verifier, log, a, b, seed, records } = await setup();
+    const game = decidedGame(seed);
+    await sendLedgers(relay, [a, b], game.ledgers);
+    await say(relay, a, { type: 'result', winner: 0 });
+    await say(relay, b, { type: 'result', winner: 1 });
+    expect(a.lastOf('match_end').reason).toBe('desync');
+    a.clear();
+
+    await verifier.idle();
+    await vi.waitFor(() => expect(log).toHaveLength(1));
+    expect(log[0]).toMatch(/disputed results 0\/1 .*winner 0; seat 0 wins/);
+    expect(await records()).toEqual([
+      { wins: 1, losses: 0 },
+      { wins: 0, losses: 1 },
+    ]);
+    // The lobby sees the new records.
+    expect(a.lastOf('room_list').rooms[0]!.players).toEqual([
+      { name: 'alice', record: { wins: 1, losses: 0 } },
+      { name: 'bob', record: { wins: 0, losses: 1 } },
+    ]);
+  });
+
+  it('records nothing when the ledgers stop before the game ends', async () => {
+    const { relay, verifier, log, a, b, seed, records } = await setup();
+    const game = decidedGame(seed);
+    const short: [number[], number[]] = [
+      game.ledgers[0].slice(0, 100),
+      game.ledgers[1].slice(0, 100),
+    ];
+    await sendLedgers(relay, [a, b], short);
+    await say(relay, a, { type: 'result', winner: 0 });
+    await say(relay, b, { type: 'result', winner: 1 });
+    await verifier.idle();
+    await vi.waitFor(() => expect(log).toHaveLength(1));
+    expect(log[0]).toMatch(/in play at tick 100; not recorded/);
+    expect(await records()).toEqual([
+      { wins: 0, losses: 0 },
+      { wins: 0, losses: 0 },
+    ]);
+  });
+
+  it('records nothing when the replay agrees with neither report', async () => {
+    const { relay, verifier, log, a, b, seed, records } = await setup();
+    await sendLedgers(relay, [a, b], decidedGame(seed).ledgers);
+    await say(relay, a, { type: 'result', winner: 1 });
+    await say(relay, b, { type: 'result', winner: null });
+    await verifier.idle();
+    await vi.waitFor(() => expect(log).toHaveLength(1));
+    expect(log[0]).toMatch(/winner 0; not recorded/);
+    expect((await records())[0]).toEqual({ wins: 0, losses: 0 });
+  });
+
+  it.each([
+    ['bob', 1, 0],
+    ['alice', 0, 1],
+  ])('gives the loss to a seat whose digests are false (%s)', async (_name, liar, honest) => {
+    const { relay, verifier, log, a, b, seed, records } = await setup();
+    const game = decidedGame(seed);
+    const ledgers: [number[], number[]] = [
+      game.ledgers[0].slice(0, 96),
+      game.ledgers[1].slice(0, 96),
+    ];
+    await sendLedgers(relay, [a, b], ledgers);
+    const truth = digestsAt(seed, ledgers, 64);
+    const conns = [a, b];
+    await say(relay, conns[honest]!, { type: 'digest', tick: 64, digests: truth });
+    await say(relay, conns[liar]!, { type: 'digest', tick: 64, digests: [truth[0], truth[1] ^ 1] });
+    expect(a.lastOf('desync').tick).toBe(64);
+
+    await verifier.idle();
+    await vi.waitFor(() => expect(log).toHaveLength(1));
+    expect(log[0]).toMatch(
+      new RegExp(`digests at tick 64 .*in play at tick 64; seat ${honest} wins`),
+    );
+    const recs = await records();
+    expect(recs[honest]).toEqual({ wins: 1, losses: 0 });
+    expect(recs[liar]).toEqual({ wins: 0, losses: 1 });
+  });
+
+  it("records nothing when neither seat's digests are true", async () => {
+    const { relay, verifier, log, a, b, records } = await setup();
+    const ledgers: [number[], number[]] = [neutral(96), neutral(96)];
+    await sendLedgers(relay, [a, b], ledgers);
+    await say(relay, a, { type: 'digest', tick: 64, digests: [1, 2] });
+    await say(relay, b, { type: 'digest', tick: 64, digests: [3, 4] });
+    await verifier.idle();
+    await vi.waitFor(() => expect(log).toHaveLength(1));
+    expect(log[0]).toMatch(/not recorded/);
+    expect(await records()).toEqual([
+      { wins: 0, losses: 0 },
+      { wins: 0, losses: 0 },
+    ]);
+  });
+
+  it('records the result of a game that ended before a disputed digest', async () => {
+    const { relay, verifier, log, a, b, seed, records } = await setup();
+    const game = decidedGame(seed);
+    await sendLedgers(relay, [a, b], game.ledgers);
+    const tick = Math.ceil(game.tick / 32) * 32;
+    await say(relay, a, { type: 'digest', tick, digests: [1, 2] });
+    await say(relay, b, { type: 'digest', tick, digests: [3, 4] });
+    await verifier.idle();
+    await vi.waitFor(() => expect(log).toHaveLength(1));
+    expect(log[0]).toMatch(new RegExp(`ended on tick ${game.tick}, winner 0; seat 0 wins`));
+    expect((await records())[0]).toEqual({ wins: 1, losses: 0 });
   });
 });
 
@@ -691,7 +873,7 @@ describe('reconnect grace', () => {
   });
 
   it('ignores replayed digests at or below the resume frontier', async () => {
-    const relay = new RelayServer();
+    const relay = new RelayServer({ log: () => {} });
     const { b, tokenA } = await droppedMidMatch(relay);
     // Survivor had submitted a digest for tick 2 before the drop... simulate
     // the pre-drop matched-and-discarded case: b submits now (pending).

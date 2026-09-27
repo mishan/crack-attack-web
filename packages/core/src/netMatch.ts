@@ -104,3 +104,65 @@ export class NetMatch {
     return this.result;
   }
 }
+
+/** What re-simulating a match from its ledgers found. */
+export interface NetMatchReplayResult {
+  /** How the match ended, or null if it was still in play at {@link tick}. */
+  readonly outcome: NetMatchOutcome | null;
+  /** Ticks played. */
+  readonly tick: number;
+  /** Both sims' digests after the last tick played. */
+  readonly digests: readonly [number, number];
+}
+
+/**
+ * Re-simulates a match from its seed and both seats' per-tick input ledgers, a
+ * slice at a time, so a relay can decide a match without trusting either
+ * client and without blocking its event loop. Plays until the match ends, a
+ * ledger runs out, or `endTick`, whichever comes first.
+ */
+export class NetMatchRunner {
+  private readonly match: NetMatch;
+  private readonly endTick: number;
+
+  constructor(
+    seed: number,
+    private readonly ledgers: readonly [readonly number[], readonly number[]],
+    endTick = Infinity,
+  ) {
+    this.match = new NetMatch(seed);
+    this.endTick = Math.min(endTick, ledgers[0].length, ledgers[1].length);
+  }
+
+  /** Whether the match has ended or there is nothing left to play. */
+  get done(): boolean {
+    return this.match.outcome !== null || this.match.tick >= this.endTick;
+  }
+
+  /**
+   * Play up to `budget` more ticks; returns {@link done}. `budget` must be a
+   * positive integer, as for `SoloReplayRunner.advance`.
+   */
+  advance(budget: number): boolean {
+    if (!Number.isInteger(budget) || budget <= 0) {
+      throw new RangeError(`budget must be a positive integer, not ${budget}`);
+    }
+    const [frames0, frames1] = this.ledgers;
+    for (let n = 0; n < budget && !this.done; n++) {
+      const t = this.match.tick;
+      this.match.step(frames0[t]!, frames1[t]!);
+    }
+    return this.done;
+  }
+
+  /** The result, once {@link advance} has returned true. */
+  result(): NetMatchReplayResult {
+    if (!this.done) throw new Error('the match has not been played out');
+    const [sim0, sim1] = this.match.sims;
+    return {
+      outcome: this.match.outcome,
+      tick: this.match.tick,
+      digests: [sim0.digest(), sim1.digest()],
+    };
+  }
+}

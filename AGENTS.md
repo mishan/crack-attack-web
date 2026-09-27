@@ -684,8 +684,18 @@ A generator header that a real, non-AI tool always writes (e.g. a lockfile's own
   (`aiMatch.ts`) keeps its own loop, since `tools/replay-analyze` replays its
   saved games in that order. A golden fixture
   (`core/src/fixtures/net-hard-medium-42.match.json`, hard vs medium, both
-  sending garbage) pins it. Next: phase 2, the relay verifying disputed and
-  desynced games.
+  sending garbage) pins it. **Phase 2 landed**: the relay settles disputed
+  games itself. When results or digests disagree, it copies the seed, both
+  ledgers and the claims before `endMatch` clears them, ends the match as a
+  desync as before, and queues a core `NetMatchRunner` re-simulation.
+  `SoloVerifier` became `Verifier` (`verifier.ts`), one queue for solo runs
+  and matches, shared through `main.ts`; its bound refuses solo runs only, so
+  a flood of submissions can't crowd out a dispute. Verdicts: disagreeing
+  results record the replayed result if one seat reported it; disagreeing
+  digests record the result if the game had ended by that tick, else a loss
+  for the one seat whose digests were false. Anything else records nothing.
+  Each verdict is logged. No protocol change: the records reach players
+  through the room list. Next: phase 3, accounts.
 - [ ] Phase 6 stretch (X-mode, replays, WebRTC, binary codec if
       measurements demand it)
 

@@ -138,9 +138,14 @@ pnpm --filter @crack-attack/server start
 
 It listens on **:8080** by default and prints the address it bound to. The relay
 forwards input frames, assigns rooms/seeds, compares digests, and persists
-win/loss records — it never runs a netplay simulation itself. The same port
-also serves the [solo scoreboard](#solo-scoreboard), the one place the server
-does run the game: to verify submitted runs.
+win/loss records. It runs the game only to check a claim: submitted runs for
+the [solo scoreboard](#solo-scoreboard), served on the same port, and disputed
+netplay games. When the players' results or digests disagree, the match ends
+as a desync, and the relay then replays it from the seed and both players'
+inputs. If the game ended and one player reported that result, it's recorded.
+If it was still in play and one player's digests were false, that player
+takes the loss. Anything else records nothing. Each verdict is logged to
+stderr.
 
 Abuse limits: incoming WebSocket messages are capped at **16 KiB** (the largest
 legitimate one is under 1 KiB; ws closes an offending connection with code
@@ -206,8 +211,10 @@ Limits:
 - Board responses are cached for 5 s, so a run hidden with `admin hide` may
   show for that long (and its replay for a minute, in HTTP caches).
 - Replays are verified one at a time in short slices, so a long one never
-  stalls netplay. If too many are waiting, the API answers 503. Copies of a
-  submission sent while it's being verified share its result.
+  stalls netplay. They share the queue with disputed netplay games. If too
+  many runs are waiting, the API answers 503; a disputed game is never turned
+  away. Copies of a submission sent while it's being verified share its
+  result.
 
 A run's replay is kept for a week, then only if the run is among the top 100
 of its month or of all time, on either board (what the boards can show). Runs

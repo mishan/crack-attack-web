@@ -48,7 +48,7 @@ import {
   type StoredSoloScore,
   type TimeRange,
 } from './scoreStore.js';
-import { SoloVerifier, VerifierBusyError } from './soloVerifier.js';
+import { Verifier, VerifierBusyError } from './verifier.js';
 
 /** A request the scoreboard refuses, with its HTTP status. */
 export class ApiError extends Error {
@@ -163,7 +163,7 @@ const MS_PER_TICK = 1000 / GC_STEPS_PER_SECOND;
 
 export interface SoloScoreboardOptions {
   store: ScoreStore;
-  verifier?: SoloVerifier | undefined;
+  verifier?: Verifier | undefined;
   /** Wall clock in epoch ms (timestamps, ticket expiry, pacing). Inject for tests. */
   now?: (() => number) | undefined;
   /** Seed source; defaults to a CSPRNG. Inject for tests. */
@@ -259,7 +259,7 @@ class TieredLimit {
 
 export class SoloScoreboard {
   private readonly store: ScoreStore;
-  private readonly verifier: SoloVerifier;
+  private readonly verifier: Verifier;
   private readonly now: () => number;
   private readonly newSeed: () => number;
   private readonly newRunId: () => string;
@@ -283,7 +283,7 @@ export class SoloScoreboard {
 
   constructor(options: SoloScoreboardOptions) {
     this.store = options.store;
-    this.verifier = options.verifier ?? new SoloVerifier();
+    this.verifier = options.verifier ?? new Verifier();
     this.now = options.now ?? Date.now;
     this.newSeed = options.newSeed ?? (() => randomBytes(4).readUInt32BE(0));
     this.newRunId = options.newRunId ?? (() => randomBytes(16).toString('hex'));
@@ -511,7 +511,7 @@ export class SoloScoreboard {
 
     let result: SoloResult;
     try {
-      result = await this.verifier.verify(replay);
+      result = await this.verifier.verifySolo(replay);
     } catch (err) {
       // Busy leaves the ticket intact, so the client can retry.
       if (err instanceof VerifierBusyError) {

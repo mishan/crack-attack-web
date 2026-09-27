@@ -3,7 +3,7 @@
  *
  * All room/match logic lives here against a tiny {@link ClientConnection}
  * abstraction, so it unit-tests without sockets; `wsServer.ts` is the thin
- * WebSocket wrapper. The relay never runs a simulation — it forwards input
+ * WebSocket wrapper. The relay runs no simulation during play — it forwards input
  * frames verbatim, generates seeds/room codes, compares digests, and settles
  * the few lifecycle events the deterministic sims can't (concession,
  * disconnection, desync). See packages/protocol/src/messages.ts for the model.
@@ -13,6 +13,12 @@
  * results, and reconnect grace — a dropped player's *seat* survives their
  * connection, holding the full per-match input ledger so a rejoining client
  * can rebuild its session from tick 0 (`match_resume`).
+ *
+ * The relay does run a simulation in one place: a disputed game. When the
+ * players' results disagree, or their digests do, it re-simulates the match
+ * from the seed and both ledgers on the {@link Verifier}'s queue and records
+ * what actually happened, so a loser can't erase a loss by reporting a win or
+ * forging a digest (see {@link RelayServer.settleDispute}).
  *
  * Original work Copyright (C) 2000 Daniel Nelson. GPL-2.0-or-later.
  */
@@ -40,6 +46,7 @@ import {
 } from '@crack-attack/protocol';
 import { randomBytes } from 'node:crypto';
 import { MemoryStore, type LobbyStore, type StoredPlayer } from './store.js';
+import { Verifier } from './verifier.js';
 
 /** Transport surface the relay needs from a connection. */
 export interface ClientConnection {
@@ -125,6 +132,25 @@ interface Room {
   grace_timer: ReturnType<typeof setTimeout> | null;
 }
 
+/**
+ * A disputed game, copied out of its room before the match ends: enough to
+ * re-simulate it and to credit the result to the players, wherever they are by
+ * the time the verdict lands. Arrays are by match index.
+ */
+interface Dispute {
+  code: string;
+  seed: number;
+  ledgers: [number[], number[]];
+  tokens: [string, string];
+  /**
+   * What each seat claimed: the winner each reported, or the digests each
+   * submitted for `tick`.
+   */
+  claim:
+    | { kind: 'result'; winners: [number | null, number | null] }
+    | { kind: 'digest'; tick: number; digests: [[number, number], [number, number]] };
+}
+
 /** A live, helloed connection: identity plus (optionally) a seat or a watch. */
 interface Session {
   conn: ClientConnection;
@@ -175,6 +201,10 @@ export interface RelayServerOptions {
    * and wrongly disconnect honest players). Inject for tests.
    */
   now?: (() => number) | undefined;
+  /** Re-simulates disputed games; share the scoreboard's. Defaults to a private one. */
+  verifier?: Verifier | undefined;
+  /** Where dispute verdicts are logged; defaults to `console.warn`. */
+  log?: ((line: string) => void) | undefined;
 }
 
 /** Point-in-time counts for the relay's STATS probe (`stats.ts`). */
@@ -204,6 +234,8 @@ export class RelayServer {
   private readonly store: LobbyStore;
   private readonly graceMs: number;
   private readonly now: () => number;
+  private readonly verifier: Verifier;
+  private readonly log: (line: string) => void;
 
   constructor(options: RelayServerOptions = {}) {
     this.entropy = options.entropy ?? cryptoEntropy;
@@ -211,6 +243,8 @@ export class RelayServer {
     this.store = options.store ?? new MemoryStore();
     this.graceMs = options.graceMs ?? DEFAULT_RECONNECT_GRACE_MS;
     this.now = options.now ?? (() => performance.now());
+    this.verifier = options.verifier ?? new Verifier();
+    this.log = options.log ?? ((line) => console.warn(line));
   }
 
   /** Number of open rooms (inspection/test helper). */
@@ -415,7 +449,7 @@ export class RelayServer {
       return;
     }
     try {
-      await this.recordDecisive(peer, seat);
+      await this.recordDecisive(peer.token, seat.token);
     } catch (err) {
       // A failed store write (e.g. SQLITE_BUSY) only costs the stats update;
       // the survivor must still get the forfeit, or the room sticks in play.
@@ -770,17 +804,23 @@ export class RelayServer {
     if (peerDigests[0] !== digests[0] || peerDigests[1] !== digests[1]) {
       // The sims have diverged: void the match. This is the improvement over
       // the original, which had no detection and let boards silently drift.
+      // Then find out which seat's digests were true.
+      const claimed: [[number, number], [number, number]] = [digests, digests];
+      claimed[peer.match_index] = peerDigests;
+      const dispute = this.dispute(room, { kind: 'digest', tick, digests: claimed });
       for (const s of room.seats) if (s.conn) this.send(s.conn, { type: 'desync', tick });
       for (const w of room.spectators) this.send(w.conn, { type: 'desync', tick });
       this.endMatch(room, 'desync', null);
       this.broadcastRoomList();
+      this.settleDispute(dispute);
     }
   }
 
   /**
    * A client reports the game's deterministic outcome. Both must agree (they
    * compute it from identical sims); agreement records the W-L result and
-   * returns the room to waiting, disagreement is treated as a desync.
+   * returns the room to waiting. Disagreement ends the match as a desync, and
+   * the relay then re-simulates it to find the real result.
    */
   private async handleResult(session: Session, winner: number | null): Promise<void> {
     const room = session.room;
@@ -805,16 +845,20 @@ export class RelayServer {
     if (!peer || peer.reported_result === undefined) return;
 
     if (peer.reported_result !== winner) {
+      const winners: [number | null, number | null] = [winner, winner];
+      winners[peer.match_index] = peer.reported_result;
+      const dispute = this.dispute(room, { kind: 'result', winners });
       for (const s of room.seats) if (s.conn) this.send(s.conn, { type: 'desync', tick: 0 });
       this.endMatch(room, 'desync', null);
       this.broadcastRoomList();
+      this.settleDispute(dispute);
       return;
     }
 
     if (winner !== null) {
       const winnerSeat = room.seats.find((s) => s.match_index === winner);
       const loserSeat = room.seats.find((s) => s.match_index !== winner);
-      if (winnerSeat && loserSeat) await this.recordDecisive(winnerSeat, loserSeat);
+      if (winnerSeat && loserSeat) await this.recordDecisive(winnerSeat.token, loserSeat.token);
     }
     this.endMatch(room, 'result', winner);
     this.broadcastRoomList();
@@ -829,7 +873,7 @@ export class RelayServer {
     }
     const peer = room.seats.find((s) => s !== seat);
     // A bot peer keeps no record; only persist against a real opponent.
-    if (peer && peer.ai === undefined) await this.recordDecisive(peer, seat);
+    if (peer && peer.ai === undefined) await this.recordDecisive(peer.token, seat.token);
     this.endMatch(room, 'concession', peer ? peer.match_index : 1 - seat.match_index);
     this.broadcastRoomList();
   }
@@ -869,16 +913,87 @@ export class RelayServer {
 
   // --- Lifecycle ---------------------------------------------------------------
 
-  /** Persist a decisive game and update the seats' cached records. */
-  private async recordDecisive(winner: Seat, loser: Seat): Promise<void> {
-    await this.store.recordResult(winner.token, loser.token);
-    winner.record.wins++;
-    loser.record.losses++;
-    // Keep any live sessions' cached identity records fresh too.
-    for (const s of this.sessions.values()) {
-      if (s?.identity.token === winner.token) s.identity.record = { ...winner.record };
-      if (s?.identity.token === loser.token) s.identity.record = { ...loser.record };
+  /**
+   * Persist a decisive game and update the cached records: every seat and live
+   * session with either token, since a disputed game's verdict can land after
+   * its players have moved on.
+   */
+  private async recordDecisive(winnerToken: string, loserToken: string): Promise<void> {
+    await this.store.recordResult(winnerToken, loserToken);
+    const credit = (record: { wins: number; losses: number }, token: string): void => {
+      if (token === winnerToken) record.wins++;
+      else if (token === loserToken) record.losses++;
+    };
+    for (const room of this.rooms.values()) {
+      for (const seat of room.seats) credit(seat.record, seat.token);
     }
+    for (const s of this.sessions.values()) if (s) credit(s.identity.record, s.identity.token);
+  }
+
+  /** Copy what a dispute needs out of the room, before `endMatch` clears it. */
+  private dispute(room: Room, claim: Dispute['claim']): Dispute {
+    const tokens: [string, string] = ['', ''];
+    for (const s of room.seats) tokens[s.match_index] = s.token;
+    return { code: room.code, seed: room.seed, ledgers: this.ledgers(room), tokens, claim };
+  }
+
+  /**
+   * Re-simulate a disputed game in the background and record what it finds:
+   *
+   * - **Results disagree:** the match is played out from the ledgers. If it
+   *   ends, and one seat reported that ending, the result is recorded as for an
+   *   agreed one.
+   * - **Digests disagree:** the match is played to the digest's tick. If it
+   *   ended by then, that result is recorded. Otherwise, if exactly one seat's
+   *   digests are the true ones, the other seat's sims left the game both
+   *   players were sent, so it takes the loss, as for a concession.
+   *
+   * Anything else (the ledgers stop before the game ends, the replay agrees
+   * with neither seat) records nothing. Every verdict is logged.
+   */
+  private settleDispute(dispute: Dispute): void {
+    const { claim } = dispute;
+    const endTick = claim.kind === 'digest' ? claim.tick : undefined;
+    this.verifier
+      .verifyMatch({ seed: dispute.seed, ledgers: dispute.ledgers, endTick })
+      .then(async (found) => {
+        let winner: number | null | undefined;
+        if (found.outcome) {
+          winner = found.outcome.winner;
+          if (claim.kind === 'result' && !claim.winners.includes(winner)) winner = undefined;
+        } else if (claim.kind === 'digest' && found.tick === claim.tick) {
+          const honest = [0, 1].filter((i) => {
+            const d = claim.digests[i]!;
+            return d[0] === found.digests[0] && d[1] === found.digests[1];
+          });
+          if (honest.length === 1) winner = honest[0]!;
+        }
+
+        const what =
+          claim.kind === 'result'
+            ? `results ${String(claim.winners[0])}/${String(claim.winners[1])}`
+            : `digests at tick ${claim.tick}`;
+        const replayed = found.outcome
+          ? `ended on tick ${found.outcome.tick}, winner ${String(found.outcome.winner)}`
+          : `in play at tick ${found.tick}`;
+        const verdict =
+          winner === undefined
+            ? 'not recorded'
+            : winner === null
+              ? 'a draw, not recorded'
+              : `seat ${winner} wins`;
+        this.log(
+          `relay: disputed ${what} (room ${dispute.code}, seed ${dispute.seed}): ` +
+            `replay ${replayed}; ${verdict}`,
+        );
+
+        if (winner === undefined || winner === null) return;
+        await this.recordDecisive(dispute.tokens[winner]!, dispute.tokens[1 - winner]!);
+        this.broadcastRoomList();
+      })
+      .catch((err: unknown) => {
+        console.error(`relay: failed to settle a dispute (room ${dispute.code}):`, err);
+      });
   }
 
   /** End the current match and return the room to the waiting state. */
@@ -940,7 +1055,7 @@ export class RelayServer {
     if (room.state === 'playing') {
       // Leaving mid-match forfeits it. Recording is fire-and-forget here (the
       // handler path is sync); failures only cost a stats update, but log them.
-      this.recordDecisive(peer, seat).catch((err: unknown) => {
+      this.recordDecisive(peer.token, seat.token).catch((err: unknown) => {
         console.error(`relay: failed to record mid-match leave forfeit (room ${room.code}):`, err);
       });
       this.endMatch(room, 'disconnect', peer.match_index);

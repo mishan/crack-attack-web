@@ -12,7 +12,7 @@ export * from './store.js';
 export * from './scoreStore.js';
 export * from './sqliteStore.js';
 export * from './rateLimit.js';
-export * from './soloVerifier.js';
+export * from './verifier.js';
 export * from './scoreboard.js';
 export * from './httpApi.js';
 export * from './admin.js';
