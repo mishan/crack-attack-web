@@ -67,6 +67,8 @@ const FIT_MARGIN = 0.35;
 const LABEL_ABOVE = 1.5;
 /** Radius the key light orbits the board at (only its *direction* matters). */
 const KEY_LIGHT_RADIUS = 16;
+/** Read live, so changing the system setting mid-game takes effect. */
+const reducedMotion = globalThis.matchMedia?.('(prefers-reduced-motion: reduce)');
 
 /**
  * Live-tunable render parameters, driven by the temporary render tuner overlay
@@ -435,7 +437,7 @@ export class BoardView {
    * (Displayer.cxx:638).
    */
   setShake(offsetCells: number): void {
-    this.scene.position.y = offsetCells;
+    this.scene.position.y = reducedMotion?.matches ? 0 : offsetCells;
   }
 
   /** Mirror `vm` onto the meshes. Call once per rendered frame. */
