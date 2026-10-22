@@ -81,4 +81,16 @@ export default tseslint.config(
       },
     },
   },
+  // The screenshot script runs in Node and passes callbacks into the page.
+  {
+    files: ['tools/screenshots/**/*.mjs'],
+    languageOptions: {
+      globals: {
+        process: 'readonly',
+        console: 'readonly',
+        document: 'readonly',
+        localStorage: 'readonly',
+      },
+    },
+  },
 );
