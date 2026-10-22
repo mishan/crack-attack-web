@@ -39,4 +39,4 @@ it. The reports and a screenshot of each go to `a11y-report/`, with a summary
 per screen in `summary.txt`. It fails on a lint finding (an unnamed control or
 image) or a Tab stop whose focus doesn't show. Low contrast is counted but
 doesn't fail it, since it also measures text dimmed behind an open dialog and
-the blinking PRESS ANY KEY mid-fade: read the `.contrast.txt` reports.
+the blinking PRESS ANY KEY mid-fade: read the `.contrast.json` reports.

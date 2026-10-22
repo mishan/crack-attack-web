@@ -28,7 +28,13 @@ const relay = await startRelay(page0.slice(0, -1));
 // Headed, so the page is on the accessibility bus; one window the size of the screen.
 const browser = await chromium.launch({
   ...accessible,
-  args: [...accessible.args, '--window-size=1280,800', '--window-position=0,0'],
+  args: [
+    ...accessible.args,
+    '--window-size=1280,800',
+    '--window-position=0,0',
+    '--use-angle=swiftshader',
+    '--enable-unsafe-swiftshader',
+  ],
 });
 const page = await (await browser.newContext({ viewport: null })).newPage();
 const at = (query) => `${page0}?${query ? `${query}&` : ''}relay=${relay.url}`;
@@ -102,20 +108,33 @@ async function audit(name, { tabwalk = true } = {}) {
   await page.bringToFront();
   await page.waitForTimeout(800);
   const window = ['--window', 'Crack Attack!.*'];
-  await shotbox(`${name}.tree`, ['a11y', 'tree', ...window]);
-  const lint = await shotbox(`${name}.lint`, ['a11y', 'lint', ...window]);
-  const contrast = await shotbox(`${name}.contrast`, ['a11y', 'contrast', ...window]);
+  await shotbox(`${name}.tree.txt`, ['a11y', 'tree', ...window]);
+  const lint = JSON.parse(
+    await shotbox(`${name}.lint.json`, ['a11y', 'lint', '--json', ...window]),
+  );
+  const contrast = JSON.parse(
+    await shotbox(`${name}.contrast.json`, ['a11y', 'contrast', '--json', ...window]),
+  );
   const walk = tabwalk
-    ? await shotbox(`${name}.tabwalk`, ['a11y', 'tabwalk', '--visible', '--max', '40', ...window])
-    : '';
+    ? JSON.parse(
+        await shotbox(`${name}.tabwalk.json`, [
+          'a11y',
+          'tabwalk',
+          '--json',
+          '--visible',
+          '--max',
+          '40',
+          ...window,
+        ]),
+      )
+    : { focus: [] };
   await page.screenshot({ path: path.join(out, `${name}.png`) });
 
-  const lines = (text, re) => text.split('\n').filter((line) => re.test(line)).length;
-  const unnamed = lines(lint, /\S/);
-  const unfocused = lines(walk, /focus not shown/);
+  const unnamed = lint.length;
+  const unfocused = walk.focus.filter((stop) => stop.changed < stop.needed).length;
   // Contrast is reported, not failed: it also measures text dimmed behind an
   // open dialog and the blinking attract prompt mid-fade.
-  const lowContrast = lines(contrast, /\(at least/);
+  const lowContrast = contrast.problems.length;
   problems += unnamed + unfocused;
   summary.push(
     `${name.padEnd(15)} lint ${unnamed}  focus not shown ${unfocused}  low contrast ${lowContrast}`,
@@ -127,10 +146,10 @@ async function shotbox(file, args) {
   try {
     text = execFileSync('shotbox', args, { encoding: 'utf8', timeout: 180000 });
   } catch (e) {
-    // lint and contrast exit 1 when they find something; their findings are on stdout.
+    // They exit 1 when they find something; the findings are still on stdout.
     if (e.stdout === undefined) throw e;
     text = e.stdout;
   }
-  await writeFile(path.join(out, `${file}.txt`), text);
+  await writeFile(path.join(out, file), text);
   return text;
 }
