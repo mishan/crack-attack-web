@@ -28,7 +28,8 @@ export function mountAudioControls(audio: AudioManager): AudioControlsHandle {
 
   const btn = document.createElement('button');
   btn.type = 'button'; // avoid implicit form-submit semantics
-  btn.style.cssText = 'padding:6px 10px;opacity:.85;cursor:pointer;min-width:34px';
+  btn.style.cssText =
+    'padding:6px 10px;opacity:.85;cursor:pointer;min-width:34px;background:#2a2f3a;border:1px solid #4a5160';
   btn.title = 'Mute (M)';
   btn.setAttribute('aria-label', 'Mute audio');
 

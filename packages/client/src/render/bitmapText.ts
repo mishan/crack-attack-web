@@ -80,6 +80,7 @@ export class BitmapLabel {
     // The canvas has no intrinsic text, so expose the string to assistive tech.
     this.canvas.setAttribute('role', 'img');
     this.canvas.setAttribute('aria-label', '');
+    this.canvas.setAttribute('aria-hidden', 'true');
 
     // Plain-text stand-in until the atlas is ready (also the graceful fallback
     // if the atlas fails to load).
@@ -115,6 +116,9 @@ export class BitmapLabel {
   private render(): void {
     // Keep the accessible name in sync whichever branch renders.
     this.canvas.setAttribute('aria-label', this.text);
+    // An empty label is nothing to say, not an image with no name.
+    if (this.text) this.canvas.removeAttribute('aria-hidden');
+    else this.canvas.setAttribute('aria-hidden', 'true');
     if (!this.atlas) {
       this.fallback.textContent = this.text;
       return;

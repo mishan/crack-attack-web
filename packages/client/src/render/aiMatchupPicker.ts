@@ -72,7 +72,8 @@ export function pickAiMatchup(initial: AiMatchup): Promise<AiMatchup | null> {
         for (const { id, btn } of buttons) {
           const on = id === get();
           btn.setAttribute('aria-pressed', String(on));
-          btn.style.outline = on ? '2px solid #7aa2ff' : 'none';
+          // A box-shadow, not an outline: the outline is the browser's focus ring.
+          btn.style.boxShadow = on ? 'inset 0 0 0 2px #7aa2ff' : 'none';
           btn.style.fontWeight = on ? '700' : '400';
         }
       };
@@ -130,7 +131,7 @@ export function pickAiMatchup(initial: AiMatchup): Promise<AiMatchup | null> {
     const cancel = document.createElement('button');
     cancel.type = 'button';
     cancel.textContent = 'Cancel';
-    cancel.style.cssText = 'opacity:.8;cursor:pointer';
+    cancel.style.cssText = 'opacity:.85;cursor:pointer';
     cancel.onclick = () => finish(null);
     panel.append(cancel);
 
