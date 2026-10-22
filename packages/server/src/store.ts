@@ -32,8 +32,13 @@ export interface LobbyStore {
   /** Create a fresh player with a zero record. `token` is caller-generated. */
   createPlayer(token: string, name: string): Promise<StoredPlayer>;
 
-  /** Record a decisive game: +1 win / +1 loss. Draws are simply not recorded. */
-  recordResult(winnerToken: string, loserToken: string): Promise<void>;
+  /**
+   * Record a decisive casual game: +1 win / +1 loss. Draws are simply not
+   * recorded. Players are keyed by guest token, or by `accountKey` for an
+   * account (a store without accounts ignores those). An unknown key updates
+   * nothing.
+   */
+  recordResult(winnerKey: string, loserKey: string): Promise<void>;
 
   /** Release any resources (file handles, connections). */
   close(): Promise<void>;
@@ -41,7 +46,7 @@ export interface LobbyStore {
 
 /** In-memory store: tests and zero-persistence deployments. */
 export class MemoryStore implements LobbyStore {
-  private readonly players = new Map<string, StoredPlayer>();
+  protected readonly players = new Map<string, StoredPlayer>();
 
   getPlayer(token: string, name: string): Promise<StoredPlayer | null> {
     const p = this.players.get(token);

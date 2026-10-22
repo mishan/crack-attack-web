@@ -1,6 +1,6 @@
 /**
- * Integration: the scoreboard's HTTP routes on the relay's real HTTP server,
- * beside its WebSocket, on an ephemeral port.
+ * Integration: the scoreboard's and accounts' HTTP routes on the relay's real
+ * HTTP server, beside its WebSocket, on an ephemeral port.
  */
 
 import { readFileSync } from 'node:fs';
@@ -10,10 +10,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import WebSocket from 'ws';
 import type { SoloReplay } from '@crack-attack/core';
 import { PROTOCOL_VERSION, SOLO_SUBMIT_MAX_BYTES, encodeMessage } from '@crack-attack/protocol';
+import { MemoryAccountStore } from './accountStore.js';
+import { AccountService } from './accounts.js';
 import { createScoreboardApi, forwardedAddress, parseAddress, requestGameUrl } from './httpApi.js';
+import { RatingService } from './ratings.js';
 import { SoloScoreboard } from './scoreboard.js';
 import { MemoryScoreStore } from './scoreStore.js';
-import { SoloVerifier } from './soloVerifier.js';
+import { Verifier } from './verifier.js';
 import { startRelayWsServer, type RelayWsServer } from './wsServer.js';
 
 /** A real solo game (hard AI, seed 2026): 2757 ticks, score 48, top multiplier 3. */
@@ -40,7 +43,11 @@ beforeEach(async () => {
   server = await startRelayWsServer({
     port: 0,
     host: '127.0.0.1',
-    http: createScoreboardApi(scoreboard, { trustProxy: true, corsOrigin: ORIGIN }),
+    http: createScoreboardApi(scoreboard, {
+      trustProxy: true,
+      corsOrigin: ORIGIN,
+      accounts: new AccountService({ store: new MemoryAccountStore(), now: () => clock.now }),
+    }),
   });
   base = `http://127.0.0.1:${server.port}`;
 });
@@ -55,6 +62,74 @@ const post = (path: string, body?: unknown, headers: Record<string, string> = {}
     headers: { 'content-type': 'application/json', ...headers },
     ...(body === undefined ? {} : { body: typeof body === 'string' ? body : JSON.stringify(body) }),
   });
+
+describe('account HTTP API', () => {
+  const auth = (session: string) => ({ authorization: `Bearer ${session}` });
+
+  it('registers, logs in, renames, replaces the key, logs out and deletes', async () => {
+    const registered = await post('/api/account/register', { handle: 'misha' });
+    expect(registered.status).toBe(200);
+    expect(registered.headers.get('cache-control')).toBe('no-store');
+    const { key, session } = (await registered.json()) as { key: string; session: string };
+
+    const me = await fetch(`${base}/api/account/me`, { headers: auth(session) });
+    expect(await me.json()).toMatchObject({ account: { handle: 'misha', rating: 1500 } });
+
+    const login = await post('/api/account/login', { key: key.replaceAll('-', ' ') });
+    const other = ((await login.json()) as { session: string }).session;
+
+    const renamed = await post('/api/account/handle', { handle: 'Misha' }, auth(session));
+    expect(await renamed.json()).toMatchObject({ account: { handle: 'Misha' } });
+
+    expect((await post('/api/account/key', {}, auth(session))).status).toBe(400);
+    const replaced = await post('/api/account/key', { key }, auth(session));
+    const newKey = ((await replaced.json()) as { key: string }).key;
+    expect((await fetch(`${base}/api/account/me`, { headers: auth(other) })).status).toBe(401);
+    expect((await post('/api/account/login', { key })).status).toBe(401);
+
+    expect((await post('/api/account/logout', undefined, auth(session))).status).toBe(200);
+    expect((await fetch(`${base}/api/account/me`, { headers: auth(session) })).status).toBe(401);
+
+    expect((await post('/api/account/delete', { key: newKey })).status).toBe(200);
+    expect((await post('/api/account/login', { key: newKey })).status).toBe(401);
+  });
+
+  it('answers errors as JSON, and allows sessions across origins', async () => {
+    await post('/api/account/register', { handle: 'misha' });
+    const taken = await post('/api/account/register', { handle: 'MISHA' });
+    expect(taken.status).toBe(409);
+    expect(await taken.json()).toEqual({ error: 'handle_taken', message: '"MISHA" is taken' });
+    const noSession = await fetch(`${base}/api/account/me`);
+    expect(noSession.status).toBe(401);
+    expect(noSession.headers.get('www-authenticate')).toBe('Bearer');
+    expect((await fetch(`${base}/api/account/login`)).status).toBe(405);
+    expect((await post('/api/account/nope')).status).toBe(404);
+    expect((await post('/api/account/login', 'x'.repeat(2048))).status).toBe(413);
+
+    const preflight = await fetch(`${base}/api/account/me`, { method: 'OPTIONS' });
+    expect(preflight.status).toBe(204);
+    expect(preflight.headers.get('access-control-allow-headers')).toBe(
+      'Content-Type, Authorization',
+    );
+  });
+
+  it('is not served without an account service', async () => {
+    const bare = await startRelayWsServer({
+      port: 0,
+      host: '127.0.0.1',
+      http: createScoreboardApi(new SoloScoreboard({ store: new MemoryScoreStore() })),
+    });
+    try {
+      const res = await fetch(`http://127.0.0.1:${bare.port}/api/account/register`, {
+        method: 'POST',
+        body: '{"handle":"misha"}',
+      });
+      expect(res.status).toBe(404);
+    } finally {
+      await bare.close();
+    }
+  });
+});
 
 describe('scoreboard HTTP API', () => {
   it('runs the whole flow: ticket, submission, board, replay', async () => {
@@ -448,7 +523,7 @@ describe('relay shutdown', () => {
   it('lets a submission being verified finish before it closes', async () => {
     let release!: () => void;
     const gate = new Promise<void>((resolve) => (release = resolve));
-    const verifier = new SoloVerifier({ sliceTicks: 100, yieldFn: () => gate });
+    const verifier = new Verifier({ sliceTicks: 100, yieldFn: () => gate });
     const now = { t: Date.UTC(2026, 8, 13, 12) };
     const scoreboard = new SoloScoreboard({
       store: new MemoryScoreStore(),
@@ -478,5 +553,85 @@ describe('relay shutdown', () => {
     expect(res.status).toBe(200);
     expect(await res.json()).toMatchObject({ score: 48 });
     await closing;
+  });
+});
+
+describe('rating HTTP API', () => {
+  it('serves the leaderboard and a player page', async () => {
+    const store = new MemoryAccountStore();
+    const now = Date.UTC(2026, 8, 27, 12);
+    for (const [n, handle] of [
+      [1, 'Misha'],
+      [2, 'bob'],
+    ] as const) {
+      await store.createAccount({
+        handle,
+        handleFolded: handle.toLowerCase(),
+        keyHash: `k${n}`,
+        sessionHash: `s${n}`,
+        createdAt: now,
+      });
+    }
+    await store.recordRatedGame({
+      accountA: 1,
+      accountB: 2,
+      result: 'a',
+      end: 'concession',
+      ticks: 500,
+      seed: 1,
+      simVersion: 1,
+      aBefore: { rating: 1500, rd: 100 },
+      bBefore: { rating: 1500, rd: 100 },
+      aAfter: { rating: 1520.4, rd: 95, volatility: 0.06 },
+      bAfter: { rating: 1479.6, rd: 95, volatility: 0.06 },
+      createdAt: now,
+      inputs: null,
+    });
+    const rated = await startRelayWsServer({
+      port: 0,
+      host: '127.0.0.1',
+      http: createScoreboardApi(new SoloScoreboard({ store: new MemoryScoreStore() }), {
+        ratings: new RatingService({ store, now: () => now }),
+      }),
+    });
+    const url = `http://127.0.0.1:${rated.port}/api/rating`;
+    try {
+      const board = await fetch(`${url}/leaderboard?limit=5`);
+      expect(board.headers.get('cache-control')).toBe('no-cache');
+      expect(await board.json()).toEqual({
+        entries: [
+          { rank: 1, handle: 'Misha', rating: 1520, wins: 1, losses: 0, draws: 0 },
+          { rank: 2, handle: 'bob', rating: 1480, wins: 0, losses: 1, draws: 0 },
+        ],
+      });
+      expect((await fetch(`${url}/leaderboard?limit=0`)).status).toBe(400);
+
+      const page = await fetch(`${url}/player/${encodeURIComponent('BOB')}`);
+      expect(await page.json()).toEqual({
+        handle: 'bob',
+        rating: 1480,
+        provisional: false,
+        wins: 0,
+        losses: 1,
+        draws: 0,
+        games: [
+          {
+            id: 1,
+            opponent: 'Misha',
+            result: 'loss',
+            end: 'concession',
+            ratingBefore: 1500,
+            ratingAfter: 1480,
+            createdAt: now,
+          },
+        ],
+      });
+      expect((await fetch(`${url}/player/nobody`)).status).toBe(404);
+      expect((await fetch(`${url}/player/%E0%A4%A`)).status).toBe(400);
+      expect((await fetch(`${url}/players`)).status).toBe(404);
+      expect((await fetch(`${url}/leaderboard`, { method: 'POST' })).status).toBe(405);
+    } finally {
+      await rated.close();
+    }
   });
 });

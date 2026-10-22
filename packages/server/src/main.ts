@@ -10,15 +10,19 @@
  * share pages' links and preview image (default: each request's own host).
  * STATS=1 writes a `stats {json}` line to stderr every 10 s: event-loop
  * delay, traffic, rooms (see stats.ts).
- * `admin …` runs a scoreboard moderation command instead (see admin.ts).
+ * `admin …` runs a moderation command instead (see admin.ts).
  */
 
 import { existsSync } from 'node:fs';
+import { AccountService } from './accounts.js';
 import { ADMIN_USAGE, runAdmin } from './admin.js';
+import { RatingService } from './ratings.js';
+import type { RelayServer } from './relay.js';
 import { createScoreboardApi } from './httpApi.js';
 import { SoloScoreboard } from './scoreboard.js';
 import { SqliteStore } from './sqliteStore.js';
 import { startStatsProbe } from './stats.js';
+import { Verifier } from './verifier.js';
 import { DEFAULT_PORT, startRelayWsServer } from './wsServer.js';
 
 /**
@@ -87,7 +91,9 @@ if (process.argv[2] === 'admin') {
     process.exit(2);
   }
   const store = new SqliteStore(dbPath);
-  const code = await runAdmin(process.argv.slice(3), store, (line) => console.log(line));
+  const code = await runAdmin(process.argv.slice(3), { scores: store, accounts: store }, (line) =>
+    console.log(line),
+  );
   await store.close();
   process.exit(code);
 }
@@ -99,13 +105,32 @@ const corsOrigin = process.env['CORS_ORIGIN'] || undefined;
 const publicUrl = parsePublicUrl(process.env['PUBLIC_URL']);
 
 const store = new SqliteStore(dbPath);
-const scoreboard = new SoloScoreboard({ store });
+// One queue for solo replays and disputed matches, so between them they
+// re-simulate one game at a time.
+const verifier = new Verifier();
+const scoreboard = new SoloScoreboard({ store, verifier });
+// Ending a session (log out, a new key, a deleted account) closes the lobby
+// connections made with it; the relay exists only once the server starts.
+let relay: RelayServer | null = null;
+const accounts = new AccountService({
+  store,
+  onSessionsEnded: (ended) => relay?.sessionsEnded(ended),
+});
 const server = await startRelayWsServer({
   port,
   host,
   store,
-  http: createScoreboardApi(scoreboard, { trustProxy, corsOrigin, publicUrl }),
+  accounts: store,
+  verifier,
+  http: createScoreboardApi(scoreboard, {
+    trustProxy,
+    corsOrigin,
+    publicUrl,
+    accounts,
+    ratings: new RatingService({ store }),
+  }),
 });
+relay = server.relay;
 console.log(`crack-attack relay listening on :${server.port} (db: ${dbPath})`);
 const statsInterval = /^\d+$/.test(process.env['STATS_INTERVAL_MS'] ?? '')
   ? Number(process.env['STATS_INTERVAL_MS'])

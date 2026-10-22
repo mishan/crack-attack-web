@@ -11,7 +11,7 @@ import {
   type SoloScoreboardOptions,
 } from './scoreboard.js';
 import { ALL_TIME, MemoryScoreStore, type NewSoloScore, type ScoreStore } from './scoreStore.js';
-import { SoloVerifier } from './soloVerifier.js';
+import { Verifier } from './verifier.js';
 
 /** A real solo game (hard AI, seed 2026): 2757 ticks, score 48, top multiplier 3. */
 const FIXTURE = JSON.parse(
@@ -304,7 +304,7 @@ describe('SoloScoreboard submissions', () => {
   it('reports busy, keeping the ticket, while the verifier queue is full', async () => {
     let release!: () => void;
     const gate = new Promise<void>((resolve) => (release = resolve));
-    const verifier = new SoloVerifier({ maxQueued: 1, sliceTicks: 100, yieldFn: () => gate });
+    const verifier = new Verifier({ maxQueued: 1, sliceTicks: 100, yieldFn: () => gate });
     const s = setup({ verifier });
     const a = await s.board.issueTicket(CLIENT);
     const b = await s.board.issueTicket(CLIENT);
@@ -326,7 +326,7 @@ describe('SoloScoreboard submissions', () => {
   it('verifies concurrent copies of a run once and answers them all alike', async () => {
     let release!: () => void;
     const gate = new Promise<void>((resolve) => (release = resolve));
-    const verifier = new SoloVerifier({ sliceTicks: 100, yieldFn: () => gate });
+    const verifier = new Verifier({ sliceTicks: 100, yieldFn: () => gate });
     const s = setup({ verifier });
     const runId = await playRun(s);
     const copies = [1, 2, 3, 4, 5].map(() => s.board.submit(CLIENT, submission(runId)));
@@ -347,7 +347,7 @@ describe('SoloScoreboard submissions', () => {
   it("gives a copy that arrives mid-check the first one's failure", async () => {
     let release!: () => void;
     const gate = new Promise<void>((resolve) => (release = resolve));
-    const verifier = new SoloVerifier({ sliceTicks: 100, yieldFn: () => gate });
+    const verifier = new Verifier({ sliceTicks: 100, yieldFn: () => gate });
     const s = setup({ verifier });
     const runId = await playRun(s);
     const first = s.board.submit(CLIENT, submission(runId, { replay: truncatedFixture() }));

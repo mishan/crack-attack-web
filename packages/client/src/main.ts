@@ -14,7 +14,8 @@
  * `?solo` skips attract mode, `?net` force-boots netplay, and `?relay=`
  * overrides the relay URL, for muscle memory and dev convenience. `?demo` boots
  * straight into the interactive AI-vs-AI demo (`?demo=easy,hard` picks the
- * bots) — handy for a showcase link or kiosk.
+ * bots) — handy for a showcase link or kiosk. `?account` opens the account
+ * screen and `?ladder` the leaderboard (`?ladder=<handle>`: a player's page).
  *
  * The sim is authoritative and deterministic; everything here is replaceable
  * platform glue (and stays out of `packages/core`, which must not touch the DOM).
@@ -105,6 +106,8 @@ const NET_HELP =
 const DEMO_HELP = 'AI vs AI demo · N next match · F speed · P pause · M mute · Esc leave';
 const ATTRACT_HELP = 'AI vs AI demo · press any key or click to play · M mute';
 const SCORES_HELP = 'High scores · Esc back · M mute';
+const ACCOUNT_HELP = 'Account · Esc back';
+const LADDER_HELP = 'Leaderboard · Esc back · M mute';
 /** How long the first ranked game of a page load waits for its ticket before starting unranked. */
 const FIRST_TICKET_WAIT_MS = 1000;
 
@@ -121,6 +124,8 @@ const loadAiMatch = () => import('./aiMatch.js');
 const loadAiDemo = () => import('./aiDemo.js');
 const loadNetplay = () => import('./netplay.js');
 const loadHighScores = () => import('./highScores.js');
+const loadAccount = () => import('./account.js');
+const loadLeaderboard = () => import('./leaderboard.js');
 /** Warm a lazy chunk; a failure here resurfaces (and is handled) when the mode boots. */
 const prefetch = (load: () => Promise<unknown>): void => void load().catch(() => {});
 
@@ -309,8 +314,16 @@ function boot(): void {
     ai: AI_HELP,
     demo: DEMO_HELP,
     scores: SCORES_HELP,
+    account: ACCOUNT_HELP,
+    ladder: LADDER_HELP,
   };
-  const enter = (mode: 'attract' | 'solo' | 'net' | 'ai' | 'demo' | 'scores'): void => {
+  type Mode = keyof typeof HELP;
+  /** Where the account and leaderboard screens go back to: the lobby, if opened from it. */
+  let screenReturn: Mode = 'solo';
+  /** A player whose page `?ladder=<handle>` opens. */
+  let ladderPlayer: string | null = params.get('ladder') || null;
+  const enter = (mode: Mode): void => {
+    if (mode === 'solo' || mode === 'attract') screenReturn = 'solo';
     current?.dispose();
     current = null;
     modeGen++;
@@ -321,7 +334,16 @@ function boot(): void {
       if (mode === 'attract') {
         bootAttract(toSolo);
       } else if (mode === 'net') {
-        bootLazy(loadNetplay, (m) => m.bootNetplay(app, hudEl, relayUrl, toSolo, audio));
+        const openScreen = (screen: 'account' | 'ladder') => (): void => {
+          screenReturn = 'net';
+          enter(screen);
+        };
+        bootLazy(loadNetplay, (m) =>
+          m.bootNetplay(app, hudEl, relayUrl, toSolo, audio, {
+            account: openScreen('account'),
+            leaderboard: openScreen('ladder'),
+          }),
+        );
       } else if (mode === 'ai') {
         bootLazy(loadAiMatch, (m) => m.bootAiMatch(app, hudEl, aiDifficulty, audio, toSolo));
       } else if (mode === 'demo') {
@@ -329,6 +351,19 @@ function boot(): void {
         bootLazy(loadAiDemo, (m) => m.bootAiDemo(app, hudEl, left, right, audio, toSolo));
       } else if (mode === 'scores') {
         bootLazy(loadHighScores, (m) => m.bootHighScores(ranked?.client ?? null, toSolo));
+      } else if (mode === 'account') {
+        const back = screenReturn;
+        bootLazy(loadAccount, (m) =>
+          m.bootAccount(relayUrl, {
+            back: () => enter(back),
+            leaderboard: () => enter('ladder'),
+          }),
+        );
+      } else if (mode === 'ladder') {
+        const back = screenReturn;
+        const player = ladderPlayer;
+        ladderPlayer = null;
+        bootLazy(loadLeaderboard, (m) => m.bootLeaderboard(relayUrl, () => enter(back), player));
       } else {
         current = bootSolo(
           app,
@@ -353,9 +388,13 @@ function boot(): void {
         ? 'net'
         : params.has('scores')
           ? 'scores'
-          : params.has('solo')
-            ? 'solo'
-            : 'attract',
+          : params.has('account')
+            ? 'account'
+            : params.has('ladder')
+              ? 'ladder'
+              : params.has('solo')
+                ? 'solo'
+                : 'attract',
   );
   // Booted: drop the placeholder (a failed start has already replaced it).
   document.getElementById('loading')?.remove();

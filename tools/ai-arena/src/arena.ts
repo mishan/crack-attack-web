@@ -1,9 +1,11 @@
 /**
  * arena.ts — headless AI-vs-AI match runner.
  *
- * Two `GameSim`s share a seed (identical starting boards), their garbage ports
- * are cross-wired exactly as in netplay / the client's `aiMatch`, and each side
- * is driven by its own `AiController` with its own tuning. Everything is
+ * Each match is a core `NetMatch` — the same two-board match netplay plays:
+ * one seed (identical starting boards), garbage ports cross-wired — and each
+ * side is driven by its own `AiController` with its own tuning. Both bots
+ * decide from the position at the start of a tick, then both boards step, as
+ * a bot seat does in netplay. Everything is
  * deterministic: a `(tuningA, tuningB, seed)` triple always produces the same
  * result, so a series over a seed batch is reproducible and any planner/tuning
  * change is *measurable* against a baseline rather than eyeballed.
@@ -15,7 +17,7 @@
  * receiver's gameplay-RNG draws. For careful comparisons run both orientations
  * (the CLI's `--both`) and aggregate out the seat personality/bias.
  *
- * A same-tick double loss is a draw (the netplay convention); hitting the tick
+ * A same-tick double loss is a draw (`NetMatch`'s rule); hitting the tick
  * cap is reported separately as a timeout so stalemates don't masquerade as
  * draws.
  */
@@ -28,7 +30,7 @@ import {
   GF_COLOR_3,
   GF_COLOR_4,
   GF_COLOR_5,
-  GameSim,
+  NetMatch,
   aiDecisionSeed,
   type AiTuning,
 } from '@crack-attack/core';
@@ -87,20 +89,6 @@ export function specialCells(flavor: number): number {
   }
 }
 
-/** Route `from`'s outgoing garbage into `to`'s queue, counting cells sent. */
-function link(from: GameSim, to: GameSim, count: (cells: number) => void): void {
-  from.garbageGenerator.outSink = {
-    sendGarbage: (h, w, f) => {
-      count(h * w);
-      to.garbageGenerator.addToQueue(h, w, f, from.clock.time_step);
-    },
-    sendSpecialGarbage: (f) => {
-      count(specialCells(f));
-      to.garbageGenerator.addToQueue(1, 1, f, from.clock.time_step);
-    },
-  };
-}
-
 /** Play one deterministic match between two tunings on a shared seed. */
 export function runMatch(
   tuningA: AiTuning,
@@ -108,27 +96,28 @@ export function runMatch(
   seed: number,
   maxTicks = DEFAULT_MAX_TICKS,
 ): MatchResult {
-  const simA = new GameSim(seed);
-  const simB = new GameSim(seed);
+  const sent = [0, 0];
+  const match = new NetMatch(seed, {
+    sendGarbage: (from, h, w) => (sent[from]! += h * w),
+    sendSpecialGarbage: (from, f) => (sent[from]! += specialCells(f)),
+  });
+  const [simA, simB] = match.sims;
   const aiA = new AiController(tuningA, aiDecisionSeed(seed, 0));
   const aiB = new AiController(tuningB, aiDecisionSeed(seed, 1));
-  let sentA = 0;
-  let sentB = 0;
-  link(simA, simB, (cells) => (sentA += cells));
-  link(simB, simA, (cells) => (sentB += cells));
 
-  let ticks = 0;
-  while (ticks < maxTicks && !simA.lost && !simB.lost) {
-    // Both sims step every tick (as in netplay); losses are checked after the
-    // full tick so a same-tick double loss is seen as such.
-    simA.step(aiA.decide(simA));
-    simB.step(aiB.decide(simB));
-    ticks++;
+  let ended = null;
+  while (!ended && match.tick < maxTicks) {
+    ended = match.step(aiA.decide(simA).state, aiB.decide(simB).state);
   }
 
-  const outcome: MatchOutcome =
-    simA.lost && simB.lost ? 'draw' : simA.lost ? 'b' : simB.lost ? 'a' : 'timeout';
-  return { outcome, seed, ticks, sentA, sentB };
+  const outcome: MatchOutcome = !ended
+    ? 'timeout'
+    : ended.winner === null
+      ? 'draw'
+      : ended.winner === 0
+        ? 'a'
+        : 'b';
+  return { outcome, seed, ticks: match.tick, sentA: sent[0]!, sentB: sent[1]! };
 }
 
 /** Play a series over a seed batch, aggregating results. */

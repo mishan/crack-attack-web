@@ -19,11 +19,14 @@ import {
 const CODE = 'ABC23';
 const TOKEN = 'a'.repeat(32);
 const RECORD = { wins: 3, losses: 1 };
+const RATING = { rating: 1580, provisional: true };
 
 const clientMessages: ClientMessage[] = [
   { type: 'hello', protocolVersion: PROTOCOL_VERSION, name: 'misha' },
   { type: 'hello', protocolVersion: PROTOCOL_VERSION, name: 'misha', token: TOKEN },
   { type: 'create_room' },
+  { type: 'create_room', rated: true },
+  { type: 'create_room', aiOpponent: { difficulty: 'hard' }, rated: false },
   { type: 'join_room', code: CODE },
   { type: 'ready' },
   { type: 'inputs', startTick: 96, frames: [0, CC_LEFT, CC_LEFT | CC_SWAP, CC_ADVANCE] },
@@ -43,6 +46,15 @@ const serverMessages: ServerMessage[] = [
     token: TOKEN,
     name: 'misha',
     record: RECORD,
+    rating: null,
+  },
+  {
+    type: 'welcome',
+    protocolVersion: PROTOCOL_VERSION,
+    token: TOKEN,
+    name: 'Misha',
+    record: RECORD,
+    rating: RATING,
   },
   { type: 'room_list', rooms: [] },
   {
@@ -51,15 +63,17 @@ const serverMessages: ServerMessage[] = [
       {
         code: CODE,
         state: 'waiting',
-        players: [{ name: 'misha', record: RECORD }],
+        rated: true,
+        players: [{ name: 'misha', record: RECORD, rating: RATING }],
         spectators: [],
       },
       {
         code: 'XYZ99',
         state: 'playing',
+        rated: false,
         players: [
-          { name: 'a', record: { wins: 0, losses: 0 } },
-          { name: 'b', record: { wins: 9, losses: 2 } },
+          { name: 'a', record: { wins: 0, losses: 0 }, rating: null },
+          { name: 'b', record: { wins: 9, losses: 2 }, rating: { rating: -3, provisional: false } },
         ],
         spectators: ['carol', 'dave'],
       },
@@ -73,6 +87,7 @@ const serverMessages: ServerMessage[] = [
     inputDelay: 3,
     players: ['a', 'b'],
     frames: [[0, CC_LEFT], []],
+    rated: true,
   },
   { type: 'spectators', names: ['carol', 'dave'] },
   { type: 'spectators', names: [] },
@@ -89,6 +104,7 @@ const serverMessages: ServerMessage[] = [
     playerIndex: 1,
     inputDelay: 3,
     players: ['misha', 'opponent'],
+    rated: false,
   },
   {
     type: 'match_resume',
@@ -100,6 +116,7 @@ const serverMessages: ServerMessage[] = [
       [0, CC_LEFT, CC_SWAP],
       [0, 0, CC_ADVANCE],
     ],
+    rated: true,
   },
   {
     type: 'match_resume',
@@ -108,6 +125,7 @@ const serverMessages: ServerMessage[] = [
     inputDelay: 3,
     players: ['a', 'b'],
     frames: [[], []],
+    rated: false,
   },
   { type: 'peer_inputs', playerIndex: 0, startTick: 0, frames: [CC_SWAP] },
   { type: 'desync', tick: 64 },
@@ -115,7 +133,16 @@ const serverMessages: ServerMessage[] = [
   { type: 'match_end', reason: 'result', winner: 1 },
   { type: 'match_end', reason: 'result', winner: null },
   { type: 'match_end', reason: 'desync', winner: null },
+  {
+    type: 'rating_update',
+    players: ['misha', 'opponent'],
+    ratings: [
+      { before: RATING, after: { rating: 1594, provisional: false } },
+      { before: { rating: 1500, provisional: true }, after: { rating: 1430, provisional: true } },
+    ],
+  },
   { type: 'error', code: 'room_not_found', message: 'no such room' },
+  { type: 'error', code: 'account_required', message: 'log in' },
 ];
 
 describe('round-trip', () => {
@@ -187,6 +214,7 @@ describe('malformed input', () => {
       'hello non-hex token',
       `{"type":"hello","protocolVersion":2,"name":"m","token":"${'Z'.repeat(32)}"}`,
     ],
+    ['create_room rated not a boolean', '{"type":"create_room","rated":1}'],
     ['result winner out of range', '{"type":"result","winner":2}'],
     ['result missing winner', '{"type":"result"}'],
     ['rename empty name', '{"type":"rename","name":""}'],
@@ -209,6 +237,7 @@ describe('malformed input', () => {
         playerIndex: 2,
         inputDelay: 3,
         players: ['a', 'b'],
+        rated: false,
       }),
     ],
     [
@@ -219,6 +248,7 @@ describe('malformed input', () => {
         playerIndex: 0,
         inputDelay: 3,
         players: ['a'],
+        rated: false,
       }),
     ],
     [
@@ -229,6 +259,7 @@ describe('malformed input', () => {
         playerIndex: 0,
         inputDelay: 3,
         players: ['a', 'b'],
+        rated: false,
       }),
     ],
     [
@@ -250,6 +281,34 @@ describe('malformed input', () => {
       `{"type":"welcome","protocolVersion":2,"token":"${'a'.repeat(32)}","name":"m","record":{"wins":-1,"losses":0}}`,
     ],
     ['room_list rooms not array', '{"type":"room_list","rooms":"nope"}'],
+    [
+      'match_start missing rated',
+      JSON.stringify({
+        type: 'match_start',
+        seed: 1,
+        playerIndex: 0,
+        inputDelay: 3,
+        players: ['a', 'b'],
+      }),
+    ],
+    [
+      'welcome fractional rating',
+      `{"type":"welcome","protocolVersion":5,"token":"${'a'.repeat(32)}","name":"m","record":{"wins":0,"losses":0},"rating":{"rating":1500.5,"provisional":true}}`,
+    ],
+    [
+      'welcome rating without provisional',
+      `{"type":"welcome","protocolVersion":5,"token":"${'a'.repeat(32)}","name":"m","record":{"wins":0,"losses":0},"rating":{"rating":1500}}`,
+    ],
+    [
+      'rating_update one rating',
+      JSON.stringify({
+        type: 'rating_update',
+        players: ['a', 'b'],
+        ratings: [
+          { before: { rating: 1, provisional: true }, after: { rating: 2, provisional: true } },
+        ],
+      }),
+    ],
     [
       'room_list bad room state',
       `{"type":"room_list","rooms":[{"code":"ABC23","state":"exploded","players":[]}]}`,

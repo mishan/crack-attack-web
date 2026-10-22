@@ -673,6 +673,88 @@ A generator header that a real, non-AI tool always writes (e.g. a lockfile's own
       (client build); the preview image is `public/og-image.png`. The title
       card, high-score screen, share dialog and share page link the source on
       GitHub (`SOURCE_URL` in protocol).
+- [~] **Multiplayer rating** (plan: `docs/RATING_PLAN.md`) — phase 1
+  landed: `core/netMatch.ts`, the two-board match. `NetMatch` owns the
+  shared seed, the garbage cross-wiring, the step order (both frames fixed,
+  seat 0 then seat 1) and the outcome (same-tick double loss = draw).
+  `LockstepSession`, `SpectatorSession`, the AI-vs-AI demo and
+  `tools/ai-arena` all step one, so "who won" has one definition; the arena
+  and demo bots now decide from the start of the tick, as a netplay bot seat
+  does, which left arena results unchanged on the seeds measured. Solo vs AI
+  (`aiMatch.ts`) keeps its own loop, since `tools/replay-analyze` replays its
+  saved games in that order. A golden fixture
+  (`core/src/fixtures/net-hard-medium-42.match.json`, hard vs medium, both
+  sending garbage) pins it. **Phase 2 landed**: the relay settles disputed
+  games itself. When results or digests disagree, it copies the seed, both
+  ledgers and the claims before `endMatch` clears them, ends the match as a
+  desync as before, and queues a core `NetMatchRunner` re-simulation.
+  `SoloVerifier` became `Verifier` (`verifier.ts`), one queue for solo runs
+  and matches, shared through `main.ts`; its bound refuses solo runs only, so
+  a flood of submissions can't crowd out a dispute. Verdicts: disagreeing
+  results record the replayed result if one seat reported it; disagreeing
+  digests record the result if the game had ended by that tick, else a loss
+  for the one seat whose digests were false. Anything else records nothing.
+  Each verdict is logged. No protocol change: the records reach players
+  through the room list. **Phase 3 landed** (server only): accounts.
+  Protocol `account.ts` has the API shapes and the shared rules
+  (`normalizeHandle`, `foldHandle` for uniqueness, `normalizeAccountKey`).
+  `accounts.ts` is the transport-free `AccountService`: keys are eight words
+  from the EFF long wordlist (`wordlist.ts`, its four hyphenated words
+  dropped), keys and sessions stored as SHA-256 hex, sessions good for a year
+  from last use. `accountStore.ts` is the `AccountStore` interface and
+  `MemoryAccountStore` (a `MemoryStore` too, so a guest's W-L can move over
+  atomically, as in SQLite); `SqliteStore` implements it on migration 2
+  (`accounts`, `sessions`). `ApiError` and `TieredLimit` moved to
+  `apiError.ts` for both services. Routes under `/api/account/` in
+  `httpApi.ts`; admin gained `account`, `rename`, `hide-account`,
+  `unhide-account`, `reset-rating`. Beyond the plan's API table: `GET /me`
+  (the client needs it after a reload) and `POST /handle` (the plan's 30-day
+  rename). **Phase 4 landed** (server, protocol v5): rated rooms. `hello`
+  resolves a guest token, then an account session (`AccountStore.useSession`);
+  the relay's `Identity` keys records by guest token or `accountKey(id)`, so
+  `LobbyStore.recordResult` counts casual games for accounts too. Rated rooms
+  are accounts-only; `match_start`/`match_resume`/`spectate_start` say whether
+  a game counts (under `RATED_GAMES_PER_PAIR_PER_DAY`, checked at start).
+  Every played-out rated game is re-simulated (phase 2's machinery, now
+  `settle`), agreeing reports or not; concessions and forfeits are rated at
+  once (`rateNow`); a rematch that cuts a rated game short settles it as far
+  as it went. `glicko.ts` is Glicko-2 (one period per game, RD grown per day
+  idle; pinned to the paper's worked example). Rated games apply one at a
+  time (`ratingChain`), log to `rated_games` (migration 3, with both seats'
+  inputs change-encoded, dropped after a week), and send `rating_update` to
+  both accounts' sessions and the room's spectators. `ratings.ts` serves
+  `/api/rating/leaderboard` and `/api/rating/player/:handle`. Handles are
+  capped at 32 UTF-16 units so they fit a lobby name. Review fixes: a leave
+  or grace expiry is a forfeit settled by replay (`claim.kind: 'forfeit'`),
+  so a finished game keeps its result; a per-room watchdog settles a game
+  with one result unanswered, or forfeits whoever stalled lockstep, after
+  `stallMs`; one seat per account (`busyElsewhere`); rated games in progress
+  count toward the cap (`ratedInFlight`, released once per settlement);
+  concession only once play has begun; a rematch needs every human seat
+  connected; `sessionsEnded` closes connections whose account sessions the
+  `AccountService` ended. Not yet: keeping
+  notable games' inputs past a week (the plan's "notable" is undefined).
+  **Phase 5 landed** (client): `account/accountApi.ts` (account and ladder
+  API, shape-checked; `apiOriginFor` now also backs `scoreboardUrlFor`),
+  `account/accountState.ts` (the lobby token is a guest's or the session;
+  the handle beside it while logged in; a guest's token kept aside through a
+  log in and restored on log out; a guest `welcome` means the session ended),
+  and the pure `view/rating.ts`. `account.ts` is the account screen (lazy,
+  `?account`): register, the Save key form (`autocomplete` username +
+  `new-password`, key restored if the browser's suggestion replaced it),
+  log in (`current-password`), rename, replace key, log out, delete (needs the
+  key). `leaderboard.ts` (lazy, `?ladder[=handle]`): the ladder and player
+  pages. The lobby shows ratings, has Account and Leaderboard buttons, a
+  Rated box for accounts (on by default), marks rated rooms (guests may watch
+  only), notes whether a game counts over the countdown, and shows the
+  `rating_update` change in the banner. Checked end to end in Chrome;
+  the password-manager matrix (Safari, Firefox, 1Password, Bitwarden, iOS and
+  Android autofill) is still to run by hand. Review fixes: Replace key is a
+  form taking the current key; Delete sends the session; a guest `welcome`
+  for a logged-in browser asks `/me` before dropping the session (and then
+  restores the guest set aside); rating changes go to the lobby's status line
+  when the lobby is up, and countdown-time banners clear at GO; Back and Esc
+  hold while registering and ask twice before leaving an unsaved key.
 - [ ] Phase 6 stretch (X-mode, replays, WebRTC, binary codec if
       measurements demand it)
 

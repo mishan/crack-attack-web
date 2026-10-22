@@ -31,7 +31,14 @@ import {
   ROOM_CODE_LENGTH,
   SESSION_TOKEN_LENGTH,
 } from './messages.js';
-import type { AiDifficulty, AiOpponentInfo, PlayerRecord, RoomSummary } from './messages.js';
+import type {
+  AiDifficulty,
+  AiOpponentInfo,
+  PlayerRating,
+  PlayerRecord,
+  RatingChange,
+  RoomSummary,
+} from './messages.js';
 
 /** Thrown by the decode functions on any malformed or unknown message. */
 export class ProtocolError extends Error {
@@ -177,6 +184,39 @@ function playerRecord(m: Record<string, unknown>, field: string): PlayerRecord {
   return { wins: uint32(r, 'wins'), losses: uint32(r, 'losses') };
 }
 
+function bool(m: Record<string, unknown>, field: string): boolean {
+  const v = m[field];
+  if (typeof v !== 'boolean') throw new ProtocolError(`${field} must be a boolean`);
+  return v;
+}
+
+/** A shown rating: a whole number within any rating Glicko-2 can reach, and a flag. */
+function playerRating(v: unknown, field: string): PlayerRating {
+  if (typeof v !== 'object' || v === null || Array.isArray(v))
+    throw new ProtocolError(`${field} must be a rating object`);
+  const r = v as Record<string, unknown>;
+  const rating = r['rating'];
+  if (typeof rating !== 'number' || !Number.isInteger(rating) || Math.abs(rating) > 100_000)
+    throw new ProtocolError(`${field}.rating must be a whole number`);
+  return { rating, provisional: bool(r, 'provisional') };
+}
+
+/** A rating, or null for a guest. */
+function optionalRating(m: Record<string, unknown>, field: string): PlayerRating | null {
+  const v = m[field];
+  return v === null ? null : playerRating(v, field);
+}
+
+function ratingChange(v: unknown, field: string): RatingChange {
+  if (typeof v !== 'object' || v === null || Array.isArray(v))
+    throw new ProtocolError(`${field} must be an object`);
+  const r = v as Record<string, unknown>;
+  return {
+    before: playerRating(r['before'], `${field}.before`),
+    after: playerRating(r['after'], `${field}.after`),
+  };
+}
+
 /** A full-match input history: like inputFrames but may be empty and far longer. */
 function matchFrames(v: unknown, field: string): number[] {
   if (!Array.isArray(v) || v.length > MAX_MATCH_FRAMES)
@@ -203,11 +243,16 @@ function roomSummaries(m: Record<string, unknown>, field: string): RoomSummary[]
     return {
       code: roomCode(r, 'code'),
       state,
+      rated: bool(r, 'rated'),
       players: players.map((p, j) => {
         if (typeof p !== 'object' || p === null || Array.isArray(p))
           throw new ProtocolError(`${field}[${i}].players[${j}] must be an object`);
         const pr = p as Record<string, unknown>;
-        return { name: playerName(pr, 'name'), record: playerRecord(pr, 'record') };
+        return {
+          name: playerName(pr, 'name'),
+          record: playerRecord(pr, 'record'),
+          rating: optionalRating(pr, 'rating'),
+        };
       }),
       spectators: nameList(r, 'spectators'),
     };
@@ -236,6 +281,7 @@ const ERROR_CODES: ReadonlySet<string> = new Set([
   'room_full',
   'not_in_room',
   'bad_message',
+  'account_required',
 ] satisfies ErrorCode[]);
 
 const MATCH_END_REASONS: ReadonlySet<string> = new Set([
@@ -279,6 +325,7 @@ const SERVER_TYPES: ReadonlySet<string> = new Set([
   'peer_inputs',
   'desync',
   'match_end',
+  'rating_update',
   'error',
 ]);
 
@@ -297,12 +344,14 @@ function decodeAny(m: Record<string, unknown>): Message {
     }
     case 'create_room': {
       const ai = m['aiOpponent'];
-      if (ai === undefined) return { type };
+      const rated = m['rated'] === undefined ? {} : { rated: bool(m, 'rated') };
+      if (ai === undefined) return { type, ...rated };
       if (typeof ai !== 'object' || ai === null || Array.isArray(ai))
         throw new ProtocolError('aiOpponent must be an object');
       return {
         type,
         aiOpponent: { difficulty: aiDifficulty(ai as Record<string, unknown>, 'difficulty') },
+        ...rated,
       };
     }
     case 'ready':
@@ -332,6 +381,7 @@ function decodeAny(m: Record<string, unknown>): Message {
         token: sessionToken(m, 'token'),
         name: playerName(m, 'name'),
         record: playerRecord(m, 'record'),
+        rating: optionalRating(m, 'rating'),
       };
     case 'room_list':
       return { type, rooms: roomSummaries(m, 'rooms') };
@@ -350,6 +400,7 @@ function decodeAny(m: Record<string, unknown>): Message {
         inputDelay: uint32(m, 'inputDelay'),
         players: namePair(m, 'players'),
         frames: [matchFrames(frames[0], 'frames[0]'), matchFrames(frames[1], 'frames[1]')],
+        rated: bool(m, 'rated'),
       };
     }
     case 'spectate_joined': {
@@ -374,6 +425,7 @@ function decodeAny(m: Record<string, unknown>): Message {
         players: namePair(m, 'players'),
         frames: [matchFrames(frames[0], 'frames[0]'), matchFrames(frames[1], 'frames[1]')],
         ...(m['aiOpponent'] === undefined ? {} : { aiOpponent: aiOpponentInfo(m['aiOpponent']) }),
+        rated: bool(m, 'rated'),
       };
     }
     case 'spectators':
@@ -403,6 +455,7 @@ function decodeAny(m: Record<string, unknown>): Message {
         playerIndex: playerIndex(m, 'playerIndex'),
         inputDelay: uint32(m, 'inputDelay'),
         players: namePair(m, 'players'),
+        rated: bool(m, 'rated'),
       } as const;
       return m['aiOpponent'] === undefined
         ? base
@@ -424,6 +477,16 @@ function decodeAny(m: Record<string, unknown>): Message {
       if (w !== null && (typeof w !== 'number' || !Number.isInteger(w) || w < 0 || w > 1))
         throw new ProtocolError('winner must be a player index or null');
       return { type, reason: reason as MatchEndReason, winner: w };
+    }
+    case 'rating_update': {
+      const ratings = m['ratings'];
+      if (!Array.isArray(ratings) || ratings.length !== 2)
+        throw new ProtocolError('ratings must be a pair');
+      return {
+        type,
+        players: namePair(m, 'players'),
+        ratings: [ratingChange(ratings[0], 'ratings[0]'), ratingChange(ratings[1], 'ratings[1]')],
+      };
     }
     case 'error': {
       const code = str(m, 'code');
