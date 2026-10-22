@@ -759,6 +759,22 @@ A generator header that a real, non-AI tool always writes (e.g. a lockfile's own
   ladder (the `/api/` proxy already carries them), the new log lines, account
   moderation, backups (a lost database loses every account for good) and
   updating a running relay.
+  **Phase 7 landed** (protocol v6): matchmaking. `matchmaker.ts` is the pure
+  pairing rule (`queueWindow`, `bestPair`: closest gap inside both windows,
+  ties to the longest wait, no rematch of the last pairing while anyone else
+  waits, a `blocked` hook for today's cap). The relay keeps the queue, a
+  one-second tick while anyone's queued (re-pair, report widened windows),
+  proposals with a `QUEUE_ACCEPT_MS` timer (a side that doesn't accept is
+  out, the other requeued with its wait), a per-day cache of capped pairs,
+  and seats an accepted pair in a new rated room, starting at once. Entering a
+  room or disconnecting leaves the queue. `room_list` carries the queue's
+  size. Client: Play rated / Leave queue, the status line, the accept prompt,
+  Queue again after a queue game (`netplayActions.queueAgain`), and a queue
+  opponent leaving sends the other back to the lobby. Wording is
+  `view/queue.ts`. Review fixes: an account queues once across connections
+  (`busyElsewhere` covers the queue and proposals); the capped-pairs cache
+  keeps today only, and last opponents go when the account disconnects; the
+  prompt is an alert that takes focus, and Accept disables at the deadline.
 - [ ] Phase 6 stretch (X-mode, replays, WebRTC, binary codec if
       measurements demand it)
 

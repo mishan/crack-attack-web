@@ -1052,6 +1052,204 @@ describe('rated games', () => {
   });
 });
 
+describe('rated queue', () => {
+  const T0 = Date.UTC(2026, 8, 27, 12);
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(T0);
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  /** A relay with accounts; `player` logs one in at a given rating. */
+  async function setup() {
+    const store = new MemoryAccountStore();
+    const relay = new RelayServer({
+      store,
+      accounts: store,
+      now: () => Date.now(),
+      wallClock: () => Date.now(),
+    });
+    let n = 0;
+    const player = async (handle: string, rating = 1500): Promise<FakeConn> => {
+      const id = ++n;
+      const session = id.toString(16).padStart(32, '0');
+      await store.createAccount({
+        handle,
+        handleFolded: handle.toLowerCase(),
+        keyHash: `key${id}`,
+        sessionHash: secretHash(session),
+        createdAt: T0,
+      });
+      if (rating !== 1500) {
+        // A game yesterday against no one, to set the rating.
+        await store.recordRatedGame(rated(id, 999, { rating, rd: 80 }, T0 - 2 * 86_400_000));
+      }
+      return client(relay, 'ignored', session);
+    };
+    /** Let the queue's store lookups settle. */
+    const settle = () => vi.advanceTimersByTimeAsync(0);
+    return { relay, store, player, settle };
+  }
+
+  function rated(
+    a: number,
+    b: number,
+    after: { rating: number; rd: number },
+    createdAt: number,
+  ): NewRatedGame {
+    return {
+      accountA: a,
+      accountB: b,
+      result: 'a',
+      end: 'result',
+      ticks: 1,
+      seed: 1,
+      simVersion: 1,
+      aBefore: { rating: 1500, rd: 350 },
+      bBefore: { rating: 1500, rd: 350 },
+      aAfter: { ...after, volatility: 0.06 },
+      bAfter: { rating: 1500, rd: 350, volatility: 0.06 },
+      createdAt,
+      inputs: null,
+    };
+  }
+
+  it('is for accounts outside any room', async () => {
+    const { relay, player } = await setup();
+    const guest = await client(relay, 'carol');
+    await say(relay, guest, { type: 'queue_join' });
+    expect(guest.lastOf('error').code).toBe('account_required');
+    const a = await player('Alice');
+    await createRoom(relay, a);
+    await say(relay, a, { type: 'queue_join' });
+    expect(a.lastOf('error').code).toBe('bad_message');
+  });
+
+  it('pairs two close ratings, and seats them in a rated game once both accept', async () => {
+    const { relay, player, settle } = await setup();
+    const guest = await client(relay, 'carol');
+    const a = await player('Alice', 1520);
+    const b = await player('Bob', 1480);
+    await say(relay, a, { type: 'queue_join' });
+    await settle();
+    expect(a.lastOf('queue_status')).toEqual({
+      type: 'queue_status',
+      inQueue: true,
+      queued: 1,
+      waitedMs: 0,
+      window: 100,
+    });
+    expect(guest.lastOf('room_list').queued).toBe(1);
+
+    await say(relay, b, { type: 'queue_join' });
+    await settle();
+    expect(a.lastOf('match_found')).toEqual({
+      type: 'match_found',
+      opponent: 'Bob',
+      rating: { rating: 1480, provisional: false },
+      acceptMs: 10_000,
+    });
+    expect(b.lastOf('match_found').opponent).toBe('Alice');
+    expect(guest.lastOf('room_list').queued).toBe(0);
+
+    await say(relay, a, { type: 'queue_accept' });
+    expect(a.allOf('room_joined')).toEqual([]);
+    await say(relay, b, { type: 'queue_accept' });
+    await settle();
+    const joined = a.lastOf('room_joined');
+    expect(joined.players).toEqual(['Alice', 'Bob']);
+    expect(a.lastOf('match_start')).toMatchObject({ playerIndex: 0, rated: true });
+    expect(b.lastOf('match_start')).toMatchObject({ playerIndex: 1, rated: true });
+    expect(guest.lastOf('room_list').rooms).toEqual([
+      expect.objectContaining({ code: joined.code, rated: true, state: 'playing' }),
+    ]);
+  });
+
+  it('widens the windows as players wait', async () => {
+    const { relay, player, settle } = await setup();
+    const a = await player('Alice', 1500);
+    const b = await player('Bob', 1700);
+    await say(relay, a, { type: 'queue_join' });
+    await say(relay, b, { type: 'queue_join' });
+    await settle();
+    expect(a.allOf('match_found')).toEqual([]);
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(a.lastOf('queue_status')).toMatchObject({ window: 150, waitedMs: 10_000 });
+    expect(a.allOf('match_found')).toEqual([]);
+    await vi.advanceTimersByTimeAsync(10_000); // ±200: 200 apart is in
+    expect(a.lastOf('match_found').opponent).toBe('Bob');
+  });
+
+  it("drops a side that doesn't accept in time, and requeues the other with its wait", async () => {
+    const { relay, player, settle } = await setup();
+    const a = await player('Alice');
+    await say(relay, a, { type: 'queue_join' });
+    await vi.advanceTimersByTimeAsync(5_000);
+    const b = await player('Bob');
+    await say(relay, b, { type: 'queue_join' });
+    await settle();
+    await say(relay, a, { type: 'queue_accept' });
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(b.lastOf('queue_status')).toMatchObject({ inQueue: false, queued: 1 });
+    expect(a.lastOf('queue_status')).toMatchObject({ inQueue: true, queued: 1 });
+    expect(a.lastOf('queue_status').waitedMs).toBeGreaterThanOrEqual(15_000);
+    expect(a.allOf('room_joined')).toEqual([]);
+  });
+
+  it('puts the other side back when one declines, and forgets a disconnect', async () => {
+    const { relay, player, settle } = await setup();
+    const guest = await client(relay, 'carol');
+    const a = await player('Alice');
+    const b = await player('Bob');
+    await say(relay, a, { type: 'queue_join' });
+    await say(relay, b, { type: 'queue_join' });
+    await settle();
+    await say(relay, b, { type: 'queue_leave' });
+    await settle();
+    expect(b.lastOf('queue_status').inQueue).toBe(false);
+    expect(a.lastOf('queue_status')).toMatchObject({ inQueue: true, queued: 1 });
+    relay.disconnect(a);
+    await settle();
+    expect(guest.lastOf('room_list').queued).toBe(0);
+    relay.shutdown();
+  });
+
+  it('queues an account once, whichever connection it asks from', async () => {
+    const { relay, player, settle } = await setup();
+    const a = await player('Alice');
+    await say(relay, a, { type: 'queue_join' });
+    await settle();
+    const again = await client(relay, 'x', (1).toString(16).padStart(32, '0'));
+    await say(relay, again, { type: 'queue_join' });
+    expect(again.lastOf('error').message).toMatch(/already in the queue/);
+    // Nor a room while its other connection is queued.
+    await say(relay, again, { type: 'create_room', rated: true });
+    expect(again.lastOf('error').message).toMatch(/already in the queue/);
+    relay.shutdown();
+  });
+
+  it("doesn't pair a pair that has played its rated games today", async () => {
+    const { relay, store, player, settle } = await setup();
+    const a = await player('Alice');
+    const b = await player('Bob');
+    for (let i = 0; i < 10; i++) {
+      await store.recordRatedGame(rated(1, 2, { rating: 1500, rd: 300 }, T0 - 1000));
+    }
+    await say(relay, a, { type: 'queue_join' });
+    await say(relay, b, { type: 'queue_join' });
+    await settle();
+    expect(a.allOf('match_found')).toEqual([]);
+    const c = await player('Carol');
+    await say(relay, c, { type: 'queue_join' });
+    await settle();
+    expect(c.lastOf('match_found').opponent).toMatch(/Alice|Bob/);
+    relay.shutdown();
+  });
+});
+
 describe('rename', () => {
   it('takes effect live: rosters, room list, seat, and persistence', async () => {
     const store = new MemoryStore();

@@ -13,7 +13,10 @@
  * Logged in to an account (see `account.ts`), the token is the account's
  * session: the player plays under its handle with a rating, may create rated
  * rooms (a Rated box, on by default), and gets a `rating_update` a moment after
- * each rated game. Guests can watch rated rooms but not sit in them.
+ * each rated game. Guests can watch rated rooms but not sit in them. An
+ * account can also queue (Play rated): the relay pairs close ratings, both
+ * accept, and the game starts in a new rated room; Queue again, after it,
+ * goes back in the queue.
  *
  * Everything deterministic lives in the session; this file is DOM/WebGL glue.
  */
@@ -24,8 +27,10 @@ import {
   PROTOCOL_VERSION,
   type AiOpponentInfo,
   type MatchResumeMessage,
+  type MatchFoundMessage,
   type MatchStartMessage,
   type PlayerRating,
+  type QueueStatusMessage,
   type RatingUpdateMessage,
   type RoomSummary,
   type ServerMessage,
@@ -70,6 +75,7 @@ import type { AudioManager } from './audio/audioManager.js';
 import { AccountClient, AccountError, apiOriginFor } from './account/accountApi.js';
 import { AccountState, browserStorage } from './account/accountState.js';
 import { lobbyPlayerText, ratingChangeText, ratingText } from './view/rating.js';
+import { foundLine, queueCountLine, queueLine } from './view/queue.js';
 
 /** Build the local bot seat from a match's {@link AiOpponentInfo} descriptor. */
 function makeAiSeat(info: AiOpponentInfo | undefined, matchSeed: number): AiSeat | undefined {
@@ -157,6 +163,17 @@ export function bootNetplay(
       </label>
       <button id="net-create-ai" style="flex:1">vs AI</button>
     </div>
+    <button id="net-queue" hidden>Play rated</button>
+    <div id="net-queue-line" hidden style="opacity:.85"></div>
+    <div id="net-found" hidden
+         style="display:flex;flex-direction:column;gap:6px;padding:8px;border:1px solid #3a5a9a;border-radius:6px">
+      <span id="net-found-text" dir="auto" role="alert"></span>
+      <div style="display:flex;gap:6px">
+        <button id="net-accept" style="flex:1">Accept</button>
+        <button id="net-decline" style="flex:1">Decline</button>
+      </div>
+    </div>
+    <div id="net-queue-count" style="opacity:.6;font-size:13px"></div>
     <div style="display:flex;gap:6px">
       <input id="net-code" placeholder="code" maxlength="5"
              style="flex:1;text-transform:uppercase">
@@ -186,6 +203,13 @@ export function bootNetplay(
   const nameRow = $<HTMLLabelElement>('net-name-row');
   const ratedRow = $<HTMLLabelElement>('net-rated-row');
   const ratedBox = $<HTMLInputElement>('net-rated');
+  const queueBtn = $<HTMLButtonElement>('net-queue');
+  const queueLineEl = $<HTMLDivElement>('net-queue-line');
+  const foundEl = $<HTMLDivElement>('net-found');
+  const foundText = $<HTMLSpanElement>('net-found-text');
+  const acceptBtn = $<HTMLButtonElement>('net-accept');
+  const declineBtn = $<HTMLButtonElement>('net-decline');
+  const queueCountEl = $<HTMLDivElement>('net-queue-count');
   $<HTMLButtonElement>('net-account').onclick = (): void => nav.account();
   $<HTMLButtonElement>('net-ladder').onclick = (): void => nav.leaderboard();
 
@@ -218,6 +242,7 @@ export function bootNetplay(
   const showIdentityControls = (): void => {
     nameRow.hidden = rating !== null;
     ratedRow.hidden = rating === null;
+    syncQueue(performance.now());
   };
   nameInput.onchange = (): void => {
     const name = nameInput.value.trim() || 'player';
@@ -260,6 +285,17 @@ export function bootNetplay(
   let roomRated = false;
   /** The banner holds a countdown-time message (whether it counts, a rating change): clear it at GO. */
   let clearBannerAtGo = false;
+  /** In the rated queue: its last status, and when it arrived (to tick the wait). */
+  let queued: { status: QueueStatusMessage; at: number } | null = null;
+  /** A match the queue found: whom, and when the offer lapses. */
+  let found: {
+    msg: MatchFoundMessage;
+    until: number;
+    accepted: boolean;
+    declined: boolean;
+  } | null = null;
+  /** The room we're in came from the queue (Queue again after the game). */
+  let fromQueue = false;
   let resultSent = false;
   /** We've asked for a rematch this game and are waiting on the opponent. */
   let rematchSent = false;
@@ -348,6 +384,9 @@ export function bootNetplay(
   /** Reconnect with backoff while a match seat may still be held for us. */
   function onConnectionLost(): void {
     net = null;
+    // The relay forgets a disconnected player's place in the queue.
+    queued = null;
+    found = null;
     if (disposed) return; // mode switched away; stay quiet
     // connect() can fail twice for one attempt (promise rejection AND the
     // socket's close event); never stack reconnect timers.
@@ -392,9 +431,12 @@ export function bootNetplay(
         break;
       case 'room_list':
         renderRoomList(msg.rooms);
+        queueCountEl.textContent = queueCountLine(msg.queued);
         break;
       case 'room_created':
         phase = 'room';
+        fromQueue = false;
+        queued = null;
         roomCode = msg.code;
         roomRated = false; // until the room list says otherwise
         if (createdVsAi) {
@@ -409,6 +451,11 @@ export function bootNetplay(
         break;
       case 'room_joined':
         phase = 'room';
+        // Joined straight from an accepted match: a queue room.
+        fromQueue = found?.accepted === true;
+        found = null;
+        queued = null;
+        syncQueue(performance.now());
         roomCode = msg.code;
         readyBtn.hidden = false;
         readyBtn.disabled = false;
@@ -420,6 +467,12 @@ export function bootNetplay(
         setStatus(`${msg.name} joined room ${roomCode}. Press Ready.`);
         break;
       case 'peer_left':
+        if (fromQueue) {
+          // A queue room is for the two the queue paired: back to the lobby,
+          // where Play rated queues again.
+          leaveToLobby(`${msg.name} left. Play rated to find another game.`);
+          break;
+        }
         if (phase === 'playing' || phase === 'ended') endToRoom('');
         readyBtn.hidden = true;
         setStatus(`${msg.name} left. Waiting in room ${roomCode}…`);
@@ -497,6 +550,20 @@ export function bootNetplay(
       case 'rating_update':
         onRatingUpdate(msg);
         break;
+      case 'queue_status':
+        onQueueStatus(msg);
+        break;
+      case 'match_found':
+        found = {
+          msg,
+          until: performance.now() + msg.acceptMs,
+          accepted: false,
+          declined: false,
+        };
+        queued = null;
+        syncQueue(performance.now());
+        acceptBtn.focus(); // ten seconds: don't make a keyboard player hunt for it
+        break;
       case 'error':
         setStatus(
           msg.code === 'account_required'
@@ -506,6 +573,67 @@ export function bootNetplay(
         break;
     }
   }
+
+  function onQueueStatus(msg: QueueStatusMessage): void {
+    const offer = found;
+    found = null;
+    queued = msg.inQueue ? { status: msg, at: performance.now() } : null;
+    if (offer) {
+      // A found match fell through: we're back in (they didn't accept), or out.
+      setStatus(
+        msg.inQueue
+          ? `${offer.msg.opponent} didn't accept — back in the queue.`
+          : offer.declined
+            ? 'You left the queue.'
+            : offer.accepted
+              ? ''
+              : "You didn't accept in time — you're out of the queue.",
+      );
+    }
+    syncQueue(performance.now());
+  }
+
+  /** Show the queue's state in the lobby: the button, the status line, the prompt. */
+  function syncQueue(nowMs: number): void {
+    const inQueue = queued !== null;
+    queueBtn.textContent = inQueue ? 'Leave queue' : 'Play rated';
+    queueBtn.hidden = rating === null || found !== null;
+    queueBtn.disabled = phase !== 'lobby';
+    const line = queued
+      ? queueLine(
+          queued.status.waitedMs + (nowMs - queued.at),
+          queued.status.window,
+          queued.status.queued,
+        )
+      : '';
+    if (queueLineEl.textContent !== line) queueLineEl.textContent = line;
+    queueLineEl.hidden = !inQueue;
+    foundEl.hidden = found === null;
+    foundEl.style.display = found === null ? 'none' : 'flex';
+    if (found) {
+      const text = found.accepted
+        ? `Waiting for ${found.msg.opponent} to accept…`
+        : foundLine(found.msg.opponent, found.msg.rating, found.until - nowMs);
+      if (foundText.textContent !== text) foundText.textContent = text;
+      // Past the deadline the relay has let the offer go; its word follows.
+      acceptBtn.disabled = found.accepted || nowMs >= found.until;
+    }
+  }
+
+  queueBtn.onclick = (): void => {
+    net?.send({ type: queued ? 'queue_leave' : 'queue_join' });
+  };
+  acceptBtn.onclick = (): void => {
+    if (!found) return;
+    found.accepted = true;
+    net?.send({ type: 'queue_accept' });
+    syncQueue(performance.now());
+  };
+  declineBtn.onclick = (): void => {
+    if (found) found.declined = true;
+    net?.send({ type: 'queue_leave' });
+  };
+  syncQueue(performance.now());
 
   /**
    * The relay met our session as a guest. Ask the account API whether it has
@@ -676,6 +804,7 @@ export function bootNetplay(
     session = null;
     spectator = null;
     phase = 'lobby';
+    fromQueue = false;
     rematchSent = false;
     overlay.style.display = 'flex';
     readyBtn.hidden = true;
@@ -920,6 +1049,10 @@ export function bootNetplay(
   const rematchBtn = actionButton(() => sendReady());
   const leaveBtn = actionButton(() => leaveToLobby('left the room'));
   const stopWatchingBtn = actionButton(() => leaveToLobby('stopped watching'));
+  const queueAgainBtn = actionButton(() => {
+    leaveToLobby('');
+    net?.send({ type: 'queue_join' });
+  });
 
   /** Set a button's visibility / text / enabled state, touching the DOM only on change. */
   const applyButton = (btn: HTMLButtonElement, show: boolean, text = '', enabled = true): void => {
@@ -934,6 +1067,7 @@ export function bootNetplay(
       decided: phase === 'ended' || (phase === 'playing' && !!session?.outcome),
       countdown: metaTicks < COUNTDOWN_GATE_TICKS,
       rematchSent,
+      fromQueue,
     });
     // A half-finished confirm never carries over: once Concede isn't live (the
     // match ended, or the next one is in its countdown), disarm it, so a rematch
@@ -954,6 +1088,9 @@ export function bootNetplay(
     );
     applyButton(leaveBtn, a.leave, 'Leave');
     applyButton(stopWatchingBtn, a.stopWatching, 'Stop watching');
+    applyButton(queueAgainBtn, a.queueAgain, 'Queue again');
+    // The lobby's queue line and prompt tick while shown.
+    syncQueue(nowMs);
     if (touch) {
       const visibility = a.touchPad ? '' : 'hidden';
       if (touch.style.visibility !== visibility) touch.style.visibility = visibility;
