@@ -1,17 +1,13 @@
 #!/usr/bin/env node
 // Takes the README's screenshots from the built game; see README.md.
-import { spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { mkdir, mkdtemp, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright';
 import { frames, gif, pageErrors, serve, steady } from 'shotbox';
+import { relayMain, root, startRelay, web } from './relay.mjs';
 
-const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
-const web = path.join(root, 'packages/client/dist/web');
-const relayMain = path.join(root, 'packages/server/dist/main.js');
 const out = path.join(root, 'docs/images');
 const only = process.argv.slice(2);
 
@@ -28,7 +24,7 @@ await mkdir(out, { recursive: true });
 const scratch = await mkdtemp(path.join(os.tmpdir(), 'shots-'));
 const server = await serve(web);
 const page0 = `http://127.0.0.1:${server.address().port}/`;
-const relay = await startRelay();
+const relay = await startRelay(page0.slice(0, -1));
 // SwiftShader: WebGL in software, the same on every machine.
 const browser = await chromium.launch({
   args: [...steady, '--use-angle=swiftshader', '--enable-unsafe-swiftshader'],
@@ -154,24 +150,4 @@ function watchErrors(page, name) {
 async function save(page, file) {
   await page.screenshot({ path: path.join(out, file) });
   console.log(file);
-}
-
-function startRelay() {
-  const child = spawn(process.execPath, [relayMain], {
-    env: {
-      ...process.env,
-      PORT: '0',
-      HOST: '127.0.0.1',
-      DB: ':memory:',
-      CORS_ORIGIN: page0.slice(0, -1),
-    },
-    stdio: ['ignore', 'pipe', 'inherit'],
-  });
-  return new Promise((resolve, reject) => {
-    child.once('exit', (code) => reject(new Error(`relay exited (${code})`)));
-    child.stdout.on('data', (chunk) => {
-      const port = String(chunk).match(/listening on :(\d+)/)?.[1];
-      if (port) resolve({ process: child, url: `ws://127.0.0.1:${port}` });
-    });
-  });
 }
