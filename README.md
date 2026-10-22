@@ -3,8 +3,8 @@
 A browser port of [Crack Attack!](https://www.nongnu.org/crack-attack/) — a GPL
 clone of Tetris Attack — from C++/OpenGL to TypeScript. It runs the same
 real-time block-matching game in the browser with Three.js rendering and
-server-relayed lockstep multiplayer plus a lobby, plus solo play and an AI
-opponent.
+server-relayed lockstep multiplayer plus a lobby and a rated ladder, plus solo
+play and an AI opponent.
 
 ![AI vs AI Demo Mode](docs/images/screenshot.png)
 
@@ -19,7 +19,7 @@ The project is a pnpm monorepo:
 | `packages/core`     | Deterministic simulation — zero deps, runs in the browser and Node. |
 | `packages/protocol` | Wire message types + codec shared by client and server.             |
 | `packages/client`   | Three.js renderer, input, HUD, audio (a Vite app).                  |
-| `packages/server`   | Lobby + lockstep relay + solo scoreboard (Node, `ws`, SQLite).      |
+| `packages/server`   | Lobby + lockstep relay + scoreboard + ladder (Node, `ws`, SQLite).  |
 | `tools/`            | Dev tooling: `ai-arena`, `replay-check`, `obj2gltf`.                |
 
 ## Requirements
@@ -394,8 +394,8 @@ needed.
 
 This sets up the whole game on one Linux server. nginx serves the game's files
 over HTTPS and passes two paths to the relay: `/ws` for netplay and `/api/` for
-the solo scoreboard. The relay runs as a systemd service and keeps its data in
-one SQLite file.
+the solo scoreboard, accounts and the rated leaderboard. The relay runs as a
+systemd service and keeps its data in one SQLite file.
 
 HTTPS isn't optional. A page served over `https://` may only open `wss://`
 WebSockets, and the relay speaks plain WebSocket, so nginx handles TLS in front
@@ -430,8 +430,8 @@ That makes the two things to copy to the server:
 - `packages/client/dist/web/`: the game, as static files.
 
 `VITE_RELAY_URL` is the address browsers use to reach the relay, fixed at build
-time. The client finds the scoreboard from it: `wss://example.com/ws` →
-`https://example.com/api/solo`.
+time. The client finds the relay's HTTP API from it: `wss://example.com/ws` →
+`https://example.com/api/…`.
 
 `VITE_PUBLIC_URL` is the game's own address. Link previews on Facebook,
 LinkedIn and the like need the game's preview image as a full URL, so the build
@@ -472,9 +472,9 @@ WantedBy=multi-user.target
 - `TRUST_PROXY=1` tells the relay that nginx is in front. The scoreboard limits
   requests per player. Without this setting every request seems to come from
   nginx, so all players share one limit.
-- `DB` is the database: player records and the scoreboard. `StateDirectory`
-  has systemd create `/var/lib/crack-attack` for the relay's user, and the
-  relay creates the file on first start.
+- `DB` is the database: guests' records, accounts and the rated-game log, and
+  the scoreboard. `StateDirectory` has systemd create `/var/lib/crack-attack`
+  for the relay's user, and the relay creates the file on first start.
 - `PUBLIC_URL` is the game's address. When a player shares a ranked score,
   the link goes to a page the relay serves, and Facebook, LinkedIn and Bluesky
   show that page's preview, score included. The page uses this address for the
@@ -537,7 +537,7 @@ server {
     proxy_send_timeout 1h;
   }
 
-  # The solo scoreboard's API.
+  # The HTTP API: the solo scoreboard, accounts and the leaderboard.
   location /api/ {
     proxy_pass http://127.0.0.1:8080;
     proxy_set_header Host $host;
@@ -587,11 +587,12 @@ redirect HTTP to HTTPS.
 ```sh
 curl -s -X POST https://example.com/api/solo/ticket    # {"runId":…,"seed":…,…}
 curl -s 'https://example.com/api/solo/scores?limit=5'  # includes "total":0 until someone plays
+curl -s https://example.com/api/rating/leaderboard     # {"entries":[]} until ratings settle
 ```
 
 Then open `https://example.com/`. The title card and an AI match should appear.
 Press a key to play solo; the HUD should say `RANKED`. **Play online** should
-open the lobby.
+open the lobby, and **Account** there the account screen.
 
 If something's wrong:
 
@@ -603,23 +604,40 @@ If something's wrong:
 
 ### Running it
 
-- **Logs:** `journalctl -u crack-attack`. A line starting `scoreboard:` means a
-  limit shared by all players is turning requests away (if it's the ticket
-  limit, everyone is playing unranked) or a background cleanup failed.
-- **Moderation:** run the [admin commands](#solo-scoreboard) as the relay's
-  user, so any file SQLite creates beside the database stays the relay's:
+- **Logs:** `journalctl -u crack-attack`. A line starting `scoreboard:` or
+  `accounts:` means a limit shared by all players is turning requests away (if
+  it's the ticket limit, everyone is playing unranked) or a background cleanup
+  failed. `relay: disputed …` is a game whose players disagreed, and what the
+  replay decided; `relay: unsettled …` is a rated game the replay couldn't
+  settle, so it wasn't rated. A few are noise; a steady stream from one
+  player is worth a look with `admin account`.
+- **Moderation:** run the [admin commands](#solo-scoreboard) (and the
+  [account ones](#accounts)) as the relay's user, so any file SQLite creates
+  beside the database stays the relay's:
 
   ```sh
   sudo -u crack-attack env DB=/var/lib/crack-attack/lobby.db node /opt/crack-attack/relay.mjs admin recent 50
+  sudo -u crack-attack env DB=/var/lib/crack-attack/lobby.db node /opt/crack-attack/relay.mjs admin account misha
   ```
 
-- **Backups:** the database is the only data to keep. Copy it with `sqlite3`
-  (from the `sqlite3` package), which is safe while the relay runs; a plain
-  `cp` can miss recent writes:
+- **Backups:** the database is the only data to keep, and it holds every
+  account. A key can't be recovered, so a lost database is every account
+  gone for good: back it up daily, and keep a copy off the server. Copy it
+  with `sqlite3` (from the `sqlite3` package), which is safe while the relay
+  runs; a plain `cp` can miss recent writes:
 
   ```sh
   sudo -u crack-attack sqlite3 /var/lib/crack-attack/lobby.db ".backup /var/lib/crack-attack/backup.db"
   ```
+
+  Keys and sessions are stored only as hashes, so a leaked backup logs nobody
+  in; it does hold handles, ratings and game logs, so keep it private anyway.
+
+- **Updating:** take a backup, rebuild as in step 1, copy the new `relay.mjs`
+  into place, `sudo systemctl restart crack-attack`, then upload the new game
+  files. The relay upgrades the database itself on start. Restarting ends any
+  match in progress, and when the netplay protocol has changed, players with
+  the old page open are turned away from the lobby until they reload.
 
 - **Stopping:** `sudo systemctl stop crack-attack` shuts the relay down
   cleanly. Rooms live in memory, so any match in progress ends.
@@ -628,9 +646,10 @@ If something's wrong:
 
 - **The relay on its own host or subdomain:** build with
   `VITE_RELAY_URL=wss://relay.example.com/ws` and give that host the same
-  `/ws` and `/api/` locations. The scoreboard is then on a different origin
-  from the game, so add `CORS_ORIGIN=https://example.com` (the game's address)
-  to the relay's `Environment=` line.
+  `/ws` and `/api/` locations. The API is then on a different origin from the
+  game, so add `CORS_ORIGIN=https://example.com` (the game's address) to the
+  relay's `Environment=` line. Account keys are saved by password managers for
+  the game's own domain, so they fill in wherever the game is served from.
 - **The game on another web server or a static host:** upload the contents of
   `dist/web` anywhere, at the domain root or in a subdirectory (asset paths
   are relative), with the caching and compression from the config above. It
