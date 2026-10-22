@@ -28,12 +28,13 @@ chromium`, here). The demo GIF takes about three minutes to make.
 
 ```sh
 pnpm --filter @crack-attack/screenshots a11y               # every screen
-pnpm --filter @crack-attack/screenshots a11y lobby account # some: attract, solo, gameover, lobby, account, scores, ladder
+pnpm --filter @crack-attack/screenshots a11y lobby account # some: attract, solo, gameover, phone, lobby, account, scores, ladder
 ```
 
 It opens each screen (solo also opens both AI pickers; gameover waits a minute
 or two for an untouched game to top out, then audits the name prompt, the game
-over screen and the share dialog) in a headed Chromium inside `shotbox run
+over screen and the share dialog; phone is solo on a 375×667 touch screen,
+with its touch controls) in a headed Chromium inside `shotbox run
 --a11y`, and runs `shotbox a11y` `tree`, `lint`, `contrast` and `tabwalk` on
 it. The reports and a screenshot of each go to `a11y-report/`, with a summary
 per screen in `summary.txt`. It fails on a lint finding (an unnamed control or

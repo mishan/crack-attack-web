@@ -36,10 +36,18 @@ const browser = await chromium.launch({
     '--enable-unsafe-swiftshader',
   ],
 });
-const page = await (await browser.newContext({ viewport: null })).newPage();
+const desktop = { viewport: null };
+let page;
+page = await newPage(desktop);
 const at = (query) => `${page0}?${query ? `${query}&` : ''}relay=${relay.url}`;
 const summary = [];
 let problems = 0;
+
+// One window at a time, since shotbox finds it by its title.
+async function newPage(options) {
+  await page?.context().close();
+  return (await browser.newContext(options)).newPage();
+}
 
 async function go(query) {
   await page.goto(at(query));
@@ -70,6 +78,16 @@ const screens = {
     await audit('gameover');
     await page.getByRole('button', { name: 'Share score' }).click();
     await audit('share');
+  },
+  // A phone's touch controls mount only where the pointer is coarse.
+  async phone() {
+    page = await newPage({ viewport: { width: 375, height: 667 }, hasTouch: true, isMobile: true });
+    try {
+      await go('solo');
+      await audit('phone');
+    } finally {
+      page = await newPage(desktop);
+    }
   },
   async lobby() {
     await go('net');
