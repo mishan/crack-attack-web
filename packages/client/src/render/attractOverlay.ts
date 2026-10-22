@@ -132,6 +132,7 @@ export class AttractOverlay {
   private makePrompt(text: string, height: number): HTMLElement {
     const label = new BitmapLabel(FONT0, { height, color: '#e7ebf3' });
     label.setText(text);
+    if (globalThis.matchMedia?.('(prefers-reduced-motion: reduce)').matches) return label.element;
     // Mostly on, briefly off — the arcade PRESS START blink.
     const blink = label.element.animate(
       [
