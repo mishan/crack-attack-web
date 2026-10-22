@@ -215,7 +215,7 @@ export function bootAccount(relayUrl: string, nav: AccountScreenNav): { dispose(
       copied,
     );
     const onward = button("I've saved it — continue", () => then());
-    onward.style.opacity = '.8';
+    onward.style.opacity = '.85';
     form.form.onsubmit = (e): void => {
       e.preventDefault();
       // A browser's own password suggestion must not replace the key.

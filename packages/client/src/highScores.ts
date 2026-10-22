@@ -138,7 +138,8 @@ export function bootHighScores(
       for (const b of buttons) {
         const on = b.dataset['id'] === current();
         b.setAttribute('aria-pressed', String(on));
-        b.style.opacity = on ? '1' : '.6';
+        b.style.opacity = on ? '1' : '.85';
+        b.style.boxShadow = on ? 'inset 0 0 0 2px #7aa2ff' : 'none';
         b.style.fontWeight = on ? '700' : '400';
       }
     };

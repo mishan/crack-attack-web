@@ -22,6 +22,7 @@ Tools (see `../BROWSER_PORT_PLAN.md`):
   a CSV of generator and relay (`STATS=1`) numbers. See its own README.
 
 - **screenshots/** — retakes the top-level README's screenshots and demo GIF
-  from the built game, in a sealed headless browser. See its own README.
+  from the built game, in a sealed headless browser, and audits each screen's
+  accessibility. See its own README.
 
 Each tool is its own workspace package (`tools/*`) and may depend on Node APIs.

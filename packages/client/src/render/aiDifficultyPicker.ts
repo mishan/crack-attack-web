@@ -76,7 +76,7 @@ export function pickAiDifficulty(): Promise<AiDifficultyLevel | null> {
       const label = document.createElement('strong');
       label.textContent = opt.label;
       const blurb = document.createElement('span');
-      blurb.style.cssText = 'opacity:.65;font-size:12px';
+      blurb.style.cssText = 'opacity:.9;font-size:12px';
       blurb.textContent = ` — ${opt.blurb}`;
       btn.append(label, blurb);
       btn.onclick = () => finish(opt.id);
@@ -86,7 +86,7 @@ export function pickAiDifficulty(): Promise<AiDifficultyLevel | null> {
     const cancel = document.createElement('button');
     cancel.type = 'button';
     cancel.textContent = 'Cancel';
-    cancel.style.cssText = 'margin-top:4px;opacity:.8;cursor:pointer';
+    cancel.style.cssText = 'margin-top:4px;opacity:.85;cursor:pointer';
     cancel.onclick = () => finish(null);
     panel.append(cancel);
 

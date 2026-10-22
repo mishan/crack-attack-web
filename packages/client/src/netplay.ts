@@ -181,8 +181,8 @@ export function bootNetplay(
     </div>
     <div id="net-rooms" style="display:flex;flex-direction:column;gap:4px"></div>
     <button id="net-ready" hidden>Ready</button>
-    <div id="net-status" style="min-height:2.5em;opacity:.8"></div>
-    <button id="net-solo" style="opacity:.8">Back to solo play</button>`;
+    <div id="net-status" role="status" style="min-height:2.5em;opacity:.8"></div>
+    <button id="net-solo" style="opacity:.85">Back to solo play</button>`;
   overlay.appendChild(panel);
   document.body.appendChild(overlay);
 
@@ -685,7 +685,7 @@ export function bootNetplay(
     roomsEl.replaceChildren();
     if (rooms.length === 0) {
       const empty = document.createElement('div');
-      empty.style.cssText = 'opacity:.5;font-size:13px';
+      empty.style.cssText = 'opacity:.6;font-size:13px';
       empty.textContent = 'no open rooms — create one';
       roomsEl.appendChild(empty);
       return;

@@ -151,3 +151,6 @@ packages/server/crack-attack.db*
 # Temporary git worktrees created by coding agents (e.g. Claude Code's isolated
 # subagents); never part of the repo.
 .claude/worktrees/
+
+# shotbox accessibility audit reports (tools/screenshots a11y)
+/tools/screenshots/a11y-report/
